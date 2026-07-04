@@ -1,0 +1,110 @@
+/**
+ * GlobTool - 文件搜索工具
+ *
+ * 职责：
+ * 1. 根据模式（pattern）搜索文件
+ * 2. 支持通配符（*、**、?）
+ * 3. 返回匹配的文件路径列表
+ *
+ * 使用场景：
+ * - 查找特定类型的文件（如 *.ts、*.json）
+ * - 查找特定目录下的文件
+ * - 查找符合命名规则的文件
+ *
+ * Glob 模式说明：
+ * - * : 匹配任意字符（不包括 /）
+ * - ** : 匹配任意目录层级
+ * - ? : 匹配单个字符
+ * - [abc] : 匹配 a、b 或 c
+ *
+ * 示例：
+ * - *.ts : 所有 TypeScript 文件
+ * - src/**/*.ts : src 目录下所有 TypeScript 文件
+ * - test/*.test.ts : test 目录下的测试文件
+ */
+
+import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
+import { IFileSystemAdapter } from '@/adapters/FileSystemAdapter'
+import * as path from 'path'
+
+/**
+ * GlobTool 参数
+ */
+interface GlobArgs {
+  /**
+   * 搜索模式
+   * 例如：*.ts, src/**/*.json
+   */
+  pattern: string
+
+  /**
+   * 搜索路径（可选）
+   * 默认：工作目录
+   */
+  path?: string
+}
+
+/**
+ * GlobTool 实现
+ */
+export class GlobTool extends Tool {
+  readonly name = 'glob'
+  readonly description = '根据模式搜索文件，支持通配符（*、**、?）'
+
+  /**
+   * 构造函数
+   */
+  constructor(
+    private cwd: string,
+    private fs: IFileSystemAdapter
+  ) {
+    super()
+  }
+
+  /**
+   * 获取工具定义
+   */
+  getDefinition(): ToolDefinition {
+    return {
+      name: this.name,
+      description: this.description,
+      input_schema: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: '文件搜索模式，支持通配符。例如：*.ts, src/**/*.json',
+          },
+          path: {
+            type: 'string',
+            description: '搜索路径（可选，默认为项目根目录）',
+          },
+        },
+        required: ['pattern'],
+      },
+    }
+  }
+
+  /**
+   * 执行文件搜索
+   */
+  async execute(args: GlobArgs): Promise<ToolResult> {
+    try {
+      const searchPath = args.path ? path.resolve(this.cwd, args.path) : this.cwd
+      const pattern = args.pattern
+
+      // 使用文件系统适配器搜索文件
+      const files = await this.fs.glob(pattern, searchPath)
+
+      // 格式化结果
+      const result = files.map((file) => path.relative(this.cwd, file)).join('\n')
+
+      return this.createSuccessResult(
+        `找到 ${files.length} 个匹配的文件：\n${result}`,
+        { files: files.map((f) => path.relative(this.cwd, f)) }
+      )
+    } catch (error) {
+      return this.createErrorResult(error)
+    }
+  }
+}

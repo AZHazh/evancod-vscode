@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+webview/node_modules/
+
+# Build outputs
+out/
+dist/
+webview/dist/
+
+# VSCode
+.vscode-test/
+*.vsix
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# TypeScript
+*.tsbuildinfo
+
+# Temp
+.tmp/
+temp/
