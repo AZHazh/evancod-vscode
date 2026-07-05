@@ -27,6 +27,18 @@ import { PlanModeManager } from '../plan/PlanModeManager'
 import { AgentCoordinator } from '../agent/AgentCoordinator'
 import type { AgentServerEvent } from '../../types/messages'
 
+/**
+ * 会改变"当前激活 Provider 快照"的消息类型。
+ * 处理完这些消息后需使 ChatService 缓存的 QueryEngine 失效。
+ * 只读消息（provider.list.request / provider.test / newapi.sync.start）不在其中。
+ */
+const PROVIDER_MUTATION_TYPES = new Set([
+  'provider.update',
+  'provider.activate',
+  'provider.delete',
+  'newapi.sync.import',
+])
+
 export class WebviewManager {
   /**
    * Webview 面板实例
@@ -160,6 +172,11 @@ export class WebviewManager {
           // Provider 相关消息
           if (message.type.startsWith('provider.') || message.type.startsWith('newapi.')) {
             await handleProviderMessage(message, this.providerService, webview)
+            // 修改配置 / 切换激活项 / 同步导入后，激活 Provider 的快照可能已变，
+            // 使 ChatService 缓存的 QueryEngine 失效，下次发消息按新协议重建。
+            if (PROVIDER_MUTATION_TYPES.has(message.type)) {
+              this.chatService.invalidateEngine()
+            }
             return
           }
 
@@ -179,7 +196,7 @@ export class WebviewManager {
             this.postMessage({
               type: 'session.restored',
               data: {
-                session,
+                session: await this.chatService.hydrateSessionImages(session),
                 sessions: this.chatService.getSessions(),
               },
             })
@@ -201,7 +218,7 @@ export class WebviewManager {
               this.postMessage({
                 type: 'chat.messages.update',
                 data: {
-                  session: this.chatService.getCurrentSession(),
+                  session: await this.chatService.hydrateSessionImages(this.chatService.getCurrentSession()),
                   messages: this.chatService.getCurrentSession()?.messages || [],
                 },
               })
@@ -288,7 +305,10 @@ export class WebviewManager {
             if (loaded) {
               this.postMessage({
                 type: 'session.restored',
-                data: { session: loaded, sessions: this.chatService.getSessions() },
+                data: {
+                  session: await this.chatService.hydrateSessionImages(loaded),
+                  sessions: this.chatService.getSessions(),
+                },
               })
               this.sendSessionList()
               this.postRuntimeState()
@@ -305,7 +325,7 @@ export class WebviewManager {
             this.postMessage({
               type: 'session.restored',
               data: {
-                session: this.chatService.getCurrentSession(),
+                session: await this.chatService.hydrateSessionImages(this.chatService.getCurrentSession()),
                 sessions: this.chatService.getSessions(),
               },
             })
@@ -359,6 +379,10 @@ export class WebviewManager {
             await this.handleBashCancel(message.data)
             break
 
+          case 'image.save':
+            await this.handleImageSave(message.data)
+            break
+
           default:
             // 未知消息类型，记录警告
             console.warn('Unknown message type:', message.type)
@@ -392,6 +416,52 @@ export class WebviewManager {
         type: 'error',
         data: { message: `打开文件选择框失败: ${message}` },
       })
+    }
+  }
+
+  /**
+   * 处理生成图片的“下载/保存”：弹出系统保存对话框，将工作区中的图片
+   * 复制到用户选择的位置；若源文件缺失则用 base64 兜底写出。
+   */
+  private async handleImageSave(data: { path?: string; name?: string; base64?: string; mime?: string }): Promise<void> {
+    try {
+      const workDir = this.chatService.getCurrentSession()?.workDir || ''
+      const defaultName = data.name || (data.path ? path.basename(data.path) : 'generated-image.png')
+
+      // 计算默认保存位置：优先用户工作区根目录
+      const defaultUri = workDir
+        ? vscode.Uri.file(path.join(workDir, defaultName))
+        : vscode.Uri.file(defaultName)
+
+      const target = await vscode.window.showSaveDialog({
+        defaultUri,
+        saveLabel: '保存图片',
+      })
+      if (!target) return // 用户取消
+
+      // 优先从磁盘源文件复制
+      if (data.path) {
+        const sourceAbs = path.isAbsolute(data.path) ? data.path : path.join(workDir, data.path)
+        const sourceUri = vscode.Uri.file(sourceAbs)
+        try {
+          await vscode.workspace.fs.copy(sourceUri, target, { overwrite: true })
+          vscode.window.showInformationMessage(`图片已保存到 ${target.fsPath}`)
+          return
+        } catch {
+          // 源文件不存在则走 base64 兜底
+        }
+      }
+
+      if (data.base64) {
+        await vscode.workspace.fs.writeFile(target, Buffer.from(data.base64, 'base64'))
+        vscode.window.showInformationMessage(`图片已保存到 ${target.fsPath}`)
+        return
+      }
+
+      vscode.window.showErrorMessage('保存失败：未找到可用的图片数据。')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误'
+      vscode.window.showErrorMessage(`保存图片失败: ${message}`)
     }
   }
 

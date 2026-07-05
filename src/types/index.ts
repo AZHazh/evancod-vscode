@@ -59,10 +59,32 @@ export interface AgentTaskNotification {
   worktreePath?: string
 }
 
+/**
+ * 生成图片的引用数据。
+ * - base64：仅运行时/展示使用，不写入会话持久化（体积大，且不应进入 LLM 上下文）。
+ * - path：相对工作区的磁盘路径，持久化后据此读盘重显。
+ */
+export interface GeneratedImageRef {
+  base64?: string
+  path?: string
+  mime: string
+  name?: string
+}
+
 export type AgentTranscriptBlock =
   | { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: AttachmentContext[] }
   | { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string }
   | { id: string; type: 'thinking'; content: string; timestamp: number }
+  | {
+      id: string
+      type: 'image_generation'
+      imageId: string
+      timestamp: number
+      isPending?: boolean
+      prompt?: string
+      /** 持久化时仅保留 path/mime/name，不含 base64 */
+      image?: GeneratedImageRef
+    }
   | {
       id: string
       type: 'tool_use'

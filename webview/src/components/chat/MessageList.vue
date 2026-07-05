@@ -50,7 +50,7 @@ const enhancedMessages = computed(() => {
       if (msg.type === 'tool_result') {
         const toolUse = messages.value.find(m => m.type === 'tool_use' && m.toolUseId === msg.toolUseId)
         if (toolUse && toolUse.type === 'tool_use') {
-          const shouldHide = ['read_file', 'grep', 'glob', 'edit_file', 'write_file'].includes(toolUse.toolName)
+          const shouldHide = ['read_file', 'grep', 'glob', 'edit_file', 'write_file', 'image_gen'].includes(toolUse.toolName)
           return !shouldHide
         }
       }
@@ -60,7 +60,7 @@ const enhancedMessages = computed(() => {
       // 将 tool_result 数据注入到对应的 tool_use 消息中
       if (msg.type === 'tool_use') {
         const result = toolResultMap.value.get(msg.toolUseId)
-        if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
+        if (result && ['read_file', 'grep', 'glob', 'image_gen'].includes(msg.toolName)) {
           return {
             ...msg,
             result: result.content,
@@ -72,7 +72,7 @@ const enhancedMessages = computed(() => {
     })
 })
 const showThinkingIndicator = computed(() => {
-  return chatStore.chatState !== 'idle' || enhancedMessages.value.some(message => message.type === 'tool_use' && message.isPending)
+  return chatStore.chatState !== 'idle' || enhancedMessages.value.some(message => message.type === 'tool_use' && message.isPending && message.toolName !== 'image_gen')
 })
 const streamingVerb = computed(() => {
   if (chatStore.chatState === 'waiting_permission') return '等待授权'

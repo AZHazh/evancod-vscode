@@ -189,7 +189,27 @@ export const useChatStore = defineStore('chat', () => {
     agentStore.restoreFromNotifications(agentTaskNotifications.value)
 
     if (currentSession.value.transcript?.length) {
-      uiMessages.value = reorderTranscript(currentSession.value.transcript) as UIMessage[]
+      // 保留内存中已有的图片 base64，避免 transcript 重建（读盘可能缺失）时闪掉刚展示的图片
+      const existingImageBase64 = new Map<string, string>()
+      for (const message of uiMessages.value) {
+        if (message.type === 'image_generation' && message.image?.base64) {
+          existingImageBase64.set(message.imageId, message.image.base64)
+        }
+      }
+
+      const reordered = reorderTranscript(currentSession.value.transcript) as UIMessage[]
+      uiMessages.value = reordered.map(message => {
+        if (message.type !== 'image_generation') return message
+        if (message.image?.base64) return message
+        const cached = existingImageBase64.get(message.imageId)
+        if (!cached) return message
+        return {
+          ...message,
+          image: message.image
+            ? { ...message.image, base64: cached }
+            : { base64: cached, mime: 'image/png' },
+        }
+      })
       tokenUsage.value = currentSession.value.tokenUsage || null
       return
     }
@@ -411,6 +431,11 @@ export const useChatStore = defineStore('chat', () => {
         upsertThinkingBlock(event.text)
         break
 
+      case 'image_generation':
+        upsertImageGeneration(event)
+        chatState.value = 'thinking'
+        break
+
       case 'system_notification':
         if (event.subtype === 'task_notification') {
           applyTaskNotification(event.data)
@@ -459,6 +484,32 @@ export const useChatStore = defineStore('chat', () => {
       type: 'thinking' as const,
       content: existing && existing.type === 'thinking' ? `${existing.content}${text}` : text,
       timestamp: existing?.timestamp ?? Date.now(),
+    }
+
+    if (existingIndex === -1) {
+      uiMessages.value.push(payload)
+      return
+    }
+
+    uiMessages.value.splice(existingIndex, 1, payload)
+  }
+
+  function upsertImageGeneration(event: Extract<AgentServerEvent, { type: 'image_generation' }>) {
+    const id = `imggen:${event.imageId}`
+    const existingIndex = uiMessages.value.findIndex(
+      message => message.type === 'image_generation' && message.imageId === event.imageId
+    )
+    const existing = existingIndex === -1 ? null : uiMessages.value[existingIndex]
+    const existingImage = existing?.type === 'image_generation' ? existing.image : undefined
+
+    const payload = {
+      id,
+      type: 'image_generation' as const,
+      imageId: event.imageId,
+      timestamp: existing?.timestamp ?? Date.now(),
+      isPending: event.phase === 'start',
+      prompt: event.prompt ?? (existing?.type === 'image_generation' ? existing.prompt : undefined),
+      image: event.phase === 'complete' ? event.image : existingImage,
     }
 
     if (existingIndex === -1) {

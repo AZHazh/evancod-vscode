@@ -30,6 +30,8 @@ import type { Message, ToolCall, ContentBlock, TokenUsage } from '../../types'
 import type { Provider } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { createApiClient } from '../services/api/AnthropicClient'
+import type { ImageStreamEvent } from '../services/api/AnthropicClient'
+import { saveGeneratedImages, timestampedImagePath } from '../tools/image/imageStorage'
 import { TaskManager } from '../../services/task/TaskManager'
 import { PlanModeManager } from '../../services/plan/PlanModeManager'
 import { AgentCoordinator } from '../../services/agent/AgentCoordinator'
@@ -60,6 +62,7 @@ import {
   NotebookEditTool,
   MCPTool,
   SkillTool,
+  ImageGenTool,
 } from '../tools'
 import { IFileSystemAdapter, VSCodeFileSystemAdapter } from '../../adapters/FileSystemAdapter'
 import { MCPConnectionManager } from '../../services/mcp/MCPConnectionManager'
@@ -299,6 +302,9 @@ export class QueryEngine {
 
       // Notebook 工具（Phase 6.5）
       new NotebookEditTool(),
+
+      // 图像生成工具（使用当前服务商凭证调用图像 API）
+      new ImageGenTool(this.config.cwd, this.config.provider),
     ]
 
     // 添加 Task 工具（如果提供了 TaskManager）
@@ -499,6 +505,8 @@ export class QueryEngine {
         const toolDefinitions = this.tools.map(tool => tool.getDefinition())
         let assistantContent = ''
 
+        const imageSavePromises: Promise<void>[] = []
+
         const response = await this.apiClient.sendMessageStream(
           this.config.messages,
           (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
@@ -523,8 +531,19 @@ export class QueryEngine {
             this.onMessageCallback?.('', true)
           },
           toolDefinitions,
-          { signal: this.abortController.signal }
+          {
+            signal: this.abortController.signal,
+            onImageEvent: (event: ImageStreamEvent) => {
+              if (this.cancelled) return
+              this.handleImageStreamEvent(event, imageSavePromises)
+            },
+          }
         )
+
+        // 等待原生生图的落盘 + complete 事件全部发出，避免 message_complete 抢先
+        if (imageSavePromises.length > 0) {
+          await Promise.all(imageSavePromises)
+        }
 
         this.throwIfCancelled()
         assistantContent = response.content
@@ -595,9 +614,54 @@ export class QueryEngine {
     }
   }
 
+  /**
+   * 处理原生生图流事件（路线二）。
+   * - start：立即发骨架事件（前端展示占位）。
+   * - complete：写盘（output/imagegen/），再发带 path + base64 的完成事件。
+   *   base64 仅供前端展示，不进入消息内容/LLM 上下文；持久化只保留 path。
+   */
+  private handleImageStreamEvent(event: ImageStreamEvent, savePromises: Promise<void>[]): void {
+    if (event.phase === 'start') {
+      this.onAgentEventCallback?.({
+        type: 'image_generation',
+        imageId: event.imageId,
+        phase: 'start',
+      })
+      return
+    }
+
+    // phase === 'complete'
+    if (!event.base64) return
+    const base64 = event.base64
+    const mime = event.mime || 'image/png'
+
+    const savePromise = (async () => {
+      let savedPath: string | undefined
+      let name: string | undefined
+      try {
+        const saved = await saveGeneratedImages(this.config.cwd, [{ base64, mime }], timestampedImagePath(mime))
+        if (saved.length > 0) {
+          savedPath = saved[0].path
+          name = saved[0].name
+        }
+      } catch (error) {
+        console.error('[QueryEngine] 保存生成图片失败:', error)
+      }
+
+      if (this.cancelled) return
+      this.onAgentEventCallback?.({
+        type: 'image_generation',
+        imageId: event.imageId,
+        phase: 'complete',
+        image: { base64, mime, path: savedPath, name },
+      })
+    })()
+
+    savePromises.push(savePromise)
+  }
+
   cancel(reason = 'Query cancelled'): void {
     if (this.cancelled) return
-    this.cancelled = true
     this.cancelReason = reason
     this.abortController.abort()
     this.toolExecutor?.cancelAll()

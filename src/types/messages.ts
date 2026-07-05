@@ -15,7 +15,7 @@
  * }
  */
 
-import type { Session, Message, Provider, TaskItem, AgentTaskNotification } from './index'
+import type { Session, Message, Provider, TaskItem, AgentTaskNotification, GeneratedImageRef } from './index'
 
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
 
@@ -59,6 +59,15 @@ export type AgentServerEvent =
       rule?: 'once' | 'always'
     }
   | { type: 'thinking'; text: string }
+  | {
+      type: 'image_generation'
+      /** 用于骨架→成图 upsert 的稳定 ID */
+      imageId: string
+      /** start：占位骨架；complete：图片就绪 */
+      phase: 'start' | 'complete'
+      prompt?: string
+      image?: GeneratedImageRef
+    }
   | { type: 'message_complete'; usage?: unknown }
   | { type: 'status'; state: string; verb?: string }
   | {

@@ -24,6 +24,7 @@ import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
 import { QueryEngine } from '../../core/engine/QueryEngine'
+import { readImageAsBase64 } from '../../core/tools/image/imageStorage'
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
@@ -246,6 +247,39 @@ export class ChatService {
     return session
   }
 
+  /**
+   * 读盘重显：把 transcript 中的 image_generation block 的磁盘 path 读成 base64，
+   * 返回浅拷贝会话（不修改原会话，避免把 base64 写回内存/磁盘）。
+   * 发送给 Webview 前调用。
+   */
+  async hydrateSessionImages(session: Session | null): Promise<Session | null> {
+    if (!session?.transcript?.length) return session
+
+    const imageBlocks = session.transcript.filter(
+      (block): block is Extract<AgentTranscriptBlock, { type: 'image_generation' }> =>
+        block.type === 'image_generation' && !!block.image?.path && !block.image?.base64
+    )
+    if (imageBlocks.length === 0) return session
+
+    const base64ByPath = new Map<string, string | undefined>()
+    await Promise.all(
+      imageBlocks.map(async block => {
+        const relPath = block.image!.path!
+        if (base64ByPath.has(relPath)) return
+        base64ByPath.set(relPath, await readImageAsBase64(session.workDir, relPath))
+      })
+    )
+
+    const transcript = session.transcript.map(block => {
+      if (block.type !== 'image_generation' || !block.image?.path || block.image.base64) return block
+      const base64 = base64ByPath.get(block.image.path)
+      if (!base64) return block
+      return { ...block, image: { ...block.image, base64 } }
+    })
+
+    return { ...session, transcript }
+  }
+
   deleteSession(sessionId: string): void {
     this.sessions = this.sessions.filter(session => session.id !== sessionId)
     if (this.currentSessionId === sessionId) {
@@ -345,6 +379,17 @@ export class ChatService {
 
   notifyTaskList(): void {
     this.taskManager.notifyTaskList()
+  }
+
+  /**
+   * 使缓存的 QueryEngine 失效
+   *
+   * QueryEngine 在构造时固化了当前激活 Provider 的快照（含 apiFormat）。
+   * 当 Provider 配置被修改或切换激活项后，必须调用此方法，
+   * 否则下次发消息会复用旧快照，导致仍走旧协议端点。
+   */
+  invalidateEngine(): void {
+    this.queryEngine = undefined
   }
 
   /**
@@ -827,6 +872,35 @@ export class ChatService {
           content: `${existing?.content || ''}${event.text}`,
           timestamp: existing?.timestamp || now,
         })
+        break
+      }
+
+      case 'image_generation': {
+        const blockId = `imggen:${event.imageId}`
+        if (event.phase === 'start') {
+          this.appendOrUpdateTranscript(session, {
+            id: blockId,
+            type: 'image_generation',
+            imageId: event.imageId,
+            timestamp: now,
+            isPending: true,
+            prompt: event.prompt,
+          })
+        } else {
+          // 持久化只保留 path/mime/name，剔除 base64（体积大，重开时读盘还原）
+          const image = event.image
+            ? { path: event.image.path, mime: event.image.mime, name: event.image.name }
+            : undefined
+          this.appendOrUpdateTranscript(session, {
+            id: blockId,
+            type: 'image_generation',
+            imageId: event.imageId,
+            timestamp: now,
+            isPending: false,
+            prompt: event.prompt,
+            image,
+          })
+        }
         break
       }
 

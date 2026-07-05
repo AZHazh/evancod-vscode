@@ -18,6 +18,7 @@ interface MessageGroup {
     toolUse: UIMessage
     toolResult?: UIMessage
   }>
+  images: UIMessage[]
   assistantTexts: UIMessage[]
   permissionRequests: UIMessage[]
 }
@@ -38,6 +39,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
       currentGroup = {
         user: block,
         tools: [],
+        images: [],
         assistantTexts: [],
         permissionRequests: [],
       }
@@ -48,6 +50,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
       // 没有用户消息，创建一个空组（边缘情况）
       currentGroup = {
         tools: [],
+        images: [],
         assistantTexts: [],
         permissionRequests: [],
       }
@@ -80,6 +83,10 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
 
       case 'assistant_text':
         currentGroup.assistantTexts.push(block)
+        break
+
+      case 'image_generation':
+        currentGroup.images.push(block)
         break
 
       case 'permission_request':
@@ -125,7 +132,12 @@ export function flattenGroups(groups: MessageGroup[]): UIMessage[] {
       }
     }
 
-    // 5. 助手文本（最终回答）
+    // 5. 生成图片（在最终回答之前展示）
+    for (const image of group.images) {
+      result.push(image)
+    }
+
+    // 6. 助手文本（最终回答）
     for (const text of group.assistantTexts) {
       result.push(text)
     }

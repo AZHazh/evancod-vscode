@@ -78,6 +78,17 @@ export interface AttachmentContext {
   inline?: boolean
 }
 
+/**
+ * 生成图片引用（与 extension 侧 GeneratedImageRef 保持一致）。
+ * base64 仅运行时使用；path 用于持久化后读盘重显。
+ */
+export interface GeneratedImageRef {
+  base64?: string
+  path?: string
+  mime: string
+  name?: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -182,6 +193,15 @@ export type UIMessage =
       plan: Plan
       timestamp: number
     }
+  | {
+      id: string
+      type: 'image_generation'
+      imageId: string
+      timestamp: number
+      isPending?: boolean
+      prompt?: string
+      image?: GeneratedImageRef
+    }
 
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
 
@@ -252,6 +272,13 @@ export type AgentServerEvent =
       description?: string
     }
   | { type: 'thinking'; text: string }
+  | {
+      type: 'image_generation'
+      imageId: string
+      phase: 'start' | 'complete'
+      prompt?: string
+      image?: GeneratedImageRef
+    }
   | { type: 'message_complete'; usage?: unknown }
   | { type: 'status'; state: string; verb?: string }
   | {

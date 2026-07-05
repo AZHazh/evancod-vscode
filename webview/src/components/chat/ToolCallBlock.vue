@@ -2,6 +2,8 @@
 import { computed, ref } from 'vue'
 import DiffViewer from '@/components/diff/DiffViewer.vue'
 import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
+import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
+import { base64ToDataUrl } from '@/utils/imageAttachments'
 import type { BashRuntimeState, AgentTaskNotification } from '@/types'
 
 const props = defineProps<{
@@ -49,6 +51,7 @@ const mcpTool = computed(() => textValue(inputRecord.value?.tool))
 const mcpUri = computed(() => textValue(inputRecord.value?.uri))
 const skillName = computed(() => textValue(inputRecord.value?.skill))
 const skillArgs = computed(() => textValue(inputRecord.value?.args))
+const imagePrompt = computed(() => textValue(inputRecord.value?.prompt))
 const bashStatus = computed(() => props.bash?.status || (props.isPending ? 'running' : 'completed'))
 const notificationStatus = computed(() => props.notification?.status)
 const notificationText = computed(() => props.notification?.summary || props.notification?.result || '')
@@ -72,6 +75,7 @@ const title = computed(() => {
     ask_user_question: 'Ask',
     mcp: 'MCP',
     skill: 'Skill',
+    image_gen: 'Image',
   }
 
   return labels[props.toolName] || props.toolName
@@ -87,6 +91,7 @@ const iconType = computed(() => {
   if (props.toolName === 'agent') return 'agent'
   if (props.toolName === 'skill') return 'skill'
   if (props.toolName === 'mcp') return 'mcp'
+  if (props.toolName === 'image_gen') return 'image'
   if (props.toolName === 'ask_user_question') return 'ask'
   return 'default'
 })
@@ -98,6 +103,7 @@ const summary = computed(() => {
   if (mcpTool.value) return mcpTool.value
   if (mcpAction.value) return mcpAction.value
   if (skillName.value) return skillName.value
+  if (imagePrompt.value) return truncate(imagePrompt.value)
   if (notificationText.value) return truncate(notificationText.value)
   return truncate(inputText.value.replace(/\s+/g, ' '))
 })
@@ -121,6 +127,47 @@ function formatResult(value: unknown): string {
 const hasResult = computed(() => {
   return props.result !== undefined && ['read_file', 'grep', 'glob'].includes(props.toolName)
 })
+
+/** 解析 image_gen 结果中的图片预览（base64） */
+interface GeneratedImage {
+  src: string
+  name: string
+}
+
+const generatedImages = computed<GeneratedImage[]>(() => {
+  if (props.toolName !== 'image_gen' || props.result === undefined) return []
+
+  let parsed: any = props.result
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed)
+    } catch {
+      return []
+    }
+  }
+
+  const previews = parsed?.metadata?._webviewOnly?.previews
+  if (!Array.isArray(previews)) return []
+
+  const images: GeneratedImage[] = []
+  for (const preview of previews) {
+    if (!preview?.base64) continue
+    images.push({
+      src: base64ToDataUrl(preview.base64, preview.mime),
+      name: preview.name || preview.path || 'image'
+    })
+  }
+  return images
+})
+
+const modalOpen = ref(false)
+const activeImageIndex = ref(0)
+
+function openImageAt(index: number) {
+  activeImageIndex.value = index
+  modalOpen.value = true
+}
+
 </script>
 
 <template>
@@ -170,6 +217,12 @@ const hasResult = computed(() => {
         <svg v-else-if="iconType === 'mcp'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
           <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Image icon -->
+        <svg v-else-if="iconType === 'image'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="5.5" cy="6.5" r="1" fill="currentColor"/>
+          <path d="M3 12l3.5-3.5L9 11l2-2 2 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <!-- Ask icon (chat bubble with question mark) -->
         <svg v-else-if="iconType === 'ask'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -236,6 +289,30 @@ const hasResult = computed(() => {
         <div v-if="skillName"><span class="summary-label">Skill</span><code>{{ skillName }}</code></div>
         <div v-if="skillArgs"><span class="summary-label">参数</span><code>{{ skillArgs }}</code></div>
         <pre class="tool-json compact">{{ inputText }}</pre>
+      </div>
+
+      <div v-else-if="toolName === 'image_gen'" class="tool-summary vertical">
+        <div v-if="imagePrompt"><span class="summary-label">提示词</span><code>{{ imagePrompt }}</code></div>
+        <div v-if="generatedImages.length > 0" class="image-gen-grid" :class="{ single: generatedImages.length === 1 }">
+          <button
+            v-for="(image, index) in generatedImages"
+            :key="`${image.name}-${index}`"
+            type="button"
+            class="image-gen-card"
+            @click="openImageAt(index)"
+          >
+            <img :src="image.src" :alt="image.name" loading="lazy" />
+            <span class="image-gen-name">{{ image.name }}</span>
+          </button>
+        </div>
+        <pre v-else class="tool-json compact">{{ inputText }}</pre>
+
+        <ImageGalleryModal
+          v-if="generatedImages.length > 0"
+          v-model="modalOpen"
+          :images="generatedImages"
+          :initial-index="activeImageIndex"
+        />
       </div>
 
       <div v-else-if="toolName === 'agent'" class="tool-summary vertical">
@@ -415,6 +492,52 @@ code,
 
 .tool-json.compact {
   max-height: 160px;
+}
+
+.image-gen-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.image-gen-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.image-gen-card {
+  position: relative;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
+  border-radius: var(--chat-radius-md);
+  background: var(--chat-color-surface-container-low);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--chat-color-primary, var(--chat-color-outline)) 50%, transparent);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+  }
+
+  img {
+    display: block;
+    width: 100%;
+    max-height: 240px;
+    object-fit: cover;
+  }
+}
+
+.image-gen-name {
+  display: block;
+  overflow: hidden;
+  padding: 4px 8px;
+  color: var(--chat-color-text-tertiary);
+  font-family: var(--chat-font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-result-container {

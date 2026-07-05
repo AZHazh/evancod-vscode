@@ -9,6 +9,7 @@ import ToolResultBlock from './ToolResultBlock.vue'
 import PermissionRequestBlock from './PermissionRequestBlock.vue'
 import PlanApproval from '@/components/plan/PlanApproval.vue'
 import InlineImageGallery from './InlineImageGallery.vue'
+import GeneratedImageBlock from './GeneratedImageBlock.vue'
 import AgentCard from './AgentCard.vue'
 
 const props = defineProps<{
@@ -142,6 +143,13 @@ async function copyMessage() {
         @reject="rejectPlan"
       />
     </div>
+
+    <GeneratedImageBlock
+      v-else-if="message.type === 'image_generation'"
+      :is-pending="message.isPending"
+      :prompt="message.prompt"
+      :image="message.image"
+    />
   </div>
 </template>
 

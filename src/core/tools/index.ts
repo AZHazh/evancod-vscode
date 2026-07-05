@@ -51,3 +51,6 @@ export { NotebookEditTool } from './notebook/NotebookEditTool'
 // MCP 和 Skill 工具（Phase 7）
 export { MCPTool } from './mcp/MCPTool'
 export { SkillTool } from './skill/SkillTool'
+
+// 图像生成工具
+export { ImageGenTool } from './image/ImageGenTool'

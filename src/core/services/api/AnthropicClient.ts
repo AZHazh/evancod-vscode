@@ -15,6 +15,20 @@ export interface ApiClientConfig {
 
 export type StreamCallback = (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => void
 
+/**
+ * 原生生图事件（路线二：图片走独立通道，不进入文本内容/LLM 上下文）。
+ * - start：上游开始生成图片（image_generation_call 出现），前端可展示骨架图。
+ * - complete：图片就绪，携带 base64 + mime。
+ */
+export interface ImageStreamEvent {
+  imageId: string
+  phase: 'start' | 'complete'
+  base64?: string
+  mime?: string
+}
+
+export type ImageStreamCallback = (event: ImageStreamEvent) => void
+
 export interface ApiClientResponse {
   content: string
   toolCalls?: any[]
@@ -23,6 +37,8 @@ export interface ApiClientResponse {
 
 export interface ApiClientOptions {
   signal?: AbortSignal
+  /** 原生生图事件回调（目前仅 OpenAI Responses 路径产生） */
+  onImageEvent?: ImageStreamCallback
 }
 
 interface ApiClient {
@@ -405,6 +421,27 @@ export class OpenAIResponsesClient implements ApiClient {
     let buffer = ''
     let fullContent = ''
 
+    // 原生生图状态：Responses 流不发送独立的 completed 事件，
+    // 以最后一帧 partial_image 作为最终图片，在遇到文本输出或流结束时落定。
+    let pendingImageId: string | undefined
+    let pendingImageB64: string | undefined
+    let pendingImageMime = 'image/png'
+    let imageSeq = 0
+
+    const flushImage = () => {
+      if (pendingImageId && pendingImageB64) {
+        options?.onImageEvent?.({
+          imageId: pendingImageId,
+          phase: 'complete',
+          base64: pendingImageB64,
+          mime: pendingImageMime,
+        })
+      }
+      pendingImageId = undefined
+      pendingImageB64 = undefined
+      pendingImageMime = 'image/png'
+    }
+
     while (true) {
       const { value, done } = await reader.read()
       throwIfAborted(options?.signal)
@@ -421,14 +458,61 @@ export class OpenAIResponsesClient implements ApiClient {
         const data = line.slice(5).trim()
         if (!data || data === '[DONE]') continue
 
-        const event = JSON.parse(data)
-        const delta = event.delta || event.text || ''
-        if (typeof delta === 'string' && delta) {
-          fullContent += delta
-          onStream(delta, 'delta')
+        let event: any
+        try {
+          event = JSON.parse(data)
+        } catch {
+          continue
         }
+
+        const type: string = typeof event.type === 'string' ? event.type : ''
+
+        // === 原生生图：image_generation_call 生命周期 ===
+        if (type === 'response.output_item.added' && event.item?.type === 'image_generation_call') {
+          // 多图场景：新图开始前先落定上一张
+          flushImage()
+          pendingImageId = `imggen-${imageSeq++}-${Date.now()}`
+          pendingImageB64 = undefined
+          pendingImageMime = 'image/png'
+          options?.onImageEvent?.({ imageId: pendingImageId, phase: 'start' })
+          continue
+        }
+
+        if (type === 'response.image_generation_call.partial_image') {
+          const b64 = typeof event.partial_image_b64 === 'string' ? event.partial_image_b64 : undefined
+          if (b64) {
+            // 保留最后一帧作为最终图片
+            pendingImageB64 = b64
+            if (typeof event.output_format === 'string' && event.output_format) {
+              pendingImageMime = `image/${event.output_format.toLowerCase()}`
+            }
+          }
+          // 未拿到 imageId（如缺 added 事件）时兜底补发 start
+          if (!pendingImageId) {
+            pendingImageId = `imggen-${imageSeq++}-${Date.now()}`
+            options?.onImageEvent?.({ imageId: pendingImageId, phase: 'start' })
+          }
+          continue
+        }
+
+        // 文本输出开始/增量，说明生图阶段结束，先落定图片
+        if (type === 'response.output_text.delta') {
+          flushImage()
+          const delta = typeof event.delta === 'string' ? event.delta : ''
+          if (delta) {
+            fullContent += delta
+            onStream(delta, 'delta')
+          }
+          continue
+        }
+
+        // 其余事件（output_text.done / content_part.* / output_item.done 等）不重复累计文本，
+        // 避免 delta 与 done.text 双计。
       }
     }
+
+    // 流结束兜底：仅有图片、无后续文本时也要落定
+    flushImage()
 
     onStream('', 'end')
     return { content: fullContent }

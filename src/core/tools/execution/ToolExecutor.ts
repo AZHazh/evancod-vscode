@@ -66,10 +66,13 @@ export class ToolExecutor {
     try {
       this.activeToolUseIds.add(id)
       const toolResult = await this.executeTool(tool, name, id, executionInput)
-      const content = this.formatToolResultContent(toolResult)
-      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: !toolResult.success })
+      // 发送给前端的内容保留完整 metadata（含仅供 Webview 的预览数据，如图片 base64）
+      const webviewContent = this.formatToolResultContent(toolResult, { forWebview: true })
+      // 回灌给 LLM 的内容剔除 _webviewOnly，避免大体积数据（如 base64 图片）灌入模型上下文
+      const llmContent = this.formatToolResultContent(toolResult, { forWebview: false })
+      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success })
       this.callbacks.notifyTaskListChange(name)
-      return { toolCallId: id, toolName: name, content }
+      return { toolCallId: id, toolName: name, content: llmContent }
     } catch (error) {
       const content = `Error: ${error instanceof Error ? error.message : '未知错误'}`
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true })
@@ -155,13 +158,19 @@ export class ToolExecutor {
     return typeof value === type
   }
 
-  private formatToolResultContent(toolResult: ToolResult): string {
+  private formatToolResultContent(toolResult: ToolResult, options?: { forWebview?: boolean }): string {
     if (toolResult.metadata) {
+      let metadata = toolResult.metadata
+      // 回灌 LLM 时剔除 _webviewOnly（仅供前端展示的大体积数据，如图片 base64）
+      if (!options?.forWebview && metadata._webviewOnly !== undefined) {
+        const { _webviewOnly, ...rest } = metadata
+        metadata = rest
+      }
       return JSON.stringify({
         success: toolResult.success,
         content: toolResult.content,
         error: toolResult.error,
-        metadata: toolResult.metadata,
+        metadata,
       })
     }
 
