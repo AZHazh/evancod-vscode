@@ -142,6 +142,7 @@ export const useChatStore = defineStore('chat', () => {
         tokenUsage: existing?.tokenUsage,
         compactSummary: existing?.compactSummary,
         attachments: existing?.attachments,
+        messageCount: existing?.messageCount ?? existing?.messages?.length ?? 0,
       })
     }
     return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt)
@@ -153,6 +154,10 @@ export const useChatStore = defineStore('chat', () => {
       agentTaskNotifications.value = {}
       return
     }
+
+    // 性能优化：如果是追加模式且已有消息，只处理新增的部分
+    const existingCount = uiMessages.value.filter(m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')).length
+    const isAppendMode = preserveRuntime && existingCount > 0 && currentSession.value.messages.length > existingCount
 
     // 合并 agentTaskNotifications，保留本地已有的通知（避免被后端旧数据覆盖）
     const incomingNotifications = currentSession.value.agentTaskNotifications || {}
@@ -223,7 +228,17 @@ export const useChatStore = defineStore('chat', () => {
       : new Map<string, Extract<UIMessage, { type: 'tool_use' }>>()
 
     const nextMessages: UIMessage[] = []
-    for (const message of currentSession.value.messages) {
+
+    // 性能优化：追加模式时，复用现有消息
+    let startIndex = 0
+    if (isAppendMode) {
+      // 复用已有的消息（除了临时消息）
+      nextMessages.push(...uiMessages.value.filter(m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')))
+      startIndex = existingCount
+    }
+
+    for (let i = startIndex; i < currentSession.value.messages.length; i++) {
+      const message = currentSession.value.messages[i]
       if (message.role === 'user') {
         nextMessages.push({
           id: message.id,

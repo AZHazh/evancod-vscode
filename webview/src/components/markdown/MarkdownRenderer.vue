@@ -67,10 +67,9 @@ const renderedHtml = ref('')
 const isRendering = ref(false)
 
 /**
- * 配置 marked
+ * 配置 marked（每个组件实例独立配置，避免全局状态污染）
  */
 onMounted(() => {
-  configureMarked()
   renderMarkdown()
 })
 
@@ -82,65 +81,54 @@ watch(() => props.content, () => {
 })
 
 /**
- * 配置 Marked 解析器
- */
-function configureMarked() {
-  // 设置选项
-  marked.setOptions({
-    // 启用 GitHub Flavored Markdown
-    gfm: true,
-    // 启用换行符转换
-    breaks: true,
-  })
-
-  // 自定义渲染器
-  const renderer = new marked.Renderer()
-
-  // 自定义代码块渲染
-  renderer.code = ({ text, lang }) => {
-    const language = lang || 'plaintext'
-    const highlighted = props.enableHighlight ? escapeHtml(text) : escapeHtml(text)
-
-    // 添加复制按钮
-    const copyButton = props.showCopyButton
-      ? `<button class="copy-btn" data-code="${escapeHtml(text)}" onclick="copyCode(this)">Copy</button>`
-      : ''
-
-    return `
-      <div class="code-block">
-        <div class="code-header">
-          <span class="code-lang">${escapeHtml(language)}</span>
-          ${copyButton}
-        </div>
-        <pre><code class="language-${escapeHtml(language)}">${highlighted}</code></pre>
-      </div>
-    `
-  }
-
-  // 自定义链接渲染（安全处理）
-  renderer.link = ({ href, title, tokens }) => {
-    const text = tokens.map(token => 'raw' in token ? token.raw : '').join('')
-    // 只允许 http/https 链接
-    if (!href.startsWith('http://') && !href.startsWith('https://')) {
-      return text
-    }
-
-    const titleAttr = title ? ` title="${escapeHtml(title)}"` : ''
-    return `<a href="${escapeHtml(href)}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
-  }
-
-  marked.use({ renderer })
-}
-
-/**
  * 渲染 Markdown
  */
 function renderMarkdown() {
   isRendering.value = true
 
   try {
-    // 解析 Markdown
-    renderedHtml.value = marked.parse(props.content) as string
+    // 每次渲染时创建独立的 renderer，避免实例间状态污染
+    const renderer = new marked.Renderer()
+
+    // 自定义代码块渲染
+    renderer.code = ({ text, lang }) => {
+      const language = lang || 'plaintext'
+      const highlighted = props.enableHighlight ? escapeHtml(text) : escapeHtml(text)
+
+      // 添加复制按钮（基于当前实例的 props）
+      const copyButton = props.showCopyButton
+        ? `<button class="copy-btn" data-code="${escapeHtml(text)}" onclick="copyCode(this)">复制</button>`
+        : ''
+
+      return `
+        <div class="code-block">
+          <div class="code-header">
+            <span class="code-lang">${escapeHtml(language)}</span>
+            ${copyButton}
+          </div>
+          <pre><code class="language-${escapeHtml(language)}">${highlighted}</code></pre>
+        </div>
+      `
+    }
+
+    // 自定义链接渲染（安全处理）
+    renderer.link = ({ href, title, tokens }) => {
+      const text = tokens.map(token => 'raw' in token ? token.raw : '').join('')
+      // 只允许 http/https 链接
+      if (!href.startsWith('http://') && !href.startsWith('https://')) {
+        return text
+      }
+
+      const titleAttr = title ? ` title="${escapeHtml(title)}"` : ''
+      return `<a href="${escapeHtml(href)}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+    }
+
+    // 解析 Markdown（使用实例级 renderer）
+    renderedHtml.value = marked.parse(props.content, {
+      gfm: true,
+      breaks: true,
+      renderer,
+    }) as string
   } catch (error) {
     console.error('Markdown 渲染失败:', error)
     renderedHtml.value = `<p class="error">渲染失败: ${error}</p>`

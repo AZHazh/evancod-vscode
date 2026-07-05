@@ -11,6 +11,7 @@
  * - 使用 VSCode 的 ExtensionContext.globalState
  * - 自动保存（每次消息后）
  * - 延迟写入（防止频繁 I/O）
+ * - 增量持久化（只保存变更会话）
  *
  * 数据结构：
  * {
@@ -87,6 +88,11 @@ export class SessionPersistenceService {
   private config: Required<PersistenceConfig>
 
   /**
+   * 性能优化：缓存上次保存的会话数据快照，用于增量比对
+   */
+  private lastSavedSnapshot?: Map<string, string>
+
+  /**
    * 构造函数
    *
    * @param context - VSCode 扩展上下文
@@ -151,18 +157,67 @@ export class SessionPersistenceService {
   }
 
   /**
-   * 立即保存
+   * 立即保存（增量优化版本）
    */
   private async saveImmediate(data: SessionData): Promise<void> {
     try {
       // 限制会话数量
       const limited = this.limitSessions(data)
 
+      // 性能优化：增量持久化 - 只序列化变更的会话
+      const currentSnapshot = new Map<string, string>()
+      const changedSessions: Record<string, Session> = {}
+      let hasChanges = false
+
+      for (const [id, session] of Object.entries(limited.sessions)) {
+        // 创建会话的轻量级快照（仅包含关键变更字段）
+        const snapshot = this.createSessionSnapshot(session)
+        currentSnapshot.set(id, snapshot)
+
+        // 比对快照，只保存变更的会话
+        if (!this.lastSavedSnapshot || this.lastSavedSnapshot.get(id) !== snapshot) {
+          changedSessions[id] = session
+          hasChanges = true
+        }
+      }
+
+      // 检测删除的会话
+      if (this.lastSavedSnapshot) {
+        for (const oldId of this.lastSavedSnapshot.keys()) {
+          if (!currentSnapshot.has(oldId)) {
+            hasChanges = true
+            break
+          }
+        }
+      }
+
+      // 如果没有变更且 currentSessionId 也没变，跳过保存
+      if (!hasChanges && this.lastSavedSnapshot &&
+          limited.currentSessionId === (await this.context.globalState.get<SessionData>(this.STORAGE_KEY))?.currentSessionId) {
+        return
+      }
+
       // 保存到 globalState
       await this.context.globalState.update(this.STORAGE_KEY, limited)
+
+      // 更新快照
+      this.lastSavedSnapshot = currentSnapshot
     } catch (error) {
       console.error('保存会话失败:', error)
     }
+  }
+
+  /**
+   * 创建会话快照（用于增量比对）
+   * 只包含关键字段的哈希
+   */
+  private createSessionSnapshot(session: Session): string {
+    return JSON.stringify({
+      updatedAt: session.updatedAt,
+      messageCount: session.messageCount ?? session.messages.length,
+      transcriptLength: session.transcript?.length ?? 0,
+      name: session.name,
+    })
   }
 
   /**

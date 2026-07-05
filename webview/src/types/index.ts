@@ -130,6 +130,8 @@ export interface Session {
   tokenUsage?: TokenUsage
   compactSummary?: string
   attachments?: AttachmentContext[]
+  // 性能优化：缓存消息数量，避免每次遍历计算
+  messageCount?: number
 }
 
 export interface UIAttachment {

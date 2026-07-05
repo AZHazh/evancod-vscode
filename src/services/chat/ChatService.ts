@@ -121,6 +121,10 @@ export class ChatService {
     for (const session of this.sessions) {
       this.expirePendingTranscript(session)
       this.taskNotificationQueue.restore(session)
+      // 性能优化：初始化时计算并缓存消息数量
+      if (session.messageCount === undefined) {
+        session.messageCount = session.messages.length
+      }
     }
   }
 
@@ -200,6 +204,7 @@ export class ChatService {
         effortLevel: this.effortLevel,
         permissionMode: this.permissionMode,
       },
+      messageCount: 0,
     }
 
     // 添加到会话列表
@@ -434,6 +439,9 @@ export class ChatService {
       await this.initializeQueryEngine()
     }
 
+    // 记录是否为本会话第一条用户消息（用于用首条消息内容作为会话标题）
+    const isFirstUserMessage = session.messages.length === 0
+
     // 2. 创建用户消息，先更新 UI；最终以 QueryEngine 的完整消息历史为准
     const userMessage: Message = {
       id: this.generateId(),
@@ -444,6 +452,14 @@ export class ChatService {
       attachments: attachmentContexts,
     }
     session.messages.push(userMessage)
+
+    // 首条消息：用对话内容作为会话标题（替换默认的创建时间标题）
+    if (isFirstUserMessage) {
+      const title = commandResult.content.trim().replace(/\s+/g, ' ')
+      if (title) {
+        session.name = title.length > 100 ? title.slice(0, 100) : title
+      }
+    }
     session.attachments = attachmentContexts
     this.appendOrUpdateTranscript(session, {
       id: userMessage.id,
@@ -453,6 +469,7 @@ export class ChatService {
       attachments: attachmentContexts,
     })
     session.updatedAt = Date.now()
+    session.messageCount = session.messages.length
 
     // 通知外部（用于更新 UI）
     if (this.messageCallback) {
@@ -469,6 +486,7 @@ export class ChatService {
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
       session.messages = this.queryEngine!.getMessages()
       session.updatedAt = Date.now()
+      session.messageCount = session.messages.length
 
       const lastMessage = session.messages[session.messages.length - 1]
       if (lastMessage && this.messageCallback) {
@@ -495,6 +513,7 @@ export class ChatService {
         model: this.getCurrentModel(),
       })
       session.updatedAt = Date.now()
+      session.messageCount = session.messages.length
       this.saveSessions()
 
       if (this.messageCallback) {
@@ -533,6 +552,7 @@ export class ChatService {
       session.compactSummary = undefined
       this.queryEngine = undefined
       session.updatedAt = Date.now()
+      session.messageCount = 0
     }
 
     if (result.metadata?.action === 'new') {
@@ -562,6 +582,7 @@ export class ChatService {
         model: this.getCurrentModel(),
       })
       activeSession.updatedAt = Date.now()
+      activeSession.messageCount = activeSession.messages.length
     }
 
     if (this.messageCallback) {

@@ -38,7 +38,7 @@ const filteredSessions = computed(() => {
           @click="emit('select', session.id)"
         >
           <div class="title">{{ session.name }}</div>
-          <div class="meta">{{ formatRelativeTime(session.updatedAt) }} · {{ session.messages.length }} 条消息</div>
+          <div class="meta">{{ formatRelativeTime(session.updatedAt) }} · {{ session.messageCount ?? session.messages.length }} 条消息</div>
           <div class="path">{{ session.workDir }}</div>
         </button>
         <div v-if="!filteredSessions.length" class="empty">没有历史会话</div>

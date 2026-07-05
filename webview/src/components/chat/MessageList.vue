@@ -38,6 +38,10 @@ const toolResultMap = computed(() => {
   return map
 })
 
+// 性能优化：将需要隐藏的工具名称提取为常量
+const HIDDEN_TOOL_RESULTS = new Set(['read_file', 'grep', 'glob', 'edit_file', 'write_file', 'image_gen'])
+const RESULT_INJECTABLE_TOOLS = new Set(['read_file', 'grep', 'glob', 'image_gen'])
+
 // 增强的消息列表，将 tool_result 数据注入到 tool_use 中
 const enhancedMessages = computed(() => {
   return messages.value
@@ -46,12 +50,11 @@ const enhancedMessages = computed(() => {
       if ((msg.type === 'tool_use' || msg.type === 'tool_result') && msg.parentToolUseId && agentToolUseIds.value.has(msg.parentToolUseId)) {
         return false
       }
-      // 过滤掉 Read、Grep、Glob、Edit、Write 的 tool_result 消息
+      // 过滤掉特定工具的 tool_result 消息
       if (msg.type === 'tool_result') {
         const toolUse = messages.value.find(m => m.type === 'tool_use' && m.toolUseId === msg.toolUseId)
         if (toolUse && toolUse.type === 'tool_use') {
-          const shouldHide = ['read_file', 'grep', 'glob', 'edit_file', 'write_file', 'image_gen'].includes(toolUse.toolName)
-          return !shouldHide
+          return !HIDDEN_TOOL_RESULTS.has(toolUse.toolName)
         }
       }
       return true
@@ -60,7 +63,7 @@ const enhancedMessages = computed(() => {
       // 将 tool_result 数据注入到对应的 tool_use 消息中
       if (msg.type === 'tool_use') {
         const result = toolResultMap.value.get(msg.toolUseId)
-        if (result && ['read_file', 'grep', 'glob', 'image_gen'].includes(msg.toolName)) {
+        if (result && RESULT_INJECTABLE_TOOLS.has(msg.toolName)) {
           return {
             ...msg,
             result: result.content,
@@ -106,12 +109,24 @@ watch(scrollSignature, async () => {
   await scrollToLatest(false)
 })
 
+let scrollRaf = 0
+
 function handleScroll() {
-  const element = listRef.value
-  if (!element) return
-  const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight
-  isPinnedToBottom.value = distanceToBottom < 48
-  showBackToLatest.value = !isPinnedToBottom.value
+  // rAF 节流：滚动期间每帧最多同步一次状态，避免频繁读取布局属性触发强制重排
+  if (scrollRaf) return
+  scrollRaf = window.requestAnimationFrame(() => {
+    scrollRaf = 0
+    const element = listRef.value
+    if (!element) return
+    const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight
+    const pinned = distanceToBottom < 48
+    if (isPinnedToBottom.value !== pinned) {
+      isPinnedToBottom.value = pinned
+    }
+    if (showBackToLatest.value === pinned) {
+      showBackToLatest.value = !pinned
+    }
+  })
 }
 
 async function scrollToLatest(smooth = true) {
@@ -139,11 +154,14 @@ function estimateTokenCount(value: string) {
 onMounted(() => {
   void scrollToLatest(false)
 })
-onBeforeUnmount(() => window.clearInterval(timer))
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  if (scrollRaf) window.cancelAnimationFrame(scrollRaf)
+})
 </script>
 
 <template>
-  <section ref="listRef" class="chat-list" @scroll="handleScroll">
+  <section ref="listRef" class="chat-list" @scroll.passive="handleScroll">
     <div v-if="enhancedMessages.length === 0" class="empty-state">
       <div class="empty-icon">✦</div>
       <div class="empty-text">开始新对话</div>
@@ -154,6 +172,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       <MessageItem
         v-for="message in enhancedMessages"
         :key="message.id"
+        v-memo="[message.id, message]"
         :message="message"
       />
 
