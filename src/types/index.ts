@@ -169,6 +169,12 @@ export interface Provider {
   }
   autoCompactWindow?: number
   modelContextWindows?: Record<string, number>
+  /**
+   * 模型能力覆盖配置
+   * 用于让非 Claude 模型（经兼容代理）启用 thinking 等能力
+   * 例如：{ "gpt-4": ["thinking"], "deepseek-chat": ["thinking", "adaptive_thinking"] }
+   */
+  modelCapabilities?: Record<string, string[]>
   createdAt: string
   source?: 'manual' | 'newapi-sync'
 }

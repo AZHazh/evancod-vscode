@@ -173,7 +173,7 @@ export class WebviewManager {
             let session = this.chatService.getCurrentSession()
             if (!session) {
               console.log('[WebviewManager] No active session, creating new one')
-              session = this.chatService.createNewSession()
+              session = await this.chatService.createNewSession()
             }
 
             this.postMessage({
@@ -271,7 +271,7 @@ export class WebviewManager {
 
           case 'session.new': {
             // 创建新会话
-            const newSession = this.chatService.createNewSession()
+            const newSession = await this.chatService.createNewSession()
 
             // 通知 Webview 新会话已创建
             this.postMessage({

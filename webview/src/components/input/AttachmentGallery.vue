@@ -10,6 +10,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   removeAttachment: [id: string]
   removeReference: [id: string]
+  previewImage: [id: string]
 }>()
 </script>
 
@@ -20,7 +21,15 @@ const emit = defineEmits<{
       <button @click="emit('removeReference', reference.id)"><X /></button>
     </span>
     <span v-for="attachment in props.attachments" :key="attachment.id" class="attachment-chip">
-      <img v-if="attachment.type === 'image' && attachment.previewUrl" :src="attachment.previewUrl" alt="" />
+      <button
+        v-if="attachment.type === 'image' && attachment.previewUrl"
+        type="button"
+        class="attachment-thumb"
+        title="点击放大"
+        @click="emit('previewImage', attachment.id)"
+      >
+        <img :src="attachment.previewUrl" alt="" />
+      </button>
       <Paperclip v-else />
       {{ attachment.name }}
       <button @click="emit('removeAttachment', attachment.id)"><X /></button>
@@ -65,6 +74,15 @@ const emit = defineEmits<{
     color: var(--color-text-secondary);
     cursor: pointer;
     padding: 0;
+  }
+
+  .attachment-thumb {
+    border-radius: 4px;
+    line-height: 0;
+
+    &:hover img {
+      opacity: 0.85;
+    }
   }
 }
 

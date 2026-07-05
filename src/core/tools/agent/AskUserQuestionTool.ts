@@ -136,47 +136,55 @@ export class AskUserQuestionTool extends Tool {
       input_schema: {
         type: 'object',
         properties: {
-          question: {
-            type: 'string',
-            description:
-              '要问用户的问题，清晰、具体。例如："请选择认证方式"、"是否需要添加单元测试？"、"请问 API 的基础路径是什么？"'
-          },
-          options: {
+          questions: {
             type: 'array',
-            description:
-              '选项列表。每个选项包含标签和描述。应该提供 2-4 个选项，让用户容易选择。',
+            description: '要问用户的问题列表（1-4 个问题）。每个问题包含问题文本、选项列表等。',
             items: {
               type: 'object',
-              description: '选项对象，包含标签、描述和可选预览内容。',
               properties: {
-                label: {
-                  type: 'string',
-                  description: '选项标签，简短（1-3 个词），例如 "JWT"、"Session"、"是"、"否"'
-                },
-                description: {
+                question: {
                   type: 'string',
                   description:
-                    '选项详细描述，解释这个选项的含义、优缺点、影响等，帮助用户做出明智的选择'
+                    '要问用户的问题，清晰、具体。例如："请选择认证方式"、"是否需要添加单元测试？"、"请问 API 的基础路径是什么？"'
                 },
-                preview: {
+                header: {
                   type: 'string',
-                  description: '选项预览内容（可选），例如代码片段、配置示例等'
+                  description: '问题的简短标签（最多 12 字符），例如 "认证方式"、"测试"、"API 路径"'
+                },
+                options: {
+                  type: 'array',
+                  description:
+                    '选项列表。每个选项包含标签和描述。应该提供 2-4 个选项，让用户容易选择。',
+                  items: {
+                    type: 'object',
+                    description: '选项对象，包含标签、描述和可选预览内容。',
+                    properties: {
+                      label: {
+                        type: 'string',
+                        description: '选项标签，简短（1-3 个词），例如 "JWT"、"Session"、"是"、"否"'
+                      },
+                      description: {
+                        type: 'string',
+                        description:
+                          '选项详细描述，解释这个选项的含义、优缺点、影响等，帮助用户做出明智的选择'
+                      },
+                      preview: {
+                        type: 'string',
+                        description: '选项预览内容（可选），例如代码片段、配置示例等'
+                      }
+                    }
+                  } as any
+                },
+                multiSelect: {
+                  type: 'boolean',
+                  description:
+                    '是否允许用户选择多个选项。默认 false（单选）。如果选项不互斥，可以设置为 true。'
                 }
               }
-            }
-          },
-          allowMultiple: {
-            type: 'boolean',
-            description:
-              '是否允许用户选择多个选项。默认 false（单选）。如果选项不互斥，可以设置为 true。'
-          },
-          allowCustomInput: {
-            type: 'boolean',
-            description:
-              '是否允许用户自定义输入。默认 false。如果选项列表不够完整，或者需要用户输入特定值（如路径、名称），可以设置为 true。'
+            } as any
           }
         },
-        required: ['question', 'options']
+        required: ['questions']
       }
     }
   }
@@ -188,64 +196,82 @@ export class AskUserQuestionTool extends Tool {
    * @returns 执行结果
    */
   async execute(args: {
-    question: string
-    options: QuestionOption[]
-    allowMultiple?: boolean
-    allowCustomInput?: boolean
-    answer?: UserAnswer
+    questions: Array<{
+      question: string
+      header: string
+      options: QuestionOption[]
+      multiSelect?: boolean
+    }>
+    answers?: Record<string, UserAnswer>
   }): Promise<ToolResult> {
     try {
       // 参数验证
-      if (!args.question || args.question.trim().length === 0) {
-        return this.createErrorResult('question 不能为空')
+      if (!args.questions || args.questions.length === 0) {
+        return this.createErrorResult('questions 不能为空，至少需要一个问题')
       }
 
-      if (!args.options || args.options.length === 0) {
-        return this.createErrorResult('options 不能为空，至少需要一个选项')
+      if (args.questions.length > 4) {
+        return this.createErrorResult('questions 最多支持 4 个问题，请精简问题列表')
       }
 
-      if (args.options.length > 4) {
-        return this.createErrorResult('options 最多支持 4 个选项，请精简选项列表')
-      }
-
-      // 验证每个选项
-      for (let i = 0; i < args.options.length; i++) {
-        const option = args.options[i]
-        if (!option.label || option.label.trim().length === 0) {
-          return this.createErrorResult(`选项 ${i + 1} 的 label 不能为空`)
+      // 验证每个问题
+      for (let i = 0; i < args.questions.length; i++) {
+        const q = args.questions[i]
+        if (!q.question || q.question.trim().length === 0) {
+          return this.createErrorResult(`问题 ${i + 1} 的 question 不能为空`)
         }
-        if (!option.description || option.description.trim().length === 0) {
-          return this.createErrorResult(`选项 ${i + 1} 的 description 不能为空`)
+        if (!q.header || q.header.trim().length === 0) {
+          return this.createErrorResult(`问题 ${i + 1} 的 header 不能为空`)
+        }
+        if (!q.options || q.options.length === 0) {
+          return this.createErrorResult(`问题 ${i + 1} 的 options 不能为空，至少需要一个选项`)
+        }
+        if (q.options.length > 4) {
+          return this.createErrorResult(`问题 ${i + 1} 的 options 最多支持 4 个选项`)
+        }
+
+        // 验证选项
+        for (let j = 0; j < q.options.length; j++) {
+          const option = q.options[j]
+          if (!option.label || option.label.trim().length === 0) {
+            return this.createErrorResult(`问题 ${i + 1} 选项 ${j + 1} 的 label 不能为空`)
+          }
+          if (!option.description || option.description.trim().length === 0) {
+            return this.createErrorResult(`问题 ${i + 1} 选项 ${j + 1} 的 description 不能为空`)
+          }
         }
       }
 
-      const questionId = this.generateQuestionId()
-      const answer = args.answer
-      if (!answer) {
+      const answers = args.answers
+      if (!answers || Object.keys(answers).length === 0) {
         return this.createErrorResult('未收到用户回答')
       }
 
-      // 格式化用户回答
-      const selectedText =
-        answer.selectedOptions.length > 0
-          ? `选择: ${answer.selectedOptions.join(', ')}`
-          : '未选择任何选项'
+      // 格式化所有问题的回答
+      let content = '✅ 用户已回答\n\n'
 
-      const customText = answer.customInput ? `\n自定义输入: ${answer.customInput}` : ''
+      for (let i = 0; i < args.questions.length; i++) {
+        const q = args.questions[i]
+        const answer = answers[`question_${i}`]
 
-      const content = `✅ 用户已回答
+        if (!answer) {
+          content += `问题 ${i + 1}: ${q.question}\n未回答\n\n`
+          continue
+        }
 
-问题: ${args.question}
+        const selectedText =
+          answer.selectedOptions.length > 0
+            ? `选择: ${answer.selectedOptions.join(', ')}`
+            : '未选择任何选项'
 
-${selectedText}${customText}
+        const customText = answer.customInput ? `\n自定义输入: ${answer.customInput}` : ''
 
-提示: 根据用户的选择继续执行任务。`
+        content += `问题 ${i + 1}: ${q.question}\n${selectedText}${customText}\n\n`
+      }
 
-      return this.createSuccessResult(content, {
-        questionId,
-        selectedOptions: answer.selectedOptions,
-        customInput: answer.customInput
-      })
+      content += '提示: 根据用户的选择继续执行任务。'
+
+      return this.createSuccessResult(content, { answers })
     } catch (error) {
       return this.createErrorResult(error)
     }

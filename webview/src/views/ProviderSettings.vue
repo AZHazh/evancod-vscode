@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { Package, Plus, RefreshCw, Pencil, Trash2, Play } from 'lucide-vue-next'
 import { useVSCode } from '@/composables/useVSCode'
 import Button from '@/components/common/Button.vue'
+import Modal from '@/components/common/Modal.vue'
 import AddProviderModal from '@/components/provider/AddProviderModal.vue'
 import NewApiSyncModal from '@/components/provider/NewApiSyncModal.vue'
 
@@ -34,6 +35,8 @@ const showAddModal = ref(false)
 const editingProvider = ref<Provider | null>(null)
 const showNewApiSyncModal = ref(false)
 const newApiPreview = ref<any>(null)
+const deletingProvider = ref<Provider | null>(null)
+const showDeleteConfirm = computed(() => !!deletingProvider.value)
 
 onMounted(() => {
   loadProviders()
@@ -86,12 +89,24 @@ function handleEditProvider(provider: Provider) {
 function handleDeleteProvider(id: string) {
   const provider = providers.value.find(p => p.id === id)
   if (!provider) return
-  if (!confirm(`确定要删除服务商 "${provider.name}" 吗？`)) return
+  // VSCode webview 运行在未开启 allow-modals 的 sandbox iframe 中，
+  // 原生 confirm() 会被禁用并报错，因此改用应用内 Modal 组件确认。
+  deletingProvider.value = provider
+}
+
+function handleConfirmDelete() {
+  const provider = deletingProvider.value
+  if (!provider) return
 
   vscode.postMessage({
     type: 'provider.delete',
-    data: { id },
+    data: { id: provider.id },
   })
+  deletingProvider.value = null
+}
+
+function handleCancelDelete() {
+  deletingProvider.value = null
 }
 
 function handleActivateProvider(id: string) {
@@ -209,6 +224,19 @@ function handleModalClose() {
       @close="handleSyncClose"
       @success="handleSyncClose"
     />
+
+    <Modal
+      :model-value="showDeleteConfirm"
+      title="删除服务商"
+      size="small"
+      @update:model-value="handleCancelDelete"
+      @close="handleCancelDelete"
+      @confirm="handleConfirmDelete"
+    >
+      <p class="delete-confirm-text">
+        确定要删除服务商 “{{ deletingProvider?.name }}” 吗？此操作不可撤销。
+      </p>
+    </Modal>
   </div>
 </template>
 
@@ -353,5 +381,12 @@ function handleModalClose() {
 
 .empty-hint {
   font-size: 13px;
+}
+
+.delete-confirm-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
 }
 </style>

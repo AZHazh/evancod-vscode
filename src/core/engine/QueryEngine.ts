@@ -145,6 +145,12 @@ export interface QueryEngineConfig {
    * 工具权限模式
    */
   permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
+  /**
+   * 推理程度（可选）
+   * 用于决定是否启用思考模式及其 budget
+   */
+  effortLevel?: 'low' | 'medium' | 'high' | 'max'
 }
 
 /**
@@ -383,6 +389,7 @@ export class QueryEngine {
       model: this.config.model,
       systemPrompt: this.buildSystemPrompt(),
       verbose: this.config.verbose,
+      effortLevel: this.config.effortLevel,
     })
   }
 
@@ -494,10 +501,16 @@ export class QueryEngine {
 
         const response = await this.apiClient.sendMessageStream(
           this.config.messages,
-          (delta: string, type: 'start' | 'delta' | 'end') => {
+          (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
             if (this.cancelled) return
             if (type === 'start') {
               this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+              return
+            }
+
+            if (type === 'thinking') {
+              // 思考增量：单独走 thinking 事件，交由 UI 折叠展示
+              this.onAgentEventCallback?.({ type: 'thinking', text: delta })
               return
             }
 

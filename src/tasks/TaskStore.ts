@@ -7,9 +7,9 @@ export class TaskStore {
 
   constructor(
     context: vscode.ExtensionContext,
-    taskListId: string
+    sessionId: string
   ) {
-    this.taskListDir = vscode.Uri.joinPath(context.globalStorageUri, 'tasks', taskListId)
+    this.taskListDir = vscode.Uri.joinPath(context.globalStorageUri, 'tasks', sessionId)
   }
 
   async load(): Promise<TaskItem[]> {

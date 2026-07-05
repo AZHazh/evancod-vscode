@@ -58,9 +58,7 @@ export const usePlanStore = defineStore('plan', () => {
   // 方法
   function setPlan(plan: Plan) {
     currentPlan.value = plan
-    if (plan.state === 'planning') {
-      showApprovalDialog.value = true
-    }
+    showApprovalDialog.value = false
   }
 
   function approvePlan() {

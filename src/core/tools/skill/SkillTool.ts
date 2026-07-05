@@ -84,7 +84,10 @@ Skill 是预定义的提示词模板，用于完成特定任务。
       if (!skill) {
         const availableSkills = this.skillManager
           .listEnabledSkills()
-          .map((s) => `- ${s.metadata.name}: ${s.metadata.description}`)
+          .map((s) => {
+            const origin = s.source === 'workspace' ? '工作区' : '全局'
+            return `- ${s.metadata.name} [${origin}]: ${s.metadata.description}`
+          })
           .join('\n')
 
         return this.createSuccessResult(`Skill "${params.skill}" 未找到。
@@ -99,8 +102,11 @@ ${availableSkills || '无'}`)
       }
 
       // 构建返回内容
-      let content = `已加载 Skill: ${skill.metadata.name}\n\n`
+      const origin = skill.source === 'workspace' ? '工作区' : '全局'
+      let content = `已加载 Skill: ${skill.metadata.name}（${origin}）\n\n`
       content += `描述: ${skill.metadata.description}\n\n`
+      content += `技能目录: ${skill.skillDir}\n`
+      content += `（正文中引用的 scripts/、references/ 等相对路径均以此目录为基准）\n\n`
       content += `---\n\n${skill.content}`
 
       if (params.args) {

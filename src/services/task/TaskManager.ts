@@ -36,7 +36,8 @@ export class TaskManager {
   /** 工作区存储适配器 */
   private workspaceState: vscode.Memento
 
-  private readonly taskStore: TaskStore
+  /** 每个会话对应一个 TaskStore 实例 */
+  private taskStores: Map<string, TaskStore> = new Map()
 
   /** 内存中的任务列表 */
   private tasks: Map<string, TaskItem> = new Map()
@@ -60,7 +61,6 @@ export class TaskManager {
    */
   constructor(private context: vscode.ExtensionContext) {
     this.workspaceState = context.workspaceState
-    this.taskStore = new TaskStore(context, this.resolveTaskListId())
   }
 
   /**
@@ -75,10 +75,23 @@ export class TaskManager {
 
   setCurrentSession(sessionId: string | null): void {
     this.currentSessionId = sessionId
+
+    // 如果设置了新会话，确保该会话有对应的 TaskStore
+    if (sessionId && !this.taskStores.has(sessionId)) {
+      this.taskStores.set(sessionId, new TaskStore(this.context, sessionId))
+    }
   }
 
   getCurrentSessionId(): string | null {
     return this.currentSessionId
+  }
+
+  /**
+   * 获取当前会话的 TaskStore
+   */
+  private getCurrentTaskStore(): TaskStore | null {
+    if (!this.currentSessionId) return null
+    return this.taskStores.get(this.currentSessionId) || null
   }
 
   private isTaskInCurrentSession(task: TaskItem): boolean {
@@ -91,38 +104,32 @@ export class TaskManager {
     )
   }
 
-  private resolveTaskListId(): string {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]
-    if (!workspaceFolder) return 'default'
-
-    return Buffer.from(workspaceFolder.uri.fsPath).toString('base64url')
-  }
-
   /**
    * 加载任务列表
    *
-   * 从持久化存储中恢复任务
+   * 从持久化存储中恢复当前会话的任务
    *
    * @returns 任务列表
    */
   async load(): Promise<TaskItem[]> {
-    try {
-      let tasks = await this.taskStore.load()
+    const taskStore = this.getCurrentTaskStore()
+    if (!taskStore) {
+      console.warn('Cannot load tasks: no current session')
+      return []
+    }
 
-      if (!tasks.length) {
-        const legacyTaskList = this.workspaceState.get<TaskList>('tasks')
-        tasks = legacyTaskList?.tasks || []
-        if (tasks.length) {
-          await this.taskStore.saveTasks(tasks)
+    try {
+      const tasks = await taskStore.load()
+
+      // 只加载当前会话的任务到内存
+      this.tasks.clear()
+      for (const task of tasks) {
+        if (task.sessionId === this.currentSessionId) {
+          this.tasks.set(task.id, task)
         }
       }
 
-      this.tasks.clear()
-      for (const task of tasks) {
-        this.tasks.set(task.id, task)
-      }
-
-      return tasks
+      return Array.from(this.tasks.values())
     } catch (error) {
       console.error('Failed to load tasks:', error)
       return []
@@ -143,8 +150,13 @@ export class TaskManager {
     blockedBy?: string[]
     metadata?: Record<string, any>
   }): Promise<TaskItem> {
+    const taskStore = this.getCurrentTaskStore()
+    if (!taskStore) {
+      throw new Error('Cannot create task: no current session')
+    }
+
     // 生成唯一 ID
-    const id = await this.taskStore.nextTaskId()
+    const id = await taskStore.nextTaskId()
     const now = new Date().toISOString()
 
     // 验证 blockedBy 任务是否存在
@@ -458,9 +470,15 @@ export class TaskManager {
    * 立即持久化
    */
   private async saveImmediate(): Promise<void> {
+    const taskStore = this.getCurrentTaskStore()
+    if (!taskStore) {
+      console.warn('Cannot save tasks: no current session')
+      return
+    }
+
     try {
       const tasks = Array.from(this.tasks.values())
-      await this.taskStore.saveTasks(tasks)
+      await taskStore.saveTasks(tasks)
       await this.workspaceState.update('tasks', {
         tasks,
         lastUpdated: new Date().toISOString(),

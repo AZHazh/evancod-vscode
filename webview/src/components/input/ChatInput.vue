@@ -22,6 +22,7 @@ import SlashCommandMenu from './SlashCommandMenu.vue'
 import FileSearchMenu from './FileSearchMenu.vue'
 import AttachmentGallery from './AttachmentGallery.vue'
 import ComposerDropOverlay from './ComposerDropOverlay.vue'
+import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { useVSCode } from '@/composables/useVSCode'
 import type { EffortLevel, PermissionMode } from '@/stores/provider'
 import type { ComposerAttachment, FileSearchEntry, SlashCommand, WorkspaceReference } from '@/types'
@@ -39,6 +40,7 @@ import {
   fileToComposerAttachment,
   workspaceReferenceToPayload,
 } from '@/lib/composerAttachments'
+import { galleryImagesFromComposer } from '@/utils/imageAttachments'
 
 const chatStore = useChatStore()
 const providerStore = useProviderStore()
@@ -57,6 +59,8 @@ const atSelectedIndex = ref(0)
 const atTriggerStart = ref<number | null>(null)
 const fileEntries = ref<FileSearchEntry[]>([])
 const isDragActive = ref(false)
+const imageModalOpen = ref(false)
+const imageModalIndex = ref(0)
 
 const permissionOptions = [
   {
@@ -127,6 +131,7 @@ const canSend = computed(
 const filteredSlashCommands = computed(() =>
   filterSlashCommands(slashCommands.value, slashFilter.value)
 )
+const galleryImages = computed(() => galleryImagesFromComposer(attachments.value))
 
 watch(atFilter, filter => {
   vscode.postMessage({
@@ -343,6 +348,13 @@ function handleDrop(event: DragEvent) {
   void appendFiles(files)
 }
 
+function handlePreviewImage(attachmentId: string) {
+  const index = attachments.value.findIndex(a => a.id === attachmentId)
+  if (index === -1) return
+  imageModalIndex.value = index
+  imageModalOpen.value = true
+}
+
 function handleMessage(event: MessageEvent) {
   const message = event.data
   if (message.type === 'file.picked') {
@@ -395,6 +407,7 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
         @remove-reference="
           workspaceReferences = workspaceReferences.filter(item => item.id !== $event)
         "
+        @preview-image="handlePreviewImage"
       />
 
       <textarea
@@ -607,6 +620,12 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
         />
       </div>
     </div>
+
+    <ImageGalleryModal
+      v-model="imageModalOpen"
+      :images="galleryImages"
+      :initial-index="imageModalIndex"
+    />
   </div>
 </template>
 

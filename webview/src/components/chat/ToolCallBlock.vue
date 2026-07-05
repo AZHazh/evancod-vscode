@@ -13,6 +13,8 @@ const props = defineProps<{
   parentToolUseId?: string
   bash?: BashRuntimeState
   notification?: AgentTaskNotification
+  result?: unknown
+  resultError?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -75,14 +77,18 @@ const title = computed(() => {
   return labels[props.toolName] || props.toolName
 })
 
-const icon = computed(() => {
-  if (props.toolName === 'bash') return '⌘'
-  if (props.toolName.includes('file') || props.toolName === 'read_file') return '□'
-  if (props.toolName === 'glob' || props.toolName === 'grep') return '⌕'
-  if (props.toolName === 'agent') return '◇'
-  if (props.toolName === 'skill') return '✦'
-  if (props.toolName === 'mcp') return '⚙'
-  return '•'
+const iconType = computed(() => {
+  if (props.toolName === 'read_file') return 'read'
+  if (props.toolName === 'write_file') return 'write'
+  if (props.toolName === 'edit_file') return 'edit'
+  if (props.toolName === 'bash') return 'bash'
+  if (props.toolName === 'grep') return 'grep'
+  if (props.toolName === 'glob') return 'glob'
+  if (props.toolName === 'agent') return 'agent'
+  if (props.toolName === 'skill') return 'skill'
+  if (props.toolName === 'mcp') return 'mcp'
+  if (props.toolName === 'ask_user_question') return 'ask'
+  return 'default'
 })
 
 const summary = computed(() => {
@@ -106,12 +112,76 @@ const resultSummary = computed(() => {
 })
 
 const expandable = computed(() => true)
+
+function formatResult(value: unknown): string {
+  if (typeof value === 'string') return value
+  return JSON.stringify(value, null, 2)
+}
+
+const hasResult = computed(() => {
+  return props.result !== undefined && ['read_file', 'grep', 'glob'].includes(props.toolName)
+})
 </script>
 
 <template>
   <div class="tool-call" :class="[`tool-call--${status}`]">
     <button class="tool-call__header" type="button" @click="expanded = !expanded">
-      <span class="tool-call__icon">{{ icon }}</span>
+      <span class="tool-call__icon" :class="{ 'tool-call__icon--active': status === 'pending' }">
+        <!-- Read icon -->
+        <svg v-if="iconType === 'read'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M5 5h6M5 8h6M5 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Write icon -->
+        <svg v-else-if="iconType === 'write'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 10l1.5-1.5L11 5l-1.5-1.5L6 7v3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- Edit icon -->
+        <svg v-else-if="iconType === 'edit'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M5 5h3M5 8h4M5 11h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M10 8l2 2M10 11l2-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Bash/Terminal icon -->
+        <svg v-else-if="iconType === 'bash'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M4 6l2 2-2 2M7 10h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- Grep icon (search/magnifier) -->
+        <svg v-else-if="iconType === 'grep'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Glob icon -->
+        <svg v-else-if="iconType === 'glob'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Agent icon -->
+        <svg v-else-if="iconType === 'agent'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 2l6 4v6l-6 4-6-4V6l6-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- Skill icon -->
+        <svg v-else-if="iconType === 'skill'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 2l1.5 4.5H14l-3.75 3L12 14l-4-3-4 3 1.75-4.5L2 6.5h4.5L8 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- MCP icon -->
+        <svg v-else-if="iconType === 'mcp'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Ask icon (chat bubble with question mark) -->
+        <svg v-else-if="iconType === 'ask'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v6A1.5 1.5 0 0 1 12.5 11H6l-3 3v-3H3.5A1.5 1.5 0 0 1 2 9.5v-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6.5 5.5a1.5 1.5 0 0 1 2.4 1.2c0 1-1.4 1.1-1.4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="7.5" cy="10" r="0.4" fill="currentColor"/>
+        </svg>
+        <!-- Default icon -->
+        <svg v-else viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="8" cy="8" r="2" fill="currentColor"/>
+        </svg>
+      </span>
       <span class="tool-call__name">{{ title }}</span>
       <span class="tool-call__summary">{{ summary }}</span>
 
@@ -121,7 +191,14 @@ const expandable = computed(() => true)
       </span>
       <span v-else class="tool-call__result-summary">{{ resultSummary }}</span>
       <span v-if="status === 'error'" class="tool-call__error-icon">!</span>
-      <span v-if="expandable" class="tool-call__chevron">{{ expanded ? '⌃' : '⌄' }}</span>
+      <span v-if="expandable" class="tool-call__chevron">
+        <svg v-if="expanded" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg v-else viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
     </button>
 
     <div v-if="expanded" class="tool-call__body">
@@ -139,6 +216,13 @@ const expandable = computed(() => true)
 
       <DiffViewer v-else-if="toolName === 'edit_file' && (oldString || newString)" :file-path="filePath" :old-text="oldString" :new-text="newString" />
       <DiffViewer v-else-if="toolName === 'write_file' && content" :file-path="filePath" :content="content" />
+
+      <div v-else-if="hasResult" class="tool-result-container" :class="{ 'tool-result-container--error': resultError }">
+        <div class="tool-result-header">
+          <span>{{ resultError ? '执行错误' : '执行结果' }}</span>
+        </div>
+        <pre class="tool-result-content">{{ formatResult(result) }}</pre>
+      </div>
 
       <div v-else-if="toolName === 'mcp'" class="tool-summary vertical">
         <div v-if="mcpAction"><span class="summary-label">操作</span><code>{{ mcpAction }}</code></div>
@@ -194,16 +278,31 @@ const expandable = computed(() => true)
   background: transparent;
   cursor: pointer;
   text-align: left;
+  transition: background-color 150ms ease;
 
   &:hover {
-    background: color-mix(in srgb, var(--chat-color-surface-hover) 50%, transparent);
+    background: color-mix(in srgb, var(--chat-color-surface-hover) 80%, transparent);
   }
 }
 
 .tool-call__icon {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   color: var(--chat-color-outline);
-  font-size: 14px;
+  transition: color 200ms ease;
+
+  svg {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+.tool-call__icon--active {
+  color: var(--chat-color-warning);
 }
 
 .tool-call__name {
@@ -249,9 +348,18 @@ const expandable = computed(() => true)
 }
 
 .tool-call__chevron {
+  display: flex;
   flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
   color: var(--chat-color-outline);
-  font-size: 14px;
+
+  svg {
+    width: 100%;
+    height: 100%;
+  }
 }
 
 .tool-call__body {
@@ -307,6 +415,46 @@ code,
 
 .tool-json.compact {
   max-height: 160px;
+}
+
+.tool-result-container {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 50%, transparent);
+  border-radius: var(--chat-radius-md);
+  background: var(--chat-color-surface-container-low);
+}
+
+.tool-result-container--error {
+  border-color: color-mix(in srgb, var(--chat-color-error) 50%, transparent);
+  background: color-mix(in srgb, var(--chat-color-error-container) 35%, var(--chat-color-surface-container-low));
+}
+
+.tool-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--chat-color-border) 45%, transparent);
+  color: var(--chat-color-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tool-result-container--error .tool-result-header {
+  color: var(--chat-color-error);
+}
+
+.tool-result-content {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--chat-color-text-secondary);
+  font-family: var(--chat-font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 640px) {

@@ -7,12 +7,31 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ToolResultBlock from './ToolResultBlock.vue'
 import PermissionRequestBlock from './PermissionRequestBlock.vue'
+import PlanApproval from '@/components/plan/PlanApproval.vue'
+import InlineImageGallery from './InlineImageGallery.vue'
+import AgentCard from './AgentCard.vue'
 
 const props = defineProps<{
   message: UIMessage
 }>()
 
 const chatStore = useChatStore()
+
+function approvePlan() {
+  if (props.message.type !== 'plan_approval') return
+  window.vscode?.postMessage({
+    type: 'plan.approve',
+    data: { planId: props.message.plan.id },
+  })
+}
+
+function rejectPlan(reason: string) {
+  if (props.message.type !== 'plan_approval') return
+  window.vscode?.postMessage({
+    type: 'plan.reject',
+    data: { planId: props.message.plan.id, reason },
+  })
+}
 
 const content = computed(() => 'content' in props.message ? props.message.content : '')
 const documentLayout = computed(() =>
@@ -47,6 +66,11 @@ async function copyMessage() {
         <div v-if="message.content.trim()" class="user-message__bubble">
           {{ message.content }}
         </div>
+        <InlineImageGallery
+          v-if="message.attachments?.length"
+          class="user-message__gallery"
+          :attachments="message.attachments"
+        />
         <div v-if="message.content.trim()" class="message-action-bar message-action-bar--end">
           <button class="message-action-bar__button" type="button" title="复制" @click="copyMessage">复制</button>
           <span class="message-action-bar__timestamp">{{ formattedTime }}</span>
@@ -70,6 +94,15 @@ async function copyMessage() {
       v-else-if="message.type === 'thinking'"
       :content="message.content"
       :timestamp="message.timestamp"
+      :is-active="message.id === 'streaming-thinking'"
+    />
+
+    <AgentCard
+      v-else-if="message.type === 'tool_use' && message.toolName === 'agent'"
+      :tool-use-id="message.toolUseId"
+      :description="message.input && typeof message.input === 'object' && 'description' in message.input ? (message.input.description as string) : undefined"
+      :notification="message.notification"
+      :input="message.input"
     />
 
     <ToolCallBlock
@@ -82,11 +115,13 @@ async function copyMessage() {
       :parent-tool-use-id="message.parentToolUseId"
       :bash="message.bash"
       :notification="message.notification"
+      :result="'result' in message ? message.result : undefined"
+      :result-error="'resultError' in message ? (message.resultError as boolean) : undefined"
       @cancel-bash="chatStore.cancelBash"
     />
 
     <ToolResultBlock
-      v-else-if="message.type === 'tool_result'"
+      v-else-if="message.type === 'tool_result' && message.isError"
       :content="message.content"
       :is-error="message.isError"
     />
@@ -99,6 +134,14 @@ async function copyMessage() {
       :description="message.description"
       :response-state="message.responseState"
     />
+
+    <div v-else-if="message.type === 'plan_approval'" class="plan-message">
+      <PlanApproval
+        :plan="message.plan"
+        @approve="approvePlan"
+        @reject="rejectPlan"
+      />
+    </div>
   </div>
 </template>
 
@@ -130,6 +173,11 @@ async function copyMessage() {
 .user-message__shell {
   max-width: 82%;
   align-items: flex-end;
+}
+
+.user-message__gallery {
+  width: 100%;
+  max-width: 320px;
 }
 
 .assistant-message__shell {
@@ -222,6 +270,10 @@ async function copyMessage() {
   padding: 0 6px;
   color: var(--chat-color-text-tertiary);
   font-size: 11px;
+}
+
+.plan-message {
+  width: 100%;
 }
 
 @media (min-width: 640px) {

@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import './styles/globals.scss'
+import { useChatStore } from './stores/chat'
 import { useTaskStore } from './stores/task'
 import { usePlanStore } from './stores/plan'
 import { useAgentStore } from './stores/agent'
@@ -17,6 +18,7 @@ window.addEventListener('message', (event) => {
   console.log('[Main] 收到消息:', message.type, message)
 
   // 获取 store 实例
+  const chatStore = useChatStore()
   const taskStore = useTaskStore()
   const planStore = usePlanStore()
   const agentStore = useAgentStore()
@@ -43,17 +45,24 @@ window.addEventListener('message', (event) => {
     case 'plan.submitted':
       console.log('[Main] 处理 plan.submitted')
       planStore.setPlan(message.data.plan)
-      planStore.showApprovalDialog = true
-      console.log('[Main] planStore.showApprovalDialog =', planStore.showApprovalDialog)
+      chatStore.upsertPlanApprovalMessage(message.data.plan)
       console.log('[Main] planStore.currentPlan =', planStore.currentPlan)
       break
 
     case 'plan.approved':
       planStore.markAsApproved(message.data.planId)
+      chatStore.updatePlanApprovalMessage(message.data.planId, plan => {
+        plan.state = 'approved'
+        plan.approvedAt = new Date().toISOString()
+      })
       break
 
     case 'plan.rejected':
       planStore.markAsRejected(message.data.planId, message.data.reason)
+      chatStore.updatePlanApprovalMessage(message.data.planId, plan => {
+        plan.state = 'rejected'
+        plan.rejectedReason = message.data.reason
+      })
       break
 
     // ============ Question 相关消息 ============

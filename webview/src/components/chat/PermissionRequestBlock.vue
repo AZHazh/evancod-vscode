@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, Folder, ShieldCheck, X } from 'lucide-vue-next'
+import { computed, ref, watch, reactive } from 'vue'
+import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, Folder, ShieldCheck, X, CircleHelp, Play, Terminal } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
-import QuestionCard from '@/components/agent/QuestionCard.vue'
+import OptionSelector from '@/components/agent/OptionSelector.vue'
+import CustomInput from '@/components/agent/CustomInput.vue'
 import DiffViewer from '@/components/diff/DiffViewer.vue'
 import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
 
@@ -15,6 +16,7 @@ interface QuestionOption {
 interface Question {
   id: string
   question: string
+  header?: string
   options: QuestionOption[]
   allowMultiple?: boolean
   allowCustomInput?: boolean
@@ -84,24 +86,70 @@ const statusText = computed(() => {
   return isEditLike.value ? '等待审批' : 'awaiting approval'
 })
 const statusClass = computed(() => responseState.value)
-const question = computed<Question | null>(() => {
+interface QuestionWithId extends Question {
+  index: number
+}
+
+const questions = computed<QuestionWithId[]>(() => {
   if (props.toolName !== 'ask_user_question' || !inputRecord.value) {
-    return null
+    return []
   }
 
-  const input = inputRecord.value as Partial<Question>
-  if (!input.question || !Array.isArray(input.options)) {
-    return null
+  const input = inputRecord.value as { questions?: Array<any> }
+  if (!input.questions || !Array.isArray(input.questions)) {
+    return []
   }
 
-  return {
-    id: props.requestId,
-    question: input.question,
-    options: input.options,
-    allowMultiple: input.allowMultiple,
-    allowCustomInput: input.allowCustomInput,
-  }
+  return input.questions
+    .map((q, index) => {
+      if (!q.question || !Array.isArray(q.options)) {
+        return null
+      }
+      return {
+        id: `${props.requestId}_${index}`,
+        index,
+        question: q.question,
+        header: q.header,
+        options: q.options,
+        allowMultiple: q.multiSelect || false,
+        allowCustomInput: q.allowCustomInput,
+      } as QuestionWithId
+    })
+    .filter((q): q is QuestionWithId => q !== null)
 })
+
+const questionAnswers = ref<Record<string, { selectedOptions: string[]; customInput?: string }>>({})
+const activeTabIndex = ref(0)
+const tabAnswers = reactive<Array<{ selectedOptions: string[]; customInput: string }>>(
+  Array.from({ length: 10 }, () => ({ selectedOptions: [], customInput: '' }))
+)
+
+const allQuestionsAnswered = computed(() => {
+  return questions.value.every((_, index) => {
+    const answer = tabAnswers[index]
+    return answer.selectedOptions.length > 0 || answer.customInput.trim().length > 0
+  })
+})
+
+function formatSuccessMessage(): string {
+  const answers: string[] = []
+  questions.value.forEach((q, index) => {
+    const answer = questionAnswers.value[`question_${index}`]
+    if (answer) {
+      const parts: string[] = []
+      if (answer.selectedOptions.length > 0) {
+        parts.push(`"${q.question}" = "${answer.selectedOptions.join(', ')}"`)
+      }
+      if (answer.customInput) {
+        parts.push(`"${answer.customInput}"`)
+      }
+      if (parts.length > 0) {
+        answers.push(parts.join(', '))
+      }
+    }
+  })
+  return `结果: User has answered your questions: ${answers.join('; ')}. You can now continue with the user's answers in mind.`
+}
 
 function approvePermission() {
   responseState.value = 'approved'
@@ -122,27 +170,104 @@ function denyPermission() {
   })
 }
 
-function submitQuestion(answer: { selectedOptions: string[]; customInput?: string }) {
+function submitAllQuestions() {
+  if (!allQuestionsAnswered.value) return
+
+  const answers: Record<string, { selectedOptions: string[]; customInput?: string }> = {}
+
+  questions.value.forEach((_, index) => {
+    const tabAnswer = tabAnswers[index]
+    const answer = {
+      selectedOptions: [...tabAnswer.selectedOptions],
+      customInput: tabAnswer.customInput.trim() || undefined
+    }
+
+    answers[`question_${index}`] = answer
+    questionAnswers.value[`question_${index}`] = answer
+  })
+
   responseState.value = 'approved'
-  sendPermissionResponse({ requestId: props.requestId, approved: true, updatedInput: { answer } })
+  sendPermissionResponse({
+    requestId: props.requestId,
+    approved: true,
+    updatedInput: { answers }
+  })
 }
 </script>
 
 <template>
-  <div class="permission-card" :class="[`permission-card--${responseState}`, { 'permission-card--ask': question }]">
-    <QuestionCard
-      v-if="question"
-      :question="question"
-      :response-state="responseState"
-      @submit="submitQuestion"
-      @cancel="denyPermission"
-    />
+  <div class="permission-card" :class="[`permission-card--${responseState}`, { 'permission-card--ask': questions.length > 0 }]">
+    <div v-if="questions.length > 0" class="questions-wrapper">
+      <!-- 顶部标题栏 -->
+      <div class="questions-header">
+        <div class="questions-icon">
+          <CircleHelp :size="20" />
+        </div>
+        <h3 class="questions-main-title">Evancod 需要你的输入</h3>
+        <span v-if="responseState !== 'pending'" class="questions-status-badge" :class="`questions-status-badge--${responseState}`">
+          {{ responseState === 'approved' ? '已结果' : '已取消' }}
+        </span>
+      </div>
+
+      <!-- 标签页导航 -->
+      <div class="questions-tabs">
+        <button
+          v-for="(q, index) in questions"
+          :key="q.id"
+          class="tab-button"
+          :class="{ 'tab-button--active': activeTabIndex === index, 'tab-button--answered': questionAnswers[`question_${index}`] }"
+          @click="activeTabIndex = index"
+        >
+          {{ q.header || `问题 ${index + 1}` }}
+        </button>
+      </div>
+
+      <!-- 当前问题内容 -->
+      <div class="questions-content">
+        <div v-for="(q, index) in questions" :key="q.id" v-show="activeTabIndex === index" class="question-panel">
+          <h4 class="question-text">{{ q.question }}</h4>
+
+          <OptionSelector
+            :options="q.options"
+            :allow-multiple="q.allowMultiple"
+            v-model:selected="tabAnswers[index].selectedOptions"
+          />
+
+          <div class="custom-input-section">
+            <label class="custom-input-label">或输入自定义回复：</label>
+            <CustomInput
+              v-model="tabAnswers[index].customInput"
+              placeholder="输入你你的回答..."
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部提交区域 -->
+      <div v-if="responseState === 'pending'" class="questions-footer">
+        <button class="submit-button" @click="submitAllQuestions" :disabled="!allQuestionsAnswered">
+          <Play :size="16" class="submit-icon" />
+          提交
+        </button>
+      </div>
+
+      <!-- 成功提示 -->
+      <div v-if="responseState === 'approved'" class="success-message">
+        <CircleCheck :size="18" class="success-icon" />
+        <span class="success-text">{{ formatSuccessMessage() }}</span>
+      </div>
+    </div>
 
     <template v-else>
       <div class="permission-card__header">
         <component
           :is="isWriteLike ? FilePlus2 : FilePenLine"
           v-if="isEditLike"
+          class="permission-card__file-icon"
+          :class="`permission-card__file-icon--${responseState}`"
+        />
+        <Terminal
+          v-else-if="toolName === 'bash'"
           class="permission-card__file-icon"
           :class="`permission-card__file-icon--${responseState}`"
         />
@@ -207,10 +332,208 @@ function submitQuestion(answer: { selectedOptions: string[]; customInput?: strin
 </template>
 
 <style scoped lang="scss">
+.questions-wrapper {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.questions-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: var(--vscode-editor-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.questions-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--chat-color-warning) 15%, transparent);
+  color: var(--chat-color-warning);
+  flex-shrink: 0;
+}
+
+.questions-main-title {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.questions-status-badge {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.questions-status-badge--approved {
+  background: color-mix(in srgb, #69f08d 16%, transparent);
+  color: #69f08d;
+}
+
+.questions-status-badge--denied {
+  background: color-mix(in srgb, var(--chat-color-error) 16%, transparent);
+  color: var(--chat-color-error);
+}
+
+.questions-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 20px;
+  background: var(--vscode-editor-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.tab-button {
+  position: relative;
+  padding: 12px 20px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.2s ease;
+
+  &::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: transparent;
+    transition: background 0.2s ease;
+  }
+
+  &:hover {
+    color: var(--vscode-foreground);
+  }
+
+  &.tab-button--active {
+    color: var(--vscode-foreground);
+
+    &::after {
+      background: #ff7f5f;
+    }
+  }
+
+  &.tab-button--answered {
+    color: #69f08d;
+  }
+}
+
+.questions-content {
+  padding: 24px 20px;
+  min-height: 200px;
+}
+
+.question-panel {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.question-text {
+  margin: 0 0 20px 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+  line-height: 1.6;
+}
+
+.custom-input-section {
+  margin-top: 16px;
+}
+
+.custom-input-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.questions-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+}
+
+.submit-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  background: #ff7f5f;
+  color: #18120f;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background: #ff9478;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px color-mix(in srgb, #ff7f5f 30%, transparent);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.submit-icon {
+  flex-shrink: 0;
+}
+
+.success-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 20px;
+  background: color-mix(in srgb, #69f08d 8%, transparent);
+  border-top: 1px solid color-mix(in srgb, #69f08d 25%, transparent);
+}
+
+.success-icon {
+  flex-shrink: 0;
+  color: #69f08d;
+  margin-top: 2px;
+}
+
+.success-text {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--vscode-foreground);
+}
+
 .permission-card {
   overflow: hidden;
-  border: 1px solid var(--chat-color-warning);
   border-radius: var(--chat-radius-lg);
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
   background: var(--chat-color-surface-container-lowest);
 }
 
@@ -223,7 +546,7 @@ function submitQuestion(answer: { selectedOptions: string[]; customInput?: strin
 }
 
 .permission-card--ask {
-  border-color: var(--chat-color-secondary);
+  border: 1px solid var(--vscode-panel-border);
 }
 
 .permission-card__header {

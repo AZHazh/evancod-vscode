@@ -147,12 +147,27 @@ async function handleSubmit() {
   isSubmitting.value = true
 
   try {
+    // 注意：form.value 及嵌套的 models 是 Vue 响应式 Proxy，无法被 postMessage
+    // 的结构化克隆算法序列化（会抛 DataCloneError）。这里显式构造纯对象以剥离
+    // Proxy；不用 JSON 深拷贝是为了保留 undefined 值（结构化克隆支持 undefined），
+    // 否则编辑时清空 baseUrl / autoCompactWindow 将无法覆盖旧值。
     const providerData = {
-      ...form.value,
+      name: form.value.name,
+      type: form.value.type,
+      apiFormat: form.value.apiFormat,
+      runtimeKind: form.value.runtimeKind,
+      authStrategy: form.value.authStrategy,
+      apiKey: form.value.apiKey,
       presetId: form.value.type,
       baseUrl: needsBaseUrl.value ? form.value.baseUrl.replace(/\/+$/, '') : undefined,
       autoCompactWindow: form.value.autoCompactWindow ? Number(form.value.autoCompactWindow) : undefined,
       source: props.provider?.source || 'manual',
+      models: {
+        main: form.value.models.main,
+        sonnet: form.value.models.sonnet,
+        opus: form.value.models.opus,
+        haiku: form.value.models.haiku,
+      },
     }
 
     if (isEditMode.value) {

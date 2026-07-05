@@ -1,3 +1,5 @@
+import type { Plan } from '@/stores/plan'
+
 export interface SlashCommand {
   name: string
   description?: string
@@ -173,6 +175,12 @@ export type UIMessage =
       description?: string
       timestamp: number
       responseState?: 'pending' | 'approved' | 'denied'
+    }
+  | {
+      id: string
+      type: 'plan_approval'
+      plan: Plan
+      timestamp: number
     }
 
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'

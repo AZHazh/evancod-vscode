@@ -5,13 +5,8 @@
       type="textarea"
       :placeholder="placeholder"
       :rows="rows"
-      icon="✏️"
       @update:modelValue="handleInput"
     />
-
-    <div class="input-hint" v-if="hint">
-      {{ hint }}
-    </div>
   </div>
 </template>
 
@@ -23,13 +18,11 @@ interface Props {
   modelValue: string
   placeholder?: string
   rows?: number
-  hint?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   placeholder: '请输入...',
-  rows: 3,
-  hint: '💡 您可以输入自定义的答案'
+  rows: 3
 })
 
 const emit = defineEmits<{
@@ -52,13 +45,5 @@ function handleInput(value: string | number) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.input-hint {
-  font-size: 12px;
-  color: var(--vscode-descriptionForeground);
-  padding: 6px 10px;
-  background: var(--vscode-input-background);
-  border-radius: 4px;
 }
 </style>

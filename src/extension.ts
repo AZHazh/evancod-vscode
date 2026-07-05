@@ -61,12 +61,12 @@ export async function activate(context: vscode.ExtensionContext) {
   )
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('evancod.newSession', () => {
+    vscode.commands.registerCommand('evancod.newSession', async () => {
       if (!chatService || !webviewManager) {
         vscode.window.showErrorMessage('Evancod 尚未初始化完成，请查看 Debug Console 中的错误。')
         return
       }
-      chatService.createNewSession()
+      await chatService.createNewSession()
       webviewManager.show()
     })
   )

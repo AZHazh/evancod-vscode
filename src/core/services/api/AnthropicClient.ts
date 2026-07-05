@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { Message, Provider, TokenUsage } from '../../../types'
+import type { EffortLevel, Message, Provider, TokenUsage } from '../../../types'
+import { resolveThinkingParam, resolveMaxTokens } from '../../../utils/thinking'
 
 export interface ApiClientConfig {
   provider: Provider
@@ -8,9 +9,11 @@ export interface ApiClientConfig {
   maxTokens?: number
   temperature?: number
   verbose?: boolean
+  /** 推理程度，用于决定 thinking 参数 */
+  effortLevel?: EffortLevel
 }
 
-export type StreamCallback = (delta: string, type: 'start' | 'delta' | 'end') => void
+export type StreamCallback = (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => void
 
 export interface ApiClientResponse {
   content: string
@@ -87,18 +90,41 @@ export class AnthropicClient implements ApiClient {
   ): Promise<ApiClientResponse> {
     try {
       throwIfAborted(options?.signal)
+
+      // 计算 thinking 参数（结合用户 effortLevel 与模型能力）
+      const thinking = resolveThinkingParam({
+        provider: this.config.provider,
+        model: this.config.model,
+        effortLevel: this.config.effortLevel,
+      })
+
       const requestParams: any = {
         model: this.config.model,
-        max_tokens: this.config.maxTokens || 4096,
-        temperature: this.config.temperature || 1,
+        max_tokens: this.config.maxTokens ?? resolveMaxTokens(this.config.model, thinking),
+        // 启用 thinking 时 temperature 必须为 1
+        temperature: thinking && thinking.type !== 'disabled' ? 1 : this.config.temperature || 1,
         messages: convertAnthropicMessages(messages) as any,
         stream: true,
         ...(this.config.systemPrompt ? { system: this.config.systemPrompt } : {}),
       }
 
+      if (thinking) {
+        requestParams.thinking = thinking
+        console.log('[AnthropicClient] Thinking enabled:', JSON.stringify(thinking))
+      } else {
+        console.log('[AnthropicClient] Thinking NOT enabled - effortLevel:', this.config.effortLevel, 'model:', this.config.model)
+      }
+
       if (tools && tools.length > 0) {
         requestParams.tools = tools
       }
+
+      console.log('[AnthropicClient] Request params:', {
+        model: requestParams.model,
+        max_tokens: requestParams.max_tokens,
+        temperature: requestParams.temperature,
+        thinking: requestParams.thinking,
+      })
 
       const stream = this.client.messages.stream(requestParams)
       let fullContent = ''
@@ -124,14 +150,25 @@ export class AnthropicClient implements ApiClient {
             }
             break
 
-          case 'content_block_delta':
-            if (event.delta.type === 'text_delta') {
-              fullContent += event.delta.text
-              onStream(event.delta.text, 'delta')
-            } else if (event.delta.type === 'input_json_delta' && currentToolCall) {
-              currentToolCall.inputJson = `${currentToolCall.inputJson || ''}${event.delta.partial_json}`
+          case 'content_block_delta': {
+            const delta = event.delta as { type: string; text?: string; partial_json?: string; thinking?: string }
+            if (delta.type === 'text_delta') {
+              fullContent += delta.text || ''
+              onStream(delta.text || '', 'delta')
+            } else if (delta.type === 'thinking_delta') {
+              // 思考增量：Anthropic API 使用 thinking 字段，不是 text
+              const thinkingText = delta.thinking || delta.text || ''
+              console.log('[AnthropicClient] Received thinking_delta:', {
+                hasThinking: !!delta.thinking,
+                hasText: !!delta.text,
+                content: thinkingText.substring(0, 100)
+              })
+              onStream(thinkingText, 'thinking')
+            } else if (delta.type === 'input_json_delta' && currentToolCall) {
+              currentToolCall.inputJson = `${currentToolCall.inputJson || ''}${delta.partial_json}`
             }
             break
+          }
 
           case 'content_block_stop':
             if (currentToolCall) {

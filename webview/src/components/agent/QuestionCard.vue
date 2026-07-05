@@ -20,28 +20,16 @@
       />
 
       <CustomInput
-        v-if="question.allowCustomInput"
         v-model="customInput"
-        placeholder="或输入自定义答案..."
+        placeholder="模型的选项可能不准确，你可以在此输入自己的想法..."
       />
     </div>
 
     <div v-if="responseState === 'pending'" class="card-footer">
-      <Button
-        variant="primary"
-        size="large"
-        @click="handleSubmit"
-        :disabled="!canSubmit"
-      >
-        提交答案
+      <Button variant="primary" size="large" @click="handleSubmit" :disabled="!canSubmit">
+        {{ submitButtonText }}
       </Button>
-      <Button
-        variant="ghost"
-        size="large"
-        @click="handleCancel"
-      >
-        跳过
-      </Button>
+      <Button v-if="showCancelButton" variant="ghost" size="large" @click="handleCancel"> 跳过 </Button>
     </div>
 
     <div class="card-hint" v-if="question.allowMultiple && responseState === 'pending'">
@@ -74,10 +62,14 @@ export interface Question {
 interface Props {
   question: Question
   responseState?: 'pending' | 'approved' | 'denied'
+  submitButtonText?: string
+  showCancelButton?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   responseState: 'pending',
+  submitButtonText: '提交答案',
+  showCancelButton: true,
 })
 
 const emit = defineEmits<{
@@ -95,15 +87,15 @@ const statusText = computed(() => {
 })
 
 const canSubmit = computed(() => {
-  return selectedOptions.value.length > 0 || (props.question.allowCustomInput && customInput.value.trim().length > 0)
+  return selectedOptions.value.length > 0 || customInput.value.trim().length > 0
 })
 
 function handleSubmit() {
   if (!canSubmit.value || props.responseState !== 'pending') return
 
   emit('submit', {
-    selectedOptions: selectedOptions.value,
-    customInput: customInput.value.trim() || undefined
+    selectedOptions: [...selectedOptions.value],
+    customInput: customInput.value.trim() || undefined,
   })
 }
 
@@ -119,8 +111,6 @@ function handleCancel() {
   border: 1px solid var(--chat-color-warning, var(--vscode-panel-border));
   border-radius: 8px;
   padding: 20px;
-  max-width: 600px;
-  margin: 0 auto;
 }
 
 .question-card--approved {
@@ -208,7 +198,8 @@ function handleCancel() {
 }
 
 .card-footer :deep(button) {
-  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease,
+    transform 0.16s ease;
 }
 
 .card-footer :deep(button:hover:not(:disabled)) {

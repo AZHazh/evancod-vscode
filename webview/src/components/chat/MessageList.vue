@@ -14,31 +14,85 @@ const timer = window.setInterval(() => {
   now.value = Date.now()
 }, 1000)
 
-const messages = computed(() => chatStore.uiMessages)
-const showStreamingIndicator = computed(() =>
-  chatStore.chatState !== 'idle' || messages.value.some(message => message.type === 'tool_use' && message.isPending)
-)
+const messages = computed(() => chatStore.uiMessages.filter(m => m.type !== 'thinking'))
+
+// 收集所有 agent 工具调用的 toolUseId，用于过滤其子工具调用（子工具在 AgentCard 内展示）
+const agentToolUseIds = computed(() => {
+  const ids = new Set<string>()
+  chatStore.uiMessages.forEach(msg => {
+    if (msg.type === 'tool_use' && msg.toolName === 'agent') {
+      ids.add(msg.toolUseId)
+    }
+  })
+  return ids
+})
+
+// 创建一个 Map 来关联 tool_result 到 tool_use
+const toolResultMap = computed(() => {
+  const map = new Map<string, { content: unknown; isError: boolean }>()
+  messages.value.forEach(msg => {
+    if (msg.type === 'tool_result') {
+      map.set(msg.toolUseId, { content: msg.content, isError: msg.isError })
+    }
+  })
+  return map
+})
+
+// 增强的消息列表，将 tool_result 数据注入到 tool_use 中
+const enhancedMessages = computed(() => {
+  return messages.value
+    .filter(msg => {
+      // 过滤掉 agent 子工具调用（在 AgentCard 内展示，不在主消息流重复）
+      if ((msg.type === 'tool_use' || msg.type === 'tool_result') && msg.parentToolUseId && agentToolUseIds.value.has(msg.parentToolUseId)) {
+        return false
+      }
+      // 过滤掉 Read、Grep、Glob、Edit、Write 的 tool_result 消息
+      if (msg.type === 'tool_result') {
+        const toolUse = messages.value.find(m => m.type === 'tool_use' && m.toolUseId === msg.toolUseId)
+        if (toolUse && toolUse.type === 'tool_use') {
+          const shouldHide = ['read_file', 'grep', 'glob', 'edit_file', 'write_file'].includes(toolUse.toolName)
+          return !shouldHide
+        }
+      }
+      return true
+    })
+    .map(msg => {
+      // 将 tool_result 数据注入到对应的 tool_use 消息中
+      if (msg.type === 'tool_use') {
+        const result = toolResultMap.value.get(msg.toolUseId)
+        if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
+          return {
+            ...msg,
+            result: result.content,
+            resultError: result.isError
+          }
+        }
+      }
+      return msg
+    })
+})
+const showThinkingIndicator = computed(() => {
+  return chatStore.chatState !== 'idle' || enhancedMessages.value.some(message => message.type === 'tool_use' && message.isPending)
+})
 const streamingVerb = computed(() => {
-  if (chatStore.chatState === 'waiting_permission') return 'Awaiting approval'
-  if (chatStore.chatState === 'running') return 'Running'
-  if (chatStore.chatState === 'thinking') return '思考中...'
-  return 'Working'
+  if (chatStore.chatState === 'waiting_permission') return '等待授权'
+  return '思考中...'
 })
 const thinkingElapsedSeconds = computed(() => Math.max(0, Math.floor((now.value - thinkingStartedAt.value) / 1000)))
 const thinkingTokenCount = computed(() => estimateTokenCount(chatStore.streamingText))
 const latestAssistantTextLength = computed(() => {
-  const latest = messages.value.at(-1)
+  const latest = enhancedMessages.value.at(-1)
   return latest?.type === 'assistant_text' ? latest.content.length : 0
 })
 const scrollSignature = computed(() => [
-  messages.value.length,
-  messages.value.at(-1)?.id,
+  enhancedMessages.value.length,
+  enhancedMessages.value.at(-1)?.id,
   latestAssistantTextLength.value,
   chatStore.chatState,
 ].join(':'))
 
 watch(() => chatStore.chatState, (state, previousState) => {
-  if (state === 'thinking' && previousState !== 'thinking') {
+  if (state !== 'idle' && previousState === 'idle') {
     thinkingStartedAt.value = Date.now()
     now.value = Date.now()
   }
@@ -90,7 +144,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
 <template>
   <section ref="listRef" class="chat-list" @scroll="handleScroll">
-    <div v-if="messages.length === 0" class="empty-state">
+    <div v-if="enhancedMessages.length === 0" class="empty-state">
       <div class="empty-icon">✦</div>
       <div class="empty-text">开始新对话</div>
       <div class="empty-hint">输入消息或使用 / 命令</div>
@@ -98,18 +152,16 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
     <div v-else class="chat-list__inner">
       <MessageItem
-        v-for="message in messages"
+        v-for="message in enhancedMessages"
         :key="message.id"
         :message="message"
       />
 
-      <div v-if="showStreamingIndicator" class="streaming-indicator">
+      <div v-if="showThinkingIndicator" class="streaming-indicator">
         <span class="streaming-indicator__spark" aria-hidden="true">✦</span>
         <span class="streaming-indicator__verb">{{ streamingVerb }}</span>
-        <template v-if="chatStore.chatState === 'thinking'">
-          <span class="streaming-indicator__meta">{{ thinkingElapsedSeconds }}s</span>
-          <span class="streaming-indicator__meta">↓ {{ thinkingTokenCount }} tokens</span>
-        </template>
+        <span class="streaming-indicator__meta">{{ thinkingElapsedSeconds }}s</span>
+        <span class="streaming-indicator__meta">↓ {{ thinkingTokenCount }} tokens</span>
       </div>
     </div>
 

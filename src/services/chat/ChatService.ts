@@ -180,7 +180,7 @@ export class ChatService {
    *
    * @returns 新创建的会话对象
    */
-  createNewSession(): Session {
+  async createNewSession(): Promise<Session> {
     // 获取工作目录（用于文件操作的相对路径基准）
     const workDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
 
@@ -207,6 +207,7 @@ export class ChatService {
     // 设置为当前活动会话
     this.currentSessionId = session.id
     this.taskManager.setCurrentSession(session.id)
+    await this.taskManager.load()
     this.taskManager.notifyTaskList()
     this.saveSessions()
 
@@ -238,6 +239,7 @@ export class ChatService {
 
     this.currentSessionId = session.id
     this.taskManager.setCurrentSession(session.id)
+    this.taskManager.load().catch(err => console.error('Failed to load tasks:', err))
     this.queryEngine = undefined
     this.saveSessions()
     this.taskManager.notifyTaskList()
@@ -249,6 +251,9 @@ export class ChatService {
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = this.sessions[0]?.id || null
       this.taskManager.setCurrentSession(this.currentSessionId)
+      if (this.currentSessionId) {
+        this.taskManager.load().catch(err => console.error('Failed to load tasks:', err))
+      }
       this.queryEngine = undefined
       this.taskManager.notifyTaskList()
     }
@@ -450,6 +455,15 @@ export class ChatService {
       if (this.messageCallback) {
         this.messageCallback(errorMessage)
       }
+
+      // 发送状态更新事件，通知前端错误已发生，状态变为 idle
+      if (this.agentEventCallback) {
+        this.agentEventCallback({
+          type: 'status',
+          state: 'idle',
+          verb: 'errored',
+        })
+      }
     } finally {
       // 标记为非流式接收
       this.isStreaming = false
@@ -477,7 +491,7 @@ export class ChatService {
     }
 
     if (result.metadata?.action === 'new') {
-      this.createNewSession()
+      await this.createNewSession()
     }
 
     if (result.metadata?.action === 'compact') {
@@ -674,6 +688,7 @@ export class ChatService {
       cwd: session.workDir,
       provider,
       model: this.getCurrentModel(),
+      effortLevel: this.effortLevel,
       messages: this.buildRuntimeMessages(session),
       verbose: false,
       taskManager: this.taskManager, // 传入 TaskManager
@@ -801,14 +816,19 @@ export class ChatService {
         })
         break
 
-      case 'thinking':
+      case 'thinking': {
+        const existing = session.transcript?.find(
+          (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
+            block.type === 'thinking' && block.id === 'streaming-thinking'
+        )
         this.appendOrUpdateTranscript(session, {
           id: 'streaming-thinking',
           type: 'thinking',
-          content: event.text,
-          timestamp: now,
+          content: `${existing?.content || ''}${event.text}`,
+          timestamp: existing?.timestamp || now,
         })
         break
+      }
 
       case 'bash_output':
         this.updateBashTranscript(session, event.toolUseId, bash => ({
@@ -895,6 +915,13 @@ export class ChatService {
     )
     if (streaming) {
       streaming.id = this.generateId()
+    }
+
+    const streamingThinking = session.transcript?.find(
+      (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> => block.type === 'thinking' && block.id === 'streaming-thinking'
+    )
+    if (streamingThinking) {
+      streamingThinking.id = this.generateId()
     }
   }
 

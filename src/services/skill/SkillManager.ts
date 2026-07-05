@@ -18,11 +18,15 @@
  * You are an expert at creating Git commits...
  * ```
  *
- * Skill 目录结构：
- * - ~/.claude/cc-evancod/skills/
+ * Skill 目录结构（双目录）：
+ * - 全局：~/.claude/cc-evancod/skills/      （所有项目共享）
  *   - commit.md
  *   - review.md
- *   - refactor.md
+ * - 工作区：<workspace>/.evancod/skills/     （随项目走，可进版本库）
+ *   - deploy.md
+ *
+ * 加载顺序为「全局 → 工作区」，同名 Skill 由工作区覆盖全局，
+ * 便于项目内定制专属 Skill 而不影响全局。
  *
  * 使用场景：
  * - 用户输入 /commit 时自动加载并执行对应的 Skill
@@ -63,6 +67,13 @@ export interface SkillMetadata {
 }
 
 /**
+ * Skill 来源
+ * - global：全局目录 ~/.claude/cc-evancod/skills/
+ * - workspace：工作区目录 <workspace>/.evancod/skills/
+ */
+export type SkillSource = 'global' | 'workspace'
+
+/**
  * Skill 定义
  */
 export interface Skill {
@@ -72,19 +83,33 @@ export interface Skill {
   /** Skill 内容（去除 frontmatter 后的正文） */
   content: string
 
-  /** 文件路径 */
+  /** 文件路径（SKILL.md 或扁平 xxx.md 的完整路径） */
   filePath: string
+
+  /**
+   * 技能所在目录。
+   * - 目录式技能（skills/imagegen/SKILL.md）：指向 skills/imagegen
+   * - 扁平技能（skills/commit.md）：指向 skills
+   * 正文中引用的 scripts/、references/ 等相对资源以此为基准。
+   */
+  skillDir: string
+
+  /** 来源目录（全局 / 工作区） */
+  source: SkillSource
 }
 
 export class SkillManager {
-  /** 已加载的 Skills */
+  /** 已加载的 Skills（同名时工作区覆盖全局） */
   private skills: Map<string, Skill> = new Map()
 
-  /** Skills 目录路径 */
-  private skillsDir: string
+  /** 全局 Skills 目录路径 */
+  private globalSkillsDir: string
 
-  /** 文件监听器 */
-  private watcher?: vscode.FileSystemWatcher
+  /** 工作区 Skills 目录路径（无工作区时为 undefined） */
+  private workspaceSkillsDir?: string
+
+  /** 文件监听器（全局 + 工作区） */
+  private watchers: vscode.FileSystemWatcher[] = []
 
   /**
    * 构造函数
@@ -92,25 +117,32 @@ export class SkillManager {
    * @param context - VSCode Extension Context
    */
   constructor(private context: vscode.ExtensionContext) {
-    // Skills 目录：~/.claude/cc-evancod/skills/
+    // 全局 Skills 目录：~/.claude/cc-evancod/skills/
     const homeDir = os.homedir()
-    this.skillsDir = path.join(homeDir, '.claude', 'cc-evancod', 'skills')
+    this.globalSkillsDir = path.join(homeDir, '.claude', 'cc-evancod', 'skills')
+
+    // 工作区 Skills 目录：<workspace>/.evancod/skills/
+    const workspaceFolders = vscode.workspace.workspaceFolders
+    if (workspaceFolders && workspaceFolders.length > 0) {
+      const rootPath = workspaceFolders[0].uri.fsPath
+      this.workspaceSkillsDir = path.join(rootPath, '.evancod', 'skills')
+    }
   }
 
   /**
    * 初始化 Skill Manager
    *
    * 流程：
-   * 1. 确保 Skills 目录存在
-   * 2. 加载所有 Skill 文件
+   * 1. 确保全局 Skills 目录存在（首次创建示例 Skill）
+   * 2. 加载全局 + 工作区所有 Skill 文件
    * 3. 设置文件监听器（热重载）
    */
   async initialize(): Promise<void> {
     try {
-      // 确保目录存在
-      await this.ensureSkillsDirectory()
+      // 确保全局目录存在（工作区目录按需创建，不强制）
+      await this.ensureGlobalSkillsDirectory()
 
-      // 加载所有 Skills
+      // 加载所有 Skills（全局 → 工作区，工作区覆盖同名全局）
       await this.loadAllSkills()
 
       console.log(`Loaded ${this.skills.size} skills`)
@@ -123,17 +155,17 @@ export class SkillManager {
   }
 
   /**
-   * 确保 Skills 目录存在
+   * 确保全局 Skills 目录存在
    */
-  private async ensureSkillsDirectory(): Promise<void> {
+  private async ensureGlobalSkillsDirectory(): Promise<void> {
     try {
-      const dirUri = vscode.Uri.file(this.skillsDir)
+      const dirUri = vscode.Uri.file(this.globalSkillsDir)
       await vscode.workspace.fs.stat(dirUri)
     } catch {
       // 目录不存在，创建它
-      const dirUri = vscode.Uri.file(this.skillsDir)
+      const dirUri = vscode.Uri.file(this.globalSkillsDir)
       await vscode.workspace.fs.createDirectory(dirUri)
-      console.log(`Created skills directory: ${this.skillsDir}`)
+      console.log(`Created skills directory: ${this.globalSkillsDir}`)
 
       // 创建示例 Skill
       await this.createExampleSkill()
@@ -141,7 +173,7 @@ export class SkillManager {
   }
 
   /**
-   * 创建示例 Skill
+   * 创建示例 Skill（写入全局目录）
    */
   private async createExampleSkill(): Promise<void> {
     const exampleContent = `---
@@ -164,7 +196,7 @@ enabled: true
 使用简洁、友好的语言，避免技术术语。
 `
 
-    const filePath = path.join(this.skillsDir, 'help.md')
+    const filePath = path.join(this.globalSkillsDir, 'help.md')
     const fileUri = vscode.Uri.file(filePath)
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(exampleContent, 'utf-8'))
     console.log('Created example skill: help.md')
@@ -172,41 +204,85 @@ enabled: true
 
   /**
    * 加载所有 Skills
+   *
+   * 顺序：先全局，后工作区。工作区同名 Skill 覆盖全局。
    */
   private async loadAllSkills(): Promise<void> {
-    try {
-      const dirUri = vscode.Uri.file(this.skillsDir)
-      const files = await vscode.workspace.fs.readDirectory(dirUri)
+    this.skills.clear()
+    // 全局优先加载，工作区随后加载以覆盖同名项
+    await this.loadSkillsFromDir(this.globalSkillsDir, 'global')
+    if (this.workspaceSkillsDir) {
+      await this.loadSkillsFromDir(this.workspaceSkillsDir, 'workspace')
+    }
+  }
 
-      for (const [filename, fileType] of files) {
-        // 只处理 .md 文件
-        if (fileType === vscode.FileType.File && filename.endsWith('.md')) {
-          const filePath = path.join(this.skillsDir, filename)
-          await this.loadSkill(filePath)
+  /**
+   * 从指定目录加载 Skills
+   *
+   * 支持两种布局：
+   * - 扁平文件：skills/commit.md
+   * - 目录式：skills/imagegen/SKILL.md（Claude Skills 标准布局，可携带
+   *   scripts/、references/ 等配套资源）
+   *
+   * @param dir - 目录路径
+   * @param source - 来源标记
+   */
+  private async loadSkillsFromDir(dir: string, source: SkillSource): Promise<void> {
+    try {
+      const dirUri = vscode.Uri.file(dir)
+      const entries = await vscode.workspace.fs.readDirectory(dirUri)
+
+      for (const [name, fileType] of entries) {
+        if (fileType === vscode.FileType.File && name.endsWith('.md')) {
+          // 扁平技能：技能目录即当前目录
+          const filePath = path.join(dir, name)
+          await this.loadSkill(filePath, dir, source)
+        } else if (fileType === vscode.FileType.Directory) {
+          // 目录式技能：查找子目录下的 SKILL.md
+          const skillDir = path.join(dir, name)
+          const skillFile = path.join(skillDir, 'SKILL.md')
+          if (await this.fileExists(skillFile)) {
+            await this.loadSkill(skillFile, skillDir, source)
+          }
         }
       }
     } catch (error) {
-      console.error('Failed to load skills:', error)
+      // 目录不存在（如工作区未创建 skills 目录）时静默跳过
+      console.log(`No skills loaded from ${source} dir: ${dir}`)
+    }
+  }
+
+  /**
+   * 判断文件是否存在
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      const stat = await vscode.workspace.fs.stat(vscode.Uri.file(filePath))
+      return stat.type === vscode.FileType.File
+    } catch {
+      return false
     }
   }
 
   /**
    * 加载单个 Skill
    *
-   * @param filePath - 文件路径
+   * @param filePath - 技能文件路径（SKILL.md 或扁平 xxx.md）
+   * @param skillDir - 技能所在目录（相对资源的基准）
+   * @param source - 来源标记
    */
-  private async loadSkill(filePath: string): Promise<void> {
+  private async loadSkill(filePath: string, skillDir: string, source: SkillSource): Promise<void> {
     try {
       const fileUri = vscode.Uri.file(filePath)
       const fileData = await vscode.workspace.fs.readFile(fileUri)
       const content = Buffer.from(fileData).toString('utf-8')
 
       // 解析 Skill
-      const skill = this.parseSkill(content, filePath)
+      const skill = this.parseSkill(content, filePath, skillDir, source)
 
       if (skill) {
         this.skills.set(skill.metadata.name, skill)
-        console.log(`Loaded skill: ${skill.metadata.name}`)
+        console.log(`Loaded skill: ${skill.metadata.name} (${source})`)
       }
     } catch (error) {
       console.error(`Failed to load skill from ${filePath}:`, error)
@@ -218,9 +294,11 @@ enabled: true
    *
    * @param content - 文件内容
    * @param filePath - 文件路径
+   * @param skillDir - 技能所在目录
+   * @param source - 来源标记
    * @returns Skill 对象
    */
-  private parseSkill(content: string, filePath: string): Skill | null {
+  private parseSkill(content: string, filePath: string, skillDir: string, source: SkillSource): Skill | null {
     try {
       // 检查是否有 frontmatter
       const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/
@@ -236,15 +314,22 @@ enabled: true
       // 解析 YAML frontmatter（简单实现）
       const metadata = this.parseFrontmatter(frontmatter)
 
+      // name 缺省：目录式技能用其目录名兜底
       if (!metadata.name) {
-        console.warn(`Skill file ${filePath} does not have a name`)
-        return null
+        metadata.name = path.basename(skillDir)
+      }
+
+      // trigger 缺省：未声明时用 /{name} 兜底，保证可通过斜杠命令触发
+      if (!metadata.trigger) {
+        metadata.trigger = `/${metadata.name}`
       }
 
       return {
         metadata,
         content: body.trim(),
-        filePath
+        filePath,
+        skillDir,
+        source
       }
     } catch (error) {
       console.error(`Failed to parse skill from ${filePath}:`, error)
@@ -287,31 +372,35 @@ enabled: true
 
   /**
    * 设置文件监听器（热重载）
+   *
+   * 同时监听全局与工作区两个目录。由于工作区 Skill 会覆盖全局同名项，
+   * 单文件增量更新无法正确处理「删除工作区覆盖项后回退到全局」等场景，
+   * 因此任何变化都触发一次全量重载，保证 Map 状态始终正确。
    */
   private setupFileWatcher(): void {
-    const pattern = new vscode.RelativePattern(this.skillsDir, '*.md')
-    this.watcher = vscode.workspace.createFileSystemWatcher(pattern)
+    const dirs = [this.globalSkillsDir]
+    if (this.workspaceSkillsDir) {
+      dirs.push(this.workspaceSkillsDir)
+    }
 
-    // 文件创建
-    this.watcher.onDidCreate((uri) => {
-      console.log(`Skill file created: ${uri.fsPath}`)
-      this.loadSkill(uri.fsPath)
-    })
+    for (const dir of dirs) {
+      // **/*.md 同时覆盖扁平技能（skills/xxx.md）与目录式技能
+      // （skills/xxx/SKILL.md 及其配套 .md 资源）
+      const pattern = new vscode.RelativePattern(dir, '**/*.md')
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern)
 
-    // 文件修改
-    this.watcher.onDidChange((uri) => {
-      console.log(`Skill file changed: ${uri.fsPath}`)
-      this.loadSkill(uri.fsPath)
-    })
+      const reload = (uri: vscode.Uri, action: string) => {
+        console.log(`Skill file ${action}: ${uri.fsPath}`)
+        this.loadAllSkills()
+      }
 
-    // 文件删除
-    this.watcher.onDidDelete((uri) => {
-      console.log(`Skill file deleted: ${uri.fsPath}`)
-      const filename = path.basename(uri.fsPath, '.md')
-      this.skills.delete(filename)
-    })
+      watcher.onDidCreate((uri) => reload(uri, 'created'))
+      watcher.onDidChange((uri) => reload(uri, 'changed'))
+      watcher.onDidDelete((uri) => reload(uri, 'deleted'))
 
-    this.context.subscriptions.push(this.watcher)
+      this.watchers.push(watcher)
+      this.context.subscriptions.push(watcher)
+    }
   }
 
   /**
@@ -407,7 +496,10 @@ enabled: true
    * 销毁管理器
    */
   dispose(): void {
-    this.watcher?.dispose()
+    for (const watcher of this.watchers) {
+      watcher.dispose()
+    }
+    this.watchers = []
     this.skills.clear()
   }
 }
