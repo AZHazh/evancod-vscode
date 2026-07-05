@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, reactive } from 'vue'
-import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, Folder, ShieldCheck, X, CircleHelp, Play, Terminal } from 'lucide-vue-next'
+import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, FileX2, Folder, ShieldCheck, X, CircleHelp, Play, Terminal } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import OptionSelector from '@/components/agent/OptionSelector.vue'
 import CustomInput from '@/components/agent/CustomInput.vue'
@@ -56,22 +56,30 @@ const content = computed(() =>
 const isEditLike = computed(() =>
   ['edit_file', 'write_file', 'Edit', 'Write'].includes(props.toolName)
 )
+const isDeleteLike = computed(() =>
+  ['delete_file', 'Delete'].includes(props.toolName)
+)
 const normalizedToolName = computed(() => props.toolName.toLowerCase())
 const isWriteLike = computed(
   () => normalizedToolName.value === 'write_file' || normalizedToolName.value === 'write'
 )
-const fileActionLabel = computed(() => (isWriteLike.value ? 'Write' : 'Edit'))
+const fileActionLabel = computed(() => {
+  if (isWriteLike.value) return 'Write'
+  if (isDeleteLike.value) return 'Delete'
+  return 'Edit'
+})
 const toolNameDisplay = computed(() => {
   const labels: Record<string, string> = {
     edit_file: 'Edit',
     write_file: 'Write',
+    delete_file: 'Delete',
     bash: 'Bash',
     ask_user_question: 'Ask',
   }
   return labels[props.toolName] || props.toolName
 })
 const systemIdentity = computed(() =>
-  isEditLike.value ? `Evancod ${fileActionLabel.value}` : toolNameDisplay.value
+  (isEditLike.value || isDeleteLike.value) ? `Evancod ${fileActionLabel.value}` : toolNameDisplay.value
 )
 const responseState = ref<'pending' | 'approved' | 'denied'>(props.responseState || 'pending')
 watch(
@@ -261,8 +269,8 @@ function submitAllQuestions() {
     <template v-else>
       <div class="permission-card__header">
         <component
-          :is="isWriteLike ? FilePlus2 : FilePenLine"
-          v-if="isEditLike"
+          :is="isWriteLike ? FilePlus2 : isDeleteLike ? FileX2 : FilePenLine"
+          v-if="isEditLike || isDeleteLike"
           class="permission-card__file-icon"
           :class="`permission-card__file-icon--${responseState}`"
         />
@@ -293,7 +301,7 @@ function submitAllQuestions() {
       </div>
 
       <div class="permission-card__body">
-        <div v-if="isEditLike && filePath" class="permission-card__path-row" :title="filePath">
+        <div v-if="(isEditLike || isDeleteLike) && filePath" class="permission-card__path-row" :title="filePath">
           <Folder class="permission-card__path-icon" />
           <span>{{ filePath }}</span>
         </div>

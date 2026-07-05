@@ -155,12 +155,7 @@ async function copyMessage() {
 
 <style scoped lang="scss">
 .message-item {
-  margin-bottom: 20px;
-  /* 跳过离屏消息的渲染/布局/绘制，长列表滚动的关键优化。
-     contain-intrinsic-size 提供占位高度估算，避免滚动条跳动；
-     渲染过一次后浏览器会记住实际高度。 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
+  /* 间距由父容器 .chat-list__row 的 padding-bottom 控制，避免虚拟滚动高度测量问题 */
 }
 
 .user-message,

@@ -194,6 +194,9 @@ export const useChatStore = defineStore('chat', () => {
     agentStore.restoreFromNotifications(agentTaskNotifications.value)
 
     if (currentSession.value.transcript?.length) {
+      // 流式过程中，保留前端流式构建的临时消息，不要用后端 transcript 完全重建
+      const isStreaming = chatState.value === 'thinking' || chatState.value === 'waiting_permission'
+
       // 保留内存中已有的图片 base64，避免 transcript 重建（读盘可能缺失）时闪掉刚展示的图片
       const existingImageBase64 = new Map<string, string>()
       for (const message of uiMessages.value) {
@@ -203,7 +206,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const reordered = reorderTranscript(currentSession.value.transcript) as UIMessage[]
-      uiMessages.value = reordered.map(message => {
+      let rebuiltMessages = reordered.map(message => {
         if (message.type !== 'image_generation') return message
         if (message.image?.base64) return message
         const cached = existingImageBase64.get(message.imageId)
@@ -215,6 +218,23 @@ export const useChatStore = defineStore('chat', () => {
             : { base64: cached, mime: 'image/png' },
         }
       })
+
+      // 流式过程中，保留前端临时消息（thinking、assistant streaming）
+      if (isStreaming) {
+        const streamingMessages = uiMessages.value.filter(m =>
+          m.id === 'streaming-thinking' ||
+          m.id === 'streaming-assistant' ||
+          (m.type === 'tool_use' && m.isPending && m.partialInput)
+        )
+        // 移除 transcript 中可能存在的同类型旧消息，用流式临时消息替换
+        rebuiltMessages = rebuiltMessages.filter(m =>
+          m.id !== 'streaming-thinking' &&
+          m.id !== 'streaming-assistant'
+        )
+        rebuiltMessages.push(...streamingMessages)
+      }
+
+      uiMessages.value = rebuiltMessages
       tokenUsage.value = currentSession.value.tokenUsage || null
       return
     }
@@ -376,6 +396,11 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'content_delta':
         if (typeof event.text === 'string') {
+          // 首次收到最终回答时，finalize 当前 thinking 段
+          const existingAssistant = uiMessages.value.find(m => m.type === 'assistant_text' && m.id === 'streaming-assistant')
+          if (!existingAssistant) {
+            finalizeCurrentThinkingSegment()
+          }
           streamingText.value += event.text
           upsertAssistantText()
         }
@@ -386,6 +411,8 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'tool_use_complete':
+        // 工具调用完成时，finalize 当前 thinking 段
+        finalizeCurrentThinkingSegment()
         upsertToolUse({
           toolName: event.toolName,
           toolUseId: event.toolUseId,
@@ -507,6 +534,20 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     uiMessages.value.splice(existingIndex, 1, payload)
+  }
+
+  function finalizeCurrentThinkingSegment() {
+    const existingIndex = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
+    if (existingIndex === -1) return
+
+    const existing = uiMessages.value[existingIndex]
+    if (existing.type !== 'thinking' || !existing.content.trim()) return
+
+    // 给当前 thinking 段分配永久 ID，下次 thinking 事件将创建新块
+    uiMessages.value.splice(existingIndex, 1, {
+      ...existing,
+      id: `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    })
   }
 
   function upsertImageGeneration(event: Extract<AgentServerEvent, { type: 'image_generation' }>) {

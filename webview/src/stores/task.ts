@@ -67,10 +67,17 @@ export const useTaskStore = defineStore('task', () => {
 
   // 方法
   function setTasks(newTasks: TaskItem[]) {
-    tasks.value = newTasks
+    // 兜底过滤 deleted 任务，避免历史 deleted 任务被恢复显示
+    tasks.value = newTasks.filter(t => t.status !== 'deleted')
   }
 
   function addTask(task: TaskItem) {
+    // deleted 任务视为移除
+    if (task.status === 'deleted') {
+      removeTask(task.id)
+      return
+    }
+
     const existingIndex = tasks.value.findIndex(t => t.id === task.id)
     if (existingIndex === -1) {
       tasks.value.push(task)
@@ -81,6 +88,12 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function updateTask(taskId: string, updates: Partial<TaskItem>) {
+    // 更新为 deleted 时直接移除，而不是保留一条 deleted 记录
+    if (updates.status === 'deleted') {
+      removeTask(taskId)
+      return
+    }
+
     const index = tasks.value.findIndex(t => t.id === taskId)
     if (index !== -1) {
       tasks.value[index] = { ...tasks.value[index], ...updates }
@@ -91,6 +104,10 @@ export const useTaskStore = defineStore('task', () => {
     const index = tasks.value.findIndex(t => t.id === taskId)
     if (index !== -1) {
       tasks.value.splice(index, 1)
+    }
+    // 若删除的是当前选中任务，清空选中
+    if (selectedTaskId.value === taskId) {
+      selectedTaskId.value = null
     }
   }
 

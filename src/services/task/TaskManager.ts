@@ -329,7 +329,8 @@ export class TaskManager {
    * @returns 任务列表
    */
   listTasks(): TaskItem[] {
-    return this.listCurrentSessionTasks()
+    // 默认不返回 deleted 任务，避免 UI 列表累加已删除任务
+    return this.listCurrentSessionTasks(false)
   }
 
   /**

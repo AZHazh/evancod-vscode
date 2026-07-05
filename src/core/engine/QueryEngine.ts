@@ -154,6 +154,13 @@ export interface QueryEngineConfig {
    * 用于决定是否启用思考模式及其 budget
    */
   effortLevel?: 'low' | 'medium' | 'high' | 'max'
+
+  /**
+   * 工具调用循环的最大迭代次数（可选）
+   * 每次 API 轮次（含工具调用）消耗一次迭代。多步任务需要较高的上限，
+   * 否则会在闭环前被截断。默认 100。
+   */
+  maxIterations?: number
 }
 
 /**
@@ -477,7 +484,10 @@ export class QueryEngine {
    */
   async query(content: string, contentBlocks?: ContentBlock[]): Promise<Message> {
     try {
-      this.throwIfCancelled()
+      // 重置 abort 状态，允许新的 query
+      this.cancelled = false
+      this.abortController = new AbortController()
+
       this.onAgentEventCallback?.({ type: 'status', state: 'running', verb: 'query' })
 
       if (!this.config.provider) throw new Error('No active provider configured')
@@ -493,10 +503,13 @@ export class QueryEngine {
       this.config.messages.push(userMessage)
       this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
 
-      const MAX_ITERATIONS = 10
+      const MAX_ITERATIONS = this.config.maxIterations ?? 100
       let iteration = 0
       let finalContent = ''
       let totalUsage: TokenUsage | undefined
+      // 记录最后一轮是否以工具调用结尾。若循环因触顶而退出且最后一轮是工具调用，
+      // 需要补一轮无工具的收尾请求，避免留下空的 assistant 消息、闭环失败。
+      let lastTurnHadToolCalls = false
 
       while (iteration < MAX_ITERATIONS) {
         this.throwIfCancelled()
@@ -550,6 +563,7 @@ export class QueryEngine {
         totalUsage = mergeUsage(totalUsage, response.usage)
 
         if (response.toolCalls?.length) {
+          lastTurnHadToolCalls = true
           const assistantToolCalls: ToolCall[] = response.toolCalls.map(toolCall => ({
             id: toolCall.id,
             name: toolCall.name,
@@ -592,8 +606,41 @@ export class QueryEngine {
         break
       }
 
-      if (iteration >= MAX_ITERATIONS) {
-        console.warn('Reached maximum iterations')
+      // 循环因触顶退出，且最后一轮以工具调用结尾：此时 finalContent 仍为空，
+      // 直接落一条空 assistant 消息会导致闭环失败、任务面板停在半途。
+      // 补一轮"无工具"的收尾请求，让模型基于已有工具结果给出总结/收尾。
+      if (iteration >= MAX_ITERATIONS && lastTurnHadToolCalls) {
+        console.warn(`Reached maximum iterations (${MAX_ITERATIONS}), requesting final summary`)
+        this.throwIfCancelled()
+        this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+        const closingResponse = await this.apiClient.sendMessageStream(
+          this.config.messages,
+          (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
+            if (this.cancelled) return
+            if (type === 'start') {
+              this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+              return
+            }
+            if (type === 'thinking') {
+              this.onAgentEventCallback?.({ type: 'thinking', text: delta })
+              return
+            }
+            if (type === 'delta') {
+              this.onAgentEventCallback?.({ type: 'content_delta', text: delta })
+              this.onMessageCallback?.(delta, false)
+              return
+            }
+            this.onMessageCallback?.('', true)
+          },
+          // 不传工具定义，强制模型给出文本收尾而非继续调用工具
+          [],
+          { signal: this.abortController.signal }
+        )
+        this.throwIfCancelled()
+        finalContent = closingResponse.content
+        totalUsage = mergeUsage(totalUsage, closingResponse.usage)
+      } else if (iteration >= MAX_ITERATIONS) {
+        console.warn(`Reached maximum iterations (${MAX_ITERATIONS})`)
       }
 
       this.throwIfCancelled()
@@ -662,6 +709,7 @@ export class QueryEngine {
 
   cancel(reason = 'Query cancelled'): void {
     if (this.cancelled) return
+    this.cancelled = true
     this.cancelReason = reason
     this.abortController.abort()
     this.toolExecutor?.cancelAll()

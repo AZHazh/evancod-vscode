@@ -145,6 +145,19 @@ export class TaskUpdateTool extends Tool {
         }
       }
 
+      // 删除语义：status=deleted 走真正的删除路径（移除任务并发送 task.deleted），
+      // 而不是把任务保留为 deleted 状态，避免任务列表累加已删除任务
+      if (args.status === 'deleted') {
+        await this.taskManager.deleteTask(args.taskId)
+        return this.createSuccessResult(
+          `🗑️ 任务已删除\n\n任务 ID: ${existingTask.id}\n标题: ${existingTask.subject}`,
+          {
+            taskId: existingTask.id,
+            status: 'deleted'
+          }
+        )
+      }
+
       // 验证 addBlocks 任务是否存在
       if (args.addBlocks && args.addBlocks.length > 0) {
         for (const taskId of args.addBlocks) {

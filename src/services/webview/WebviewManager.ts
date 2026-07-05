@@ -208,6 +208,8 @@ export class WebviewManager {
             })
             this.sendSessionList()
             this.postRuntimeState()
+            // 会话恢复后主动刷新当前会话任务列表，避免重新打开对话后任务丢失
+            this.chatService.notifyTaskList()
             break
           }
 
@@ -301,7 +303,7 @@ export class WebviewManager {
           }
 
           case 'session.load': {
-            const loaded = this.chatService.loadSession(message.data.sessionId)
+            const loaded = await this.chatService.loadSession(message.data.sessionId)
             if (loaded) {
               this.postMessage({
                 type: 'session.restored',
@@ -321,7 +323,7 @@ export class WebviewManager {
             break
 
           case 'session.delete':
-            this.chatService.deleteSession(message.data.sessionId)
+            await this.chatService.deleteSession(message.data.sessionId)
             this.postMessage({
               type: 'session.restored',
               data: {

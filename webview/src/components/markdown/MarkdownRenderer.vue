@@ -23,7 +23,7 @@
  */
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { marked } from 'marked'
 
 /**
@@ -62,30 +62,38 @@ const props = withDefaults(defineProps<Props>(), {
 const renderedHtml = ref('')
 
 /**
- * 是否正在渲染
+ * rAF 合并：流式 delta 高频触发时，每帧最多解析一次，丢弃中间态，
+ * 避免每个 token 都同步 marked.parse() 占满主线程、拖垮滚动与虚拟列表测量。
  */
-const isRendering = ref(false)
+let renderRaf = 0
+function scheduleRender() {
+  if (renderRaf) return
+  renderRaf = window.requestAnimationFrame(() => {
+    renderRaf = 0
+    renderMarkdown()
+  })
+}
 
-/**
- * 配置 marked（每个组件实例独立配置，避免全局状态污染）
- */
 onMounted(() => {
+  // 首帧直接同步渲染，避免出现空白闪烁
   renderMarkdown()
 })
 
 /**
- * 监听内容变化
+ * 监听内容变化（合并到帧）
  */
 watch(() => props.content, () => {
-  renderMarkdown()
+  scheduleRender()
+})
+
+onBeforeUnmount(() => {
+  if (renderRaf) window.cancelAnimationFrame(renderRaf)
 })
 
 /**
  * 渲染 Markdown
  */
 function renderMarkdown() {
-  isRendering.value = true
-
   try {
     // 每次渲染时创建独立的 renderer，避免实例间状态污染
     const renderer = new marked.Renderer()
@@ -132,8 +140,6 @@ function renderMarkdown() {
   } catch (error) {
     console.error('Markdown 渲染失败:', error)
     renderedHtml.value = `<p class="error">渲染失败: ${error}</p>`
-  } finally {
-    isRendering.value = false
   }
 }
 
@@ -176,14 +182,8 @@ if (typeof window !== 'undefined') {
 
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
-    <!-- 渲染中提示 -->
-    <div v-if="isRendering" class="loading">
-      渲染中...
-    </div>
-
-    <!-- 渲染后的内容 -->
+    <!-- 渲染后的内容（流式期间保留旧内容，避免空白/加载态引发布局抖动） -->
     <div
-      v-else
       class="markdown-content"
       v-html="renderedHtml"
     ></div>

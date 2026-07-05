@@ -57,42 +57,95 @@ const notificationStatus = computed(() => props.notification?.status)
 const notificationText = computed(() => props.notification?.summary || props.notification?.result || '')
 const status = computed(() => {
   if (props.isPending) return 'pending'
+  if (props.resultError) return 'error'
   if (notificationStatus.value === 'failed' || bashStatus.value === 'error' || bashStatus.value === 'timeout') return 'error'
   if (notificationStatus.value === 'stopped' || bashStatus.value === 'cancelled') return 'cancelled'
   return 'success'
 })
 
+// 所有 task_* 工具（task_create/task_update/task_list/task_get）统一用 Task 图标，
+// 但标题按动作区分，方便识别是创建/更新/删除/查询
+const isTaskTool = computed(() => props.toolName.startsWith('task_'))
+
 const title = computed(() => {
+  if (isTaskTool.value) {
+    // task_update 且 status=deleted 视为删除动作
+    if (props.toolName === 'task_update' && textValue(inputRecord.value?.status) === 'deleted') {
+      return 'Task 删除'
+    }
+    const taskLabels: Record<string, string> = {
+      task_create: 'Task 创建',
+      task_update: 'Task 更新',
+      task_list: 'Task 列表',
+      task_get: 'Task 详情',
+    }
+    return taskLabels[props.toolName] || 'Task'
+  }
+
   const labels: Record<string, string> = {
     read_file: 'Read',
     edit_file: 'Edit',
     write_file: 'Write',
+    delete_file: 'Delete',
+    copy_file: 'Copy',
+    move_file: 'Move',
     bash: 'Bash',
     glob: 'Glob',
     grep: 'Grep',
+    find: 'Find',
+    list_directory: 'List',
     agent: 'Agent',
+    enter_plan_mode: 'Plan',
     exit_plan_mode: 'Plan',
     ask_user_question: 'Ask',
     mcp: 'MCP',
     skill: 'Skill',
     image_gen: 'Image',
+    web_fetch: 'Fetch',
+    web_search: 'Search',
+    git_status: 'Git Status',
+    git_diff: 'Git Diff',
+    git_log: 'Git Log',
+    git_branch: 'Git Branch',
+    lsp: 'LSP',
+    notebook_edit: 'Notebook',
+    analyze_dependencies: 'Dependencies',
+    analyze_ast: 'AST',
   }
 
   return labels[props.toolName] || props.toolName
 })
 
 const iconType = computed(() => {
+  if (isTaskTool.value) return 'task'
   if (props.toolName === 'read_file') return 'read'
   if (props.toolName === 'write_file') return 'write'
   if (props.toolName === 'edit_file') return 'edit'
+  if (props.toolName === 'delete_file') return 'delete'
+  if (props.toolName === 'copy_file') return 'copy'
+  if (props.toolName === 'move_file') return 'move'
   if (props.toolName === 'bash') return 'bash'
   if (props.toolName === 'grep') return 'grep'
   if (props.toolName === 'glob') return 'glob'
+  if (props.toolName === 'find') return 'find'
+  if (props.toolName === 'list_directory') return 'list_directory'
   if (props.toolName === 'agent') return 'agent'
   if (props.toolName === 'skill') return 'skill'
   if (props.toolName === 'mcp') return 'mcp'
   if (props.toolName === 'image_gen') return 'image'
   if (props.toolName === 'ask_user_question') return 'ask'
+  if (props.toolName === 'enter_plan_mode') return 'plan'
+  if (props.toolName === 'exit_plan_mode') return 'plan'
+  if (props.toolName === 'web_fetch') return 'web'
+  if (props.toolName === 'web_search') return 'search'
+  if (props.toolName === 'git_status') return 'git'
+  if (props.toolName === 'git_diff') return 'git'
+  if (props.toolName === 'git_log') return 'git'
+  if (props.toolName === 'git_branch') return 'git'
+  if (props.toolName === 'lsp') return 'lsp'
+  if (props.toolName === 'notebook_edit') return 'notebook'
+  if (props.toolName === 'analyze_dependencies') return 'analyze'
+  if (props.toolName === 'analyze_ast') return 'analyze'
   return 'default'
 })
 
@@ -125,7 +178,7 @@ function formatResult(value: unknown): string {
 }
 
 const hasResult = computed(() => {
-  return props.result !== undefined && ['read_file', 'grep', 'glob'].includes(props.toolName)
+  return props.result !== undefined && (['read_file', 'grep', 'glob'].includes(props.toolName) || isTaskTool.value)
 })
 
 /** 解析 image_gen 结果中的图片预览（base64） */
@@ -190,6 +243,21 @@ function openImageAt(index: number) {
           <path d="M5 5h3M5 8h4M5 11h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           <path d="M10 8l2 2M10 11l2-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
+        <!-- Delete icon -->
+        <svg v-else-if="iconType === 'delete'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Copy icon -->
+        <svg v-else-if="iconType === 'copy'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="5" y="5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M3 11V3a1 1 0 0 1 1-1h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Move icon -->
+        <svg v-else-if="iconType === 'move'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 8h4M8 6l2 2-2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
         <!-- Bash/Terminal icon -->
         <svg v-else-if="iconType === 'bash'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
@@ -204,6 +272,18 @@ function openImageAt(index: number) {
         <svg v-else-if="iconType === 'glob'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
           <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Find icon -->
+        <svg v-else-if="iconType === 'find'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M5 6.5h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- List Directory icon -->
+        <svg v-else-if="iconType === 'list_directory'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M2 3.5h4.5V8H2V3.5z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2 10h12M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M8 3.5h6M8 6h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
         <!-- Agent icon -->
         <svg v-else-if="iconType === 'agent'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -229,6 +309,55 @@ function openImageAt(index: number) {
           <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v6A1.5 1.5 0 0 1 12.5 11H6l-3 3v-3H3.5A1.5 1.5 0 0 1 2 9.5v-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M6.5 5.5a1.5 1.5 0 0 1 2.4 1.2c0 1-1.4 1.1-1.4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           <circle cx="7.5" cy="10" r="0.4" fill="currentColor"/>
+        </svg>
+        <!-- Task icon -->
+        <svg v-else-if="iconType === 'task'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v8A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4A1.5 1.5 0 0 1 3 2.5z" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M4.5 6l1.25 1.25L8 5M4.5 10h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- Plan icon -->
+        <svg v-else-if="iconType === 'plan'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M5 2v2M11 2v2M2 6h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="5.5" cy="9" r="0.5" fill="currentColor"/>
+          <circle cx="8" cy="9" r="0.5" fill="currentColor"/>
+          <circle cx="10.5" cy="9" r="0.5" fill="currentColor"/>
+        </svg>
+        <!-- Web/Fetch icon -->
+        <svg v-else-if="iconType === 'web'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M2 8h12M8 2c1.5 1.5 2 4 2 6s-.5 4.5-2 6M8 2c-1.5 1.5-2 4-2 6s.5 4.5 2 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Search icon -->
+        <svg v-else-if="iconType === 'search'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M10 10l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M7 4.5v5M4.5 7h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <!-- Git icon -->
+        <svg v-else-if="iconType === 'git'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="4" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M6 4h4M6 12h4M4 6v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- LSP icon -->
+        <svg v-else-if="iconType === 'lsp'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M2 8l3-3 3 3M14 8l-3 3-3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M5 5v6M11 5v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <!-- Notebook icon -->
+        <svg v-else-if="iconType === 'notebook'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="3" y="2" width="10" height="12" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M3 5h10M3 9h10" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="6" cy="3.5" r="0.5" fill="currentColor"/>
+          <circle cx="6" cy="6.5" r="0.5" fill="currentColor"/>
+          <circle cx="6" cy="11" r="0.5" fill="currentColor"/>
+        </svg>
+        <!-- Analyze icon -->
+        <svg v-else-if="iconType === 'analyze'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M5 8h6M8 5l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <!-- Default icon -->
         <svg v-else viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

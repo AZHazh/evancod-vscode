@@ -117,6 +117,9 @@ export class ChatService {
       ? data.currentSessionId
       : this.sessions[0]?.id || null
     this.taskManager.setCurrentSession(this.currentSessionId)
+    if (this.currentSessionId) {
+      await this.taskManager.load()
+    }
 
     for (const session of this.sessions) {
       this.expirePendingTranscript(session)
@@ -212,10 +215,8 @@ export class ChatService {
 
     // 设置为当前活动会话
     this.currentSessionId = session.id
-    this.taskManager.setCurrentSession(session.id)
-    await this.taskManager.load()
-    this.taskManager.notifyTaskList()
     this.saveSessions()
+    await this.refreshCurrentSessionTasks()
 
     return session
   }
@@ -239,17 +240,41 @@ export class ChatService {
     return this.sessions
   }
 
-  loadSession(sessionId: string): Session | null {
+  async loadSession(sessionId: string): Promise<Session | null> {
     const session = this.sessions.find(s => s.id === sessionId) || null
     if (!session) return null
 
     this.currentSessionId = session.id
-    this.taskManager.setCurrentSession(session.id)
-    this.taskManager.load().catch(err => console.error('Failed to load tasks:', err))
     this.queryEngine = undefined
     this.saveSessions()
-    this.taskManager.notifyTaskList()
+    // 先加载任务再通知，避免在任务加载完成前发送空/旧列表
+    await this.refreshCurrentSessionTasks()
     return session
+  }
+
+  /**
+   * 加载当前会话任务并通知前端。
+   *
+   * 统一“先加载、再通知”的顺序，避免会话切换/恢复时先发出空任务列表。
+   * 加载完成后再次校验 currentSessionId，防止快速切换会话导致旧结果覆盖新会话。
+   */
+  private async refreshCurrentSessionTasks(): Promise<void> {
+    const sessionId = this.currentSessionId
+    this.taskManager.setCurrentSession(sessionId)
+    if (!sessionId) {
+      this.taskManager.notifyTaskList()
+      return
+    }
+
+    try {
+      await this.taskManager.load()
+    } catch (err) {
+      console.error('Failed to load tasks:', err)
+    }
+
+    // 加载期间会话可能已切换，避免用旧会话结果覆盖
+    if (this.currentSessionId !== sessionId) return
+    this.taskManager.notifyTaskList()
   }
 
   /**
@@ -285,16 +310,15 @@ export class ChatService {
     return { ...session, transcript }
   }
 
-  deleteSession(sessionId: string): void {
+  async deleteSession(sessionId: string): Promise<void> {
     this.sessions = this.sessions.filter(session => session.id !== sessionId)
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = this.sessions[0]?.id || null
-      this.taskManager.setCurrentSession(this.currentSessionId)
-      if (this.currentSessionId) {
-        this.taskManager.load().catch(err => console.error('Failed to load tasks:', err))
-      }
       this.queryEngine = undefined
-      this.taskManager.notifyTaskList()
+      this.saveSessions()
+      // 先加载新当前会话任务再通知，避免发送空/旧列表
+      await this.refreshCurrentSessionTasks()
+      return
     }
     this.saveSessions()
   }
@@ -829,9 +853,13 @@ export class ChatService {
     switch (event.type) {
       case 'content_delta':
         if (typeof event.text === 'string') {
+          // 首次收到最终回答文本时，finalize 当前 thinking 段（如果有）
           const existing = session.transcript?.find(
             (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
           )
+          if (!existing) {
+            this.finalizeCurrentThinkingSegment(session)
+          }
           this.appendOrUpdateTranscript(session, {
             id: 'streaming-assistant',
             type: 'assistant_text',
@@ -843,6 +871,8 @@ export class ChatService {
         break
 
       case 'tool_use_complete':
+        // 工具调用完成时，finalize 当前 thinking 段，下一段 thinking 将开启新块
+        this.finalizeCurrentThinkingSegment(session)
         this.appendOrUpdateTranscript(session, {
           id: event.toolUseId,
           type: 'tool_use',
@@ -1004,6 +1034,15 @@ export class ChatService {
     block.isPending = block.bash.status === 'running'
   }
 
+  private finalizeCurrentThinkingSegment(session: Session): void {
+    const streamingThinking = session.transcript?.find(
+      (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> => block.type === 'thinking' && block.id === 'streaming-thinking'
+    )
+    if (streamingThinking && streamingThinking.content.trim()) {
+      streamingThinking.id = this.generateId()
+    }
+  }
+
   private finalizeStreamingTranscript(session: Session): void {
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
@@ -1012,12 +1051,8 @@ export class ChatService {
       streaming.id = this.generateId()
     }
 
-    const streamingThinking = session.transcript?.find(
-      (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> => block.type === 'thinking' && block.id === 'streaming-thinking'
-    )
-    if (streamingThinking) {
-      streamingThinking.id = this.generateId()
-    }
+    // Finalize 最后一段 thinking（如果还在 streaming 状态）
+    this.finalizeCurrentThinkingSegment(session)
   }
 
   private expirePendingTranscript(session: Session): void {

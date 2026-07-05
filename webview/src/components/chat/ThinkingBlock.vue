@@ -56,7 +56,7 @@ onBeforeUnmount(() => {
   <div class="thinking-block">
     <button class="thinking-block__toggle" type="button" @click="toggleExpanded">
       <span v-if="isActive" class="thinking-block__sparkle" aria-hidden="true">✦</span>
-      <span class="thinking-block__label">{{ isActive ? '思考中...' : '已思考' }}</span>
+      <span class="thinking-block__label">思考中{{ isActive ? '...' : '' }}</span>
       <span v-if="!isActive && !expanded" class="thinking-block__icon">▾</span>
       <span v-if="!isActive && expanded" class="thinking-block__icon">▴</span>
       <template v-if="isActive">

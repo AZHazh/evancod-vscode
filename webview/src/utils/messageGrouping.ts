@@ -13,7 +13,7 @@ import type { UIMessage } from '../types'
 
 interface MessageGroup {
   user?: UIMessage
-  thinking?: UIMessage
+  thinkings: UIMessage[]  // 改为数组，支持多段 thinking
   tools: Array<{
     toolUse: UIMessage
     toolResult?: UIMessage
@@ -38,6 +38,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
       }
       currentGroup = {
         user: block,
+        thinkings: [],
         tools: [],
         images: [],
         assistantTexts: [],
@@ -49,6 +50,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
     if (!currentGroup) {
       // 没有用户消息，创建一个空组（边缘情况）
       currentGroup = {
+        thinkings: [],
         tools: [],
         images: [],
         assistantTexts: [],
@@ -58,7 +60,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
 
     switch (block.type) {
       case 'thinking':
-        currentGroup.thinking = block
+        currentGroup.thinkings.push(block)
         break
 
       case 'tool_use': {
@@ -104,6 +106,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
 
 /**
  * 将分组后的消息重新展平，按理想顺序排列
+ * thinking 和 tool 交错显示：thinking-1 → tool-1 → thinking-2 → tool-2 → thinking-3 → 最终回答
  */
 export function flattenGroups(groups: MessageGroup[]): UIMessage[] {
   const result: UIMessage[] = []
@@ -114,30 +117,46 @@ export function flattenGroups(groups: MessageGroup[]): UIMessage[] {
       result.push(group.user)
     }
 
-    // 2. thinking（如果有）
-    if (group.thinking) {
-      result.push(group.thinking)
-    }
-
-    // 3. 权限请求（紧跟工具调用前）
+    // 2. 权限请求（紧跟工具调用前）
     for (const permReq of group.permissionRequests) {
       result.push(permReq)
     }
 
-    // 4. 工具调用 + 结果（成对出现）
+    // 3. thinking 和 tool 交错：按时间戳混合排序
+    const thinkingsAndTools: Array<{ type: 'thinking' | 'tool'; data: any; timestamp: number }> = []
+
+    for (const thinking of group.thinkings) {
+      thinkingsAndTools.push({ type: 'thinking', data: thinking, timestamp: thinking.timestamp })
+    }
+
     for (const { toolUse, toolResult } of group.tools) {
-      result.push(toolUse)
-      if (toolResult) {
-        result.push(toolResult)
+      thinkingsAndTools.push({
+        type: 'tool',
+        data: { toolUse, toolResult },
+        timestamp: toolUse.timestamp
+      })
+    }
+
+    // 按时间戳排序，实现交错
+    thinkingsAndTools.sort((a, b) => a.timestamp - b.timestamp)
+
+    for (const item of thinkingsAndTools) {
+      if (item.type === 'thinking') {
+        result.push(item.data)
+      } else {
+        result.push(item.data.toolUse)
+        if (item.data.toolResult) {
+          result.push(item.data.toolResult)
+        }
       }
     }
 
-    // 5. 生成图片（在最终回答之前展示）
+    // 4. 生成图片（在最终回答之前展示）
     for (const image of group.images) {
       result.push(image)
     }
 
-    // 6. 助手文本（最终回答）
+    // 5. 助手文本（最终回答）
     for (const text of group.assistantTexts) {
       result.push(text)
     }
