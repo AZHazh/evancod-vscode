@@ -112,6 +112,9 @@ export class WebviewManager {
       }
     )
 
+    // Webview 编辑器标签不会自动继承扩展或活动栏图标，需要显式设置。
+    this.panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'extension-icon.png')
+
     // 设置 HTML 内容
     this.panel.webview.html = this.getHtmlContent(this.panel.webview)
 

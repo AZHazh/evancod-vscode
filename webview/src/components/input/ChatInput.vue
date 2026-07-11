@@ -389,9 +389,12 @@ function handleMessage(event: MessageEvent) {
 
 function handleClickOutside(event: MouseEvent) {
   if (!openPanel.value) return
-  if (chatInputEl.value && !chatInputEl.value.contains(event.target as Node)) {
-    openPanel.value = null
+  const target = event.target as HTMLElement
+  // 点击浮层面板内部，或点击触发按钮（交给 togglePanel 处理），都不在此关闭
+  if (target.closest('.floating-panel') || target.closest('.chat-input__controls')) {
+    return
   }
+  openPanel.value = null
 }
 
 onMounted(() => {
