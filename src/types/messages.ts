@@ -72,7 +72,7 @@ export type AgentServerEvent =
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'
-      subtype: 'task_started' | 'task_progress' | 'task_notification'
+      subtype: 'task_started' | 'task_progress' | 'task_notification' | 'compact_started' | 'compact_complete'
       message?: string
       data?: AgentTaskNotification | Record<string, unknown>
     }

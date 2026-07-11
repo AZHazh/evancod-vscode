@@ -47,6 +47,7 @@ const providerStore = useProviderStore()
 const vscode = useVSCode()
 const input = ref('')
 const textarea = ref<HTMLTextAreaElement>()
+const chatInputEl = ref<HTMLElement>()
 const openPanel = ref<'add' | 'permission' | 'model' | 'context' | 'slash' | 'at' | null>(null)
 const attachments = ref<ComposerAttachment[]>([])
 const workspaceReferences = ref<WorkspaceReference[]>([])
@@ -79,22 +80,26 @@ const permissionOptions = [
   },
 ] as const
 
+const usage = computed(() => chatStore.tokenUsage)
 const contextWindow = computed(
   () =>
+    usage.value?.contextWindow ||
     providerStore.activeProvider?.modelContextWindows?.[providerStore.currentModel] ||
     providerStore.activeProvider?.autoCompactWindow ||
     200000
 )
-const usage = computed(() => chatStore.tokenUsage)
 const inputTokens = computed(() => usage.value?.inputTokens || 0)
 const cacheReadTokens = computed(() => usage.value?.cacheReadTokens || 0)
 const outputTokens = computed(() => usage.value?.outputTokens || 0)
-const usedTokens = computed(() => inputTokens.value + outputTokens.value)
+const usedTokens = computed(
+  () => usage.value?.estimatedCurrentTokens || usage.value?.lastPromptTokens || inputTokens.value
+)
 const remainingTokens = computed(() => Math.max(contextWindow.value - usedTokens.value, 0))
 const contextPercent = computed(() =>
-  contextWindow.value
+  usage.value?.percentUsed ??
+  (contextWindow.value
     ? Math.min(Math.round((usedTokens.value / contextWindow.value) * 100), 100)
-    : 0
+    : 0)
 )
 const currentPermission = computed(
   () =>
@@ -382,16 +387,28 @@ function handleMessage(event: MessageEvent) {
   }
 }
 
+function handleClickOutside(event: MouseEvent) {
+  if (!openPanel.value) return
+  if (chatInputEl.value && !chatInputEl.value.contains(event.target as Node)) {
+    openPanel.value = null
+  }
+}
+
 onMounted(() => {
   window.addEventListener('message', handleMessage)
+  document.addEventListener('mousedown', handleClickOutside)
   vscode.postMessage({ type: 'slash.commands.request' })
 })
-onUnmounted(() => window.removeEventListener('message', handleMessage))
+onUnmounted(() => {
+  window.removeEventListener('message', handleMessage)
+  document.removeEventListener('mousedown', handleClickOutside)
+})
 </script>
 
 <template>
   <div class="composer-wrap">
     <div
+      ref="chatInputEl"
       class="chat-input"
       :class="{ focused: openPanel }"
       @dragenter.prevent="isDragActive = true"
@@ -454,10 +471,11 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
           <button
             class="pill-trigger model-trigger"
             :class="{ active: openPanel === 'model' }"
+            :title="`${modelLabel} · ${providerLabel}`"
             @click="togglePanel('model')"
           >
-            {{ modelLabel }}
-            <span>{{ providerLabel }}</span>
+            <span class="model-trigger__model">{{ modelLabel }}</span>
+            <span class="model-trigger__provider">{{ providerLabel }}</span>
             <ChevronDown />
           </button>
 
@@ -520,8 +538,8 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
             @click="selectModel(group.provider.id, option.model)"
           >
             <span class="radio-dot" />
-            <span>
-              <strong>{{ option.model }}</strong>
+            <span class="model-row__content">
+              <strong :title="option.model">{{ option.model }}</strong>
               <small>{{ option.kind }} 模型 · {{ group.provider.apiFormat }}</small>
             </span>
           </button>
@@ -730,8 +748,28 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
 }
 
 .model-trigger {
-  max-width: 260px;
+  min-width: 0;
+  max-width: min(42vw, 260px);
+  flex: 1 1 auto;
   overflow: hidden;
+  white-space: nowrap;
+
+  &__model,
+  &__provider {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__model {
+    flex: 1 1 auto;
+  }
+
+  &__provider {
+    flex: 0 1 auto;
+    max-width: 96px;
+  }
 }
 
 .floating-panel {
@@ -759,7 +797,7 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
 .model-panel {
   right: 174px;
   bottom: 58px;
-  width: 360px;
+  width: min(360px, calc(100vw - 40px));
   max-height: 500px;
   overflow-y: auto;
 }
@@ -838,6 +876,18 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
   border-color: #ffb29c;
   box-shadow: inset 0 0 0 4px #0c0c0c;
   background: #ffb29c;
+}
+
+.model-row__content {
+  min-width: 0;
+
+  strong,
+  small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .effort-box {
@@ -923,11 +973,17 @@ svg {
     gap: 6px;
   }
   .model-trigger {
-    max-width: 150px;
+    max-width: min(150px, 36vw);
   }
   .model-panel,
   .context-panel {
     right: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .model-trigger__provider {
+    display: none;
   }
 }
 </style>

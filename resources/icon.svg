@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <g fill="currentColor">
+    <circle cx="12" cy="12" r="3.2"/>
+    <g id="rays">
+      <path d="M11.55 1h.9l.35 8.2h-1.6z"/>
+      <path d="M13.45 1.18l.88.16-.98 8.15-1.58-.28z"/>
+      <path d="M15.28 1.68l.85.31-2.27 7.89-1.5-.55z"/>
+      <path d="M16.99 2.47l.78.45-3.49 7.43-1.39-.8z"/>
+      <path d="M18.56 3.55l.69.58-4.62 6.78-1.23-1.03z"/>
+      <path d="M19.92 4.91l.58.69-5.63 5.98-1.03-1.23z"/>
+      <path d="M21 6.48l.45.78-6.48 5.04-.8-1.39z"/>
+      <path d="M21.79 8.19l.31.85-7.2 3.94-.55-1.5z"/>
+      <path d="M22.29 10.02l.16.88-7.74 2.72-.28-1.58z"/>
+      <path d="M23 11.55v.9l-8.2.35v-1.6z"/>
+    </g>
+    <use href="#rays" transform="rotate(90 12 12)"/>
+    <use href="#rays" transform="rotate(180 12 12)"/>
+    <use href="#rays" transform="rotate(270 12 12)"/>
+    <g opacity=".95">
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(5 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(15 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(25 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(35 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(45 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(55 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(65 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(75 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(85 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(95 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(105 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(115 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(125 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(135 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(145 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(155 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(165 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(175 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(185 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(195 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(205 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(215 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(225 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(235 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(245 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(255 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(265 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(275 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(285 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(295 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(305 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(315 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(325 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(335 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(345 12 12)"/>
+      <path d="M12.18 1h.42l.16 8.25h-.75z" transform="rotate(355 12 12)"/>
+    </g>
+  </g>
+</svg>

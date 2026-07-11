@@ -67,7 +67,7 @@ export async function activate(context: vscode.ExtensionContext) {
         return
       }
       await chatService.createNewSession()
-      webviewManager.show()
+      webviewManager.show({ createFreshSessionOnOpen: false })
     })
   )
 

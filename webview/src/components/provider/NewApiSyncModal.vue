@@ -126,11 +126,6 @@ const tokens = ref<NewApiToken[]>([])
  */
 const selectedTokenIds = ref<Set<number>>(new Set())
 
-/**
- * 可用的模型列表（从所有 Token 中提取）
- */
-const availableModels = ref<string[]>([])
-
 // ========== Step 4: 模型映射 ==========
 
 /**
@@ -195,7 +190,6 @@ watch(
     currentStep.value = 2
     siteUrl.value = preview.siteUrl
     tokens.value = preview.tokens || []
-    availableModels.value = preview.models || []
     selectedTokenIds.value = new Set(tokens.value.map(token => token.id))
     modelMappings.value.clear()
     errorMessage.value = ''
@@ -221,7 +215,6 @@ function resetState() {
   siteUrl.value = props.preview?.siteUrl || ''
   tokens.value = props.preview?.tokens || []
   selectedTokenIds.value.clear()
-  availableModels.value = props.preview?.models || []
   modelMappings.value.clear()
   errorMessage.value = ''
   step1Errors.value = { siteUrl: '' }
@@ -319,7 +312,6 @@ async function startAuthorization() {
 
     // 保存 Token 列表
     tokens.value = response.data.tokens
-    availableModels.value = response.data.models
 
     // 进入 Step 2（选择 Token）
     currentStep.value = 2
@@ -349,31 +341,58 @@ function initializeModelMappings() {
   }
 }
 
+function getTokenModels(tokenId: number): string[] {
+  return tokens.value.find(token => token.id === tokenId)?.models || []
+}
+
+const SPECIALIZED_MODEL_PATTERN = /(?:^|[-_.])(image|vision|embedding|embed|rerank|audio|speech|tts|stt|whisper|moderation)(?:[-_.]|$)/i
+
+function getModelVersion(model: string): number[] {
+  return Array.from(model.matchAll(/\d+/g), match => Number(match[0]))
+    .filter(version => version < 10_000_000)
+    .slice(0, 2)
+}
+
+function compareModelVersions(left: string, right: string): number {
+  const leftVersion = getModelVersion(left)
+  const rightVersion = getModelVersion(right)
+  const length = Math.max(leftVersion.length, rightVersion.length)
+
+  for (let index = 0; index < length; index++) {
+    const difference = (leftVersion[index] || 0) - (rightVersion[index] || 0)
+    if (difference !== 0) return difference
+  }
+
+  const leftPreview = /preview|beta|experimental/i.test(left)
+  const rightPreview = /preview|beta|experimental/i.test(right)
+  if (leftPreview !== rightPreview) return leftPreview ? -1 : 1
+
+  return left.localeCompare(right)
+}
+
+function selectLatestModel(models: string[]): string | undefined {
+  const generalModels = models.filter(model => !SPECIALIZED_MODEL_PATTERN.test(model))
+  return [...generalModels].sort(compareModelVersions).at(-1)
+}
+
+function selectLatestFamilyModel(models: string[], family: RegExp, fallback: string): string {
+  const matches = models.filter(model => family.test(model) && !SPECIALIZED_MODEL_PATTERN.test(model))
+  return [...matches].sort(compareModelVersions).at(-1) || fallback
+}
+
 /**
  * 创建默认模型映射
- * 智能选择合适的模型
+ * 按模型名称中的版本号选择最新通用模型
  */
 function createDefaultMapping(token: NewApiToken): ModelMapping {
   const models = token.models || []
-
-  // 查找 Sonnet 模型
-  const sonnet =
-    models.find(m => m.includes('sonnet') || m.includes('claude-3-5-sonnet')) ||
-    models[0] ||
-    'claude-3-5-sonnet-20241022'
-
-  // 查找 Opus 模型
-  const opus =
-    models.find(m => m.includes('opus') || m.includes('claude-3-opus')) ||
-    sonnet
-
-  // 查找 Haiku 模型
-  const haiku =
-    models.find(m => m.includes('haiku') || m.includes('claude-3-5-haiku')) ||
-    sonnet
+  const main = selectLatestModel(models) || models[0] || 'claude-3-5-sonnet-20241022'
+  const sonnet = selectLatestFamilyModel(models, /sonnet/i, main)
+  const opus = selectLatestFamilyModel(models, /opus/i, main)
+  const haiku = selectLatestFamilyModel(models, /haiku/i, main)
 
   return {
-    main: sonnet,
+    main,
     sonnet,
     opus,
     haiku,
@@ -520,7 +539,7 @@ function toggleSelectAll() {
       <!-- 标题 -->
       <div class="modal-header">
         <div class="header-content">
-          <h2>同步 new-api Token</h2>
+          <h2>同步中转 Token</h2>
           <div class="step-indicator">
             步骤 {{ currentStep }}/4: {{ stepTitle }}
           </div>
@@ -594,7 +613,6 @@ function toggleSelectAll() {
               <div class="token-info">
                 <div class="token-name">{{ token.name }}</div>
                 <div class="token-details">
-                  <span>剩余额度: {{ token.remain_quota }}</span>
                   <span>支持模型: {{ token.models.length }} 个</span>
                 </div>
               </div>
@@ -621,7 +639,7 @@ function toggleSelectAll() {
                   <label>主模型</label>
                   <select v-model="modelMappings.get(tokenId)!.main">
                     <option
-                      v-for="model in availableModels"
+                      v-for="model in getTokenModels(tokenId)"
                       :key="model"
                       :value="model"
                     >

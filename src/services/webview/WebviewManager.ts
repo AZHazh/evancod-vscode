@@ -45,6 +45,7 @@ export class WebviewManager {
    * undefined 表示还没有创建
    */
   private panel: vscode.WebviewPanel | undefined
+  private createFreshSessionOnReady = false
 
   /**
    * 可释放资源列表
@@ -81,18 +82,20 @@ export class WebviewManager {
    * 4. 设置消息处理器
    * 5. 监听 dispose 事件
    */
-  show() {
+  show(options: { createFreshSessionOnOpen?: boolean } = {}) {
     // 如果已存在，直接显示
     if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.One)
+      this.panel.reveal()
       return
     }
+
+    this.createFreshSessionOnReady = options.createFreshSessionOnOpen !== false
 
     // 创建新的 Webview 面板
     this.panel = vscode.window.createWebviewPanel(
       'evancodChat', // 唯一标识符
       'Evancod 聊天', // 面板标题
-      vscode.ViewColumn.One, // 显示在第一列
+      vscode.ViewColumn.Beside, // 默认在当前编辑器右侧打开
       {
         // 启用 JavaScript
         enableScripts: true,
@@ -186,10 +189,12 @@ export class WebviewManager {
             // Webview 准备就绪，发送初始数据
             // 这是 Webview 加载后发送的第一条消息
 
-            // 如果没有活动会话，自动创建一个
+            const shouldCreateFreshSession = this.createFreshSessionOnReady
+            this.createFreshSessionOnReady = false
+
             let session = this.chatService.getCurrentSession()
-            if (!session) {
-              console.log('[WebviewManager] No active session, creating new one')
+            if (shouldCreateFreshSession || !session) {
+              console.log('[WebviewManager] Creating a fresh session for the Webview')
               session = await this.chatService.createNewSession()
             }
 

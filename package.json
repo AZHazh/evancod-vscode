@@ -4,6 +4,7 @@
   "description": "AI-powered coding agent for VSCode",
   "version": "0.1.0",
   "publisher": "evancod",
+  "icon": "resources/extension-icon.png",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -19,7 +20,7 @@
       {
         "command": "evancod.openChat",
         "title": "Evancod: 打开聊天",
-        "icon": "$(comment-discussion)"
+        "icon": "resources/extension-icon.png"
       },
       {
         "command": "evancod.newSession",
@@ -28,7 +29,7 @@
       },
       {
         "command": "evancod.syncNewApi",
-        "title": "Evancod: 同步 new-api",
+        "title": "Evancod: 同步中转",
         "icon": "$(sync)"
       }
     ],
@@ -47,6 +48,24 @@
           "type": "webview",
           "id": "evancod.chatView",
           "name": "聊天"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "evancod.openChat",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "evancod.openChat",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
         }
       ]
     },

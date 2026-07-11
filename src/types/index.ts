@@ -28,6 +28,9 @@ export interface TokenUsage {
   cacheWriteTokens?: number
   contextWindow?: number
   estimatedRemaining?: number
+  lastPromptTokens?: number        // 最后一次请求的实际 input tokens
+  estimatedCurrentTokens?: number  // 当前上下文估算（用于计算百分比）
+  percentUsed?: number             // 上下文使用百分比
   [key: string]: unknown
 }
 

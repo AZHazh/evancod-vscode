@@ -63,6 +63,7 @@ export const useChatStore = defineStore('chat', () => {
   const uiMessages = ref<UIMessage[]>([])
   const pendingOptimisticUserMessageIds = ref(new Set<string>())
   const agentTaskNotifications = ref<Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>>({})
+  const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
   const currentModel = computed(() => providerStore.currentModel)
   const messages = computed(() => currentSession.value?.messages || [])
@@ -481,6 +482,22 @@ export const useChatStore = defineStore('chat', () => {
       case 'system_notification':
         if (event.subtype === 'task_notification') {
           applyTaskNotification(event.data)
+        } else if (event.subtype === 'compact_started') {
+          compactionStatus.value = 'compacting'
+        } else if (event.subtype === 'compact_complete') {
+          // 压缩失败时（success===false）直接复位，不展示"已压缩"
+          const succeeded = (event.data as Record<string, unknown>)?.success !== false
+          if (!succeeded) {
+            compactionStatus.value = 'idle'
+          } else {
+            compactionStatus.value = 'completed'
+            // 3秒后自动隐藏
+            setTimeout(() => {
+              if (compactionStatus.value === 'completed') {
+                compactionStatus.value = 'idle'
+              }
+            }, 3000)
+          }
         }
         break
 
@@ -493,10 +510,18 @@ export const useChatStore = defineStore('chat', () => {
         activeToolName.value = null
         pendingPermission.value = null
         tokenUsage.value = (event.usage || null) as TokenUsage | null
+        // 兜底：若压缩因失败未收到 compact_complete，避免 UI 永久卡在"正在压缩"
+        if (compactionStatus.value === 'compacting') {
+          compactionStatus.value = 'idle'
+        }
         break
 
       case 'status':
         chatState.value = event.state as any
+        // 出错等导致回到 idle 时，同样兜底复位压缩状态
+        if (event.state === 'idle' && compactionStatus.value === 'compacting') {
+          compactionStatus.value = 'idle'
+        }
         break
     }
   }
@@ -866,6 +891,7 @@ export const useChatStore = defineStore('chat', () => {
     activeToolName,
     pendingPermission,
     tokenUsage,
+    compactionStatus,
     initialize,
     createNewSession,
     sendMessage,

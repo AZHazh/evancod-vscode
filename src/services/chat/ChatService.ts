@@ -28,6 +28,8 @@ import { readImageAsBase64 } from '../../core/tools/image/imageStorage'
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
+import { createApiClient } from '../../core/services/api/AnthropicClient'
+import { compactConversation } from '../compact/compact'
 
 /**
  * 消息回调类型
@@ -584,9 +586,52 @@ export class ChatService {
     }
 
     if (result.metadata?.action === 'compact') {
-      session.compactSummary = this.createCompactSummary(session)
-      session.updatedAt = Date.now()
-      result.message = '已压缩当前会话上下文（确定性摘要，未调用模型）'
+      const provider = this.providerService.getActiveProvider()
+      if (!provider) {
+        result.message = '压缩失败：未配置可用 Provider'
+      } else {
+        try {
+          this.agentEventCallback?.({
+            type: 'system_notification',
+            subtype: 'compact_started',
+            data: { message: '上下文正在压缩' },
+          })
+
+          const summaryModel = provider.models.haiku || this.getCurrentModel()
+          const apiClient = createApiClient({
+            provider,
+            model: summaryModel,
+            effortLevel: 'low',
+          })
+          const { summaryMessage } = await compactConversation(
+            this.buildRuntimeMessages(session),
+            apiClient,
+            summaryModel
+          )
+
+          session.compactSummary = summaryMessage.content
+          // 真实裁剪旧历史：保留摘要和最近 10 条消息
+          session.messages = [summaryMessage, ...session.messages.slice(-10)]
+          session.updatedAt = Date.now()
+          session.messageCount = session.messages.length
+          this.queryEngine = undefined
+          result.message = '已使用模型生成会话摘要并压缩上下文'
+
+          this.agentEventCallback?.({
+            type: 'system_notification',
+            subtype: 'compact_complete',
+            data: { message: '上下文已自动压缩' },
+          })
+        } catch (error) {
+          result.message = `压缩失败：${error instanceof Error ? error.message : '未知错误'}`
+          // 通知前端复位压缩状态，避免 UI 永久卡在"正在压缩"
+          this.agentEventCallback?.({
+            type: 'system_notification',
+            subtype: 'compact_complete',
+            data: { message: result.message, success: false },
+          })
+        }
+      }
     }
 
     const assistantMessage: Message = {
@@ -1085,15 +1130,27 @@ export class ChatService {
 
   private buildRuntimeMessages(session: Session): Message[] {
     const messages = [...session.messages]
-    const contextParts = [session.compactSummary ? `<compact_summary>\n${session.compactSummary}\n</compact_summary>` : '', this.buildMemoryContext()]
-      .filter(Boolean)
-      .join('\n\n')
 
-    if (contextParts) {
+    // 如果有压缩摘要或记忆，作为 user 消息注入到最前面
+    const contextParts: string[] = []
+
+    if (session.compactSummary) {
+      const hasSummaryMessage = messages.some(message => message.id.startsWith('compact-boundary-'))
+      if (!hasSummaryMessage) {
+        contextParts.push(`<compact_summary>\n${session.compactSummary}\n</compact_summary>`)
+      }
+    }
+
+    const memoryContext = this.buildMemoryContext()
+    if (memoryContext) {
+      contextParts.push(memoryContext)
+    }
+
+    if (contextParts.length > 0) {
       messages.unshift({
         id: 'runtime-context',
-        role: 'system',
-        content: contextParts,
+        role: 'user',  // 改为 user，确保不会被 API 客户端过滤
+        content: `以下是会话的上下文信息，请参考：\n\n${contextParts.join('\n\n')}`,
         timestamp: Date.now(),
       })
     }

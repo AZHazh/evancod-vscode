@@ -148,7 +148,7 @@ function handleModalClose() {
       <div class="actions">
         <Button variant="secondary" @click="handleSyncNewApi">
           <template #icon><RefreshCw /></template>
-          同步 new-api
+          同步中转
         </Button>
         <Button variant="primary" @click="handleAddProvider">
           <template #icon><Plus /></template>
@@ -207,7 +207,7 @@ function handleModalClose() {
       <div v-if="providers.length === 0" class="empty-state">
         <Package class="empty-icon" />
         <div class="empty-text">还没有配置服务商</div>
-        <div class="empty-hint">点击“新增服务商”或“同步 new-api”开始</div>
+        <div class="empty-hint">点击“新增服务商”或“同步中转”开始</div>
       </div>
     </div>
 

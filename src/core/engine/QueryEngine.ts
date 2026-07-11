@@ -35,6 +35,10 @@ import { saveGeneratedImages, timestampedImagePath } from '../tools/image/imageS
 import { TaskManager } from '../../services/task/TaskManager'
 import { PlanModeManager } from '../../services/plan/PlanModeManager'
 import { AgentCoordinator } from '../../services/agent/AgentCoordinator'
+import { getContextWindowForModel, getEffectiveContextWindow } from '../../utils/model/modelContextWindows'
+import { microcompact } from '../../services/compact/microcompact'
+import { compactConversation } from '../../services/compact/compact'
+import { shouldAutoCompact } from '../../services/compact/autoCompact'
 import {
   Tool,
   FileReadTool,
@@ -203,6 +207,11 @@ function mergeUsage(current: TokenUsage | undefined, next: unknown): TokenUsage 
     }
   }
 
+  // 记录最后一次请求的实际 input tokens（不累加）
+  if (typeof incoming.inputTokens === 'number') {
+    merged.lastPromptTokens = incoming.inputTokens
+  }
+
   for (const [key, value] of Object.entries(incoming)) {
     if (!(key in merged)) {
       merged[key] = value
@@ -253,6 +262,7 @@ export class QueryEngine {
   private abortController = new AbortController()
   private cancelled = false
   private cancelReason = 'Query cancelled'
+  private consecutiveCompactFailures = 0
 
   /**
    * 构造函数
@@ -515,6 +525,42 @@ export class QueryEngine {
         this.throwIfCancelled()
         iteration++
 
+        // 微压缩：每轮前清理旧的工具结果内容
+        if (iteration > 1) {
+          this.config.messages = microcompact(this.config.messages, 5)
+        }
+
+        // 检查是否需要自动压缩
+        if (totalUsage?.lastPromptTokens) {
+          const currentTokens = totalUsage.lastPromptTokens
+          if (shouldAutoCompact(currentTokens, this.config.model, this.consecutiveCompactFailures)) {
+            try {
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_started',
+                data: { message: '上下文正在压缩' },
+              })
+              await this.performAutoCompact()
+              this.consecutiveCompactFailures = 0
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_complete',
+                data: { message: '上下文已自动压缩', success: true },
+              })
+            } catch (error) {
+              this.consecutiveCompactFailures++
+              console.error('Auto-compact failed:', error)
+              // 压缩失败也要通知前端复位状态，避免 UI 永久停在"正在压缩"
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_complete',
+                data: { message: '上下文压缩失败', success: false },
+              })
+              // 继续执行，不中断工具循环
+            }
+          }
+        }
+
         const toolDefinitions = this.tools.map(tool => tool.getDefinition())
         let assistantContent = ''
 
@@ -651,6 +697,22 @@ export class QueryEngine {
         timestamp: Date.now(),
       }
       this.config.messages.push(finalMessage)
+
+      // 计算上下文窗口使用百分比
+      if (totalUsage) {
+        const contextWindow = getContextWindowForModel(this.config.model)
+        const effectiveWindow = getEffectiveContextWindow(this.config.model)
+
+        totalUsage.contextWindow = contextWindow
+        // 用最后一次 API 的 prompt tokens，而非累计的 inputTokens
+        const currentTokens = totalUsage.lastPromptTokens || totalUsage.inputTokens || 0
+        totalUsage.estimatedCurrentTokens = currentTokens
+        totalUsage.percentUsed = Math.min(
+          Math.round((currentTokens / effectiveWindow) * 100),
+          100
+        )
+      }
+
       this.onAgentEventCallback?.({ type: 'message_complete', usage: totalUsage })
       this.onCompleteCallback?.(finalMessage)
       return finalMessage
@@ -867,5 +929,35 @@ export class QueryEngine {
 
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
+  }
+
+  /**
+   * 执行自动压缩
+   * 生成摘要并替换消息数组
+   */
+  private async performAutoCompact(): Promise<void> {
+    if (!this.apiClient) {
+      throw new Error('API client not initialized')
+    }
+
+    // 生成摘要：优先使用 Haiku 模型降低压缩成本
+    const summaryModel = this.config.provider.models.haiku || this.config.model
+    const summaryApiClient = createApiClient({
+      provider: this.config.provider,
+      model: summaryModel,
+      effortLevel: 'low',
+    })
+    const { summaryMessage } = await compactConversation(
+      this.config.messages,
+      summaryApiClient,
+      summaryModel
+    )
+
+    // 保留最近 10 条消息
+    const keepRecentCount = 10
+    const recentMessages = this.config.messages.slice(-keepRecentCount)
+
+    // 替换消息数组：摘要 + 最近消息
+    this.config.messages = [summaryMessage, ...recentMessages]
   }
 }

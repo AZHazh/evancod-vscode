@@ -59,7 +59,7 @@ onUnmounted(() => document.removeEventListener('mousedown', handleDocumentClick)
 
       <Button variant="secondary" size="small" @click="handleSync">
         <template #icon><RefreshCw /></template>
-        同步 new-api
+        同步中转
       </Button>
 
       <Button variant="secondary" size="small" @click="handleOpenProviders">
