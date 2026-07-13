@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { Package, Plus, RefreshCw, Pencil, Trash2, Play } from 'lucide-vue-next'
 import { useVSCode } from '@/composables/useVSCode'
 import Button from '@/components/common/Button.vue'
@@ -43,6 +43,10 @@ onMounted(() => {
   window.addEventListener('message', handleMessage)
 })
 
+onUnmounted(() => {
+  window.removeEventListener('message', handleMessage)
+})
+
 function loadProviders() {
   vscode.postMessage({ type: 'provider.list.request' })
 }
@@ -55,9 +59,18 @@ function handleMessage(event: MessageEvent) {
       providers.value = message.data.providers
       activeProviderId.value = message.data.activeId
       break
-    case 'provider.created':
-      providers.value.push(message.data.provider)
+    case 'provider.created': {
+      // 后端异步写文件，provider.created 可能晚于随后的 provider.list 到达；
+      // 若无条件 push 会与 list 刷新叠加产生重复项。这里按 id 去重（存在则替换）。
+      const created = message.data.provider
+      const index = providers.value.findIndex(provider => provider.id === created.id)
+      if (index === -1) {
+        providers.value.push(created)
+      } else {
+        providers.value[index] = created
+      }
       break
+    }
     case 'provider.updated':
       providers.value = providers.value.map(provider =>
         provider.id === message.data.provider.id ? message.data.provider : provider

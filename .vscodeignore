@@ -1,0 +1,40 @@
+# 源码与构建配置（运行时只需 out/ 编译产物）
+src/**
+tsconfig.json
+tsconfig.node.json
+.eslintrc.json
+.prettierrc.json
+**/*.ts
+**/*.map
+**/tsconfig*.json
+
+# 文档（大量 PHASE*/WEBVIEW* 等过程文档，无需打包）
+*.md
+docs/**
+src/docs/**
+
+# webview 源码与依赖：运行时只用 webview/dist，其余全部排除
+webview/src/**
+webview/node_modules/**
+webview/index.html
+webview/package.json
+webview/package-lock.json
+webview/vite.config.ts
+webview/tsconfig*.json
+webview/*.md
+
+# 开发脚手架 / 版本控制 / 历史记录
+.vscode/**
+.github/**
+.git/**
+.history/**
+.evancod/**
+.claude/**
+scripts/**
+
+# 打包产物自身
+*.vsix
+
+# 其它杂项
+.gitignore
+.prettierignore

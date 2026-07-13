@@ -412,8 +412,10 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'tool_use_complete':
-        // 工具调用完成时，finalize 当前 thinking 段
+        // 工具调用完成时，finalize 当前 thinking 段与文字段，
+        // 使后续文字另起新块排在工具之后，实现文字与工具交错
         finalizeCurrentThinkingSegment()
+        finalizeCurrentAssistantSegment()
         upsertToolUse({
           toolName: event.toolName,
           toolUseId: event.toolUseId,
@@ -572,6 +574,26 @@ export const useChatStore = defineStore('chat', () => {
     uiMessages.value.splice(existingIndex, 1, {
       ...existing,
       id: `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    })
+  }
+
+  function finalizeCurrentAssistantSegment() {
+    const existingIndex = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
+    // 重置流式文本缓冲，使工具之后的新文字从空开始，另起新块排在工具下方
+    streamingText.value = ''
+    if (existingIndex === -1) return
+
+    const existing = uiMessages.value[existingIndex]
+    if (existing.type !== 'assistant_text' || !existing.content.trim()) {
+      // 空的流式块直接移除，避免残留空气泡
+      if (existingIndex !== -1) uiMessages.value.splice(existingIndex, 1)
+      return
+    }
+
+    // 给当前文字段分配永久 ID，下次文字将创建新块
+    uiMessages.value.splice(existingIndex, 1, {
+      ...existing,
+      id: `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     })
   }
 
@@ -834,6 +856,10 @@ export const useChatStore = defineStore('chat', () => {
       type: 'chat.stop',
       data: { sessionId: currentSession.value?.id },
     })
+    // 停止时把流式的 thinking/assistant 段定型改名，避免残留的固定 id 旧块
+    // 在下一轮被 upsert 命中，导致新回答追加到旧位置产生顺序错乱
+    finalizeCurrentThinkingSegment()
+    finalizeCurrentAssistantSegment()
     chatState.value = 'idle'
     pendingPermission.value = null
     streamingText.value = ''

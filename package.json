@@ -2,7 +2,7 @@
   "name": "vscode-evancod",
   "displayName": "Evancod",
   "description": "AI-powered coding agent for VSCode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "evancod",
   "icon": "resources/extension-icon.png",
   "engines": {
@@ -60,32 +60,33 @@
         }
       ]
     },
-    "menus": {
-      "editor/title": [
-        {
-          "command": "evancod.openChat",
-          "when": "resourceScheme == file",
-          "group": "navigation@100"
-        }
-      ]
-    },
     "configuration": {
       "title": "Evancod",
       "properties": {
         "evancod.model": {
           "type": "string",
-          "default": "claude-3-5-sonnet-20241022",
+          "default": "claude-opus-4-8",
           "description": "默认使用的模型"
         },
         "evancod.effortLevel": {
           "type": "string",
-          "enum": ["low", "medium", "high", "max"],
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
           "default": "medium",
           "description": "推理程度"
         },
         "evancod.permissionMode": {
           "type": "string",
-          "enum": ["default", "acceptEdits", "plan", "bypassPermissions"],
+          "enum": [
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions"
+          ],
           "default": "default",
           "description": "权限模式"
         },
@@ -98,13 +99,14 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build:webview && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
-    "build:webview": "cd webview && npm run build",
+    "install:webview": "cd webview && npm install",
+    "build:webview": "npm run install:webview && cd webview && npm run build",
     "dev:webview": "cd webview && npm run dev",
     "package": "vsce package"
   },

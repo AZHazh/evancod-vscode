@@ -70,12 +70,33 @@ export class AnthropicClient implements ApiClient {
   constructor(config: ApiClientConfig) {
     this.config = config
 
-    const clientConfig: any = {
-      apiKey: config.provider.apiKey || 'dummy',
+    const provider = config.provider
+    const clientConfig: any = {}
+
+    // 按鉴权策略决定使用 x-api-key（apiKey）还是 Authorization: Bearer（authToken），
+    // 与桌面端 buildAnthropicAuthHeaders 保持一致。若忽略 authStrategy 一律走 x-api-key，
+    // 会导致仅接受 Bearer Token 的中转（如甜豆）鉴权失败（401）。
+    switch (provider.authStrategy) {
+      case 'auth_token':
+      case 'auth_token_empty_api_key':
+        clientConfig.authToken = provider.apiKey
+        break
+      case 'dual_same_token':
+        clientConfig.apiKey = provider.apiKey
+        clientConfig.authToken = provider.apiKey
+        break
+      case 'dual_dummy':
+        clientConfig.apiKey = 'dummy'
+        clientConfig.authToken = 'dummy'
+        break
+      case 'api_key':
+      default:
+        clientConfig.apiKey = provider.apiKey || 'dummy'
+        break
     }
 
-    if (config.provider.baseUrl) {
-      clientConfig.baseURL = config.provider.baseUrl
+    if (provider.baseUrl) {
+      clientConfig.baseURL = provider.baseUrl
     }
 
     this.client = new Anthropic(clientConfig)

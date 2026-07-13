@@ -69,9 +69,19 @@ export const useProviderStore = defineStore('provider', () => {
         providers.value = message.data.providers
         activeProviderId.value = message.data.activeId
         break
-      case 'provider.created':
-        providers.value.push(message.data.provider)
+      case 'provider.created': {
+        // 不做乐观 push：provider.create 后端写文件是异步的，而并发的
+        // provider.list.request 读内存更快先返回并覆盖列表，若这里再 push
+        // 会与 provider.list 叠加出重复项。改为去重合并（存在则替换）。
+        const created = message.data.provider
+        const index = providers.value.findIndex(provider => provider.id === created.id)
+        if (index === -1) {
+          providers.value.push(created)
+        } else {
+          providers.value[index] = created
+        }
         break
+      }
       case 'provider.updated':
         providers.value = providers.value.map(provider =>
           provider.id === message.data.provider.id ? message.data.provider : provider

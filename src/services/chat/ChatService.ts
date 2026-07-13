@@ -916,8 +916,10 @@ export class ChatService {
         break
 
       case 'tool_use_complete':
-        // 工具调用完成时，finalize 当前 thinking 段，下一段 thinking 将开启新块
+        // 工具调用完成时，finalize 当前 thinking 段与文字段，
+        // 下一段各自开启新块，保持 transcript 中「文字↔工具」的交错顺序
         this.finalizeCurrentThinkingSegment(session)
+        this.finalizeCurrentStreamingAssistant(session)
         this.appendOrUpdateTranscript(session, {
           id: event.toolUseId,
           type: 'tool_use',
@@ -1088,6 +1090,18 @@ export class ChatService {
     }
   }
 
+  private finalizeCurrentStreamingAssistant(session: Session): void {
+    const streaming = session.transcript?.find(
+      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
+    )
+    // 给当前文字段分配永久 id，下一段文字将开启新块并追加在工具之后，
+    // 使后端 transcript 保持「文字↔工具」的原始交错顺序（否则文字会全部
+    // 并进最早那个 streaming-assistant 块、重建后跑到所有工具之前）
+    if (streaming && streaming.content.trim()) {
+      streaming.id = this.generateId()
+    }
+  }
+
   private finalizeStreamingTranscript(session: Session): void {
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
@@ -1101,6 +1115,12 @@ export class ChatService {
   }
 
   private expirePendingTranscript(session: Session): void {
+    // 取消/中断时，先把仍处于流式状态的 assistant/thinking 块定型改名。
+    // 否则固定 id（streaming-assistant / streaming-thinking）的旧块会残留在
+    // transcript 中，下一轮 content_delta 会命中它并把新文字追加到旧位置，
+    // 造成回答跑到本轮用户提问之前的顺序错乱。
+    this.finalizeStreamingTranscript(session)
+
     for (const block of session.transcript || []) {
       if (block.type === 'tool_use') {
         block.isPending = false
