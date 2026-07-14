@@ -12,6 +12,7 @@ import {
   Plus,
   ShieldCheck,
   Slash,
+  Sparkles,
   Square,
   Zap,
 } from 'lucide-vue-next'
@@ -20,16 +21,20 @@ import { useProviderStore } from '@/stores/provider'
 import Button from '@/components/common/Button.vue'
 import SlashCommandMenu from './SlashCommandMenu.vue'
 import FileSearchMenu from './FileSearchMenu.vue'
+import SkillListMenu from './SkillListMenu.vue'
 import AttachmentGallery from './AttachmentGallery.vue'
 import ComposerDropOverlay from './ComposerDropOverlay.vue'
 import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { useVSCode } from '@/composables/useVSCode'
 import type { EffortLevel, PermissionMode } from '@/stores/provider'
-import type { ComposerAttachment, FileSearchEntry, SlashCommand, WorkspaceReference } from '@/types'
+import type { ComposerAttachment, FileSearchEntry, SkillEntry, SlashCommand, WorkspaceReference } from '@/types'
 import {
+  filterSkills,
   filterSlashCommands,
   findAtTrigger,
+  findSkillListTrigger,
   findSlashTrigger,
+  formatSkillPrompt,
   formatWorkspaceReferencePrompt,
   mergeSlashCommands,
   normalizeSlashCommand,
@@ -48,7 +53,7 @@ const vscode = useVSCode()
 const input = ref('')
 const textarea = ref<HTMLTextAreaElement>()
 const chatInputEl = ref<HTMLElement>()
-const openPanel = ref<'add' | 'permission' | 'model' | 'context' | 'slash' | 'at' | null>(null)
+const openPanel = ref<'add' | 'permission' | 'model' | 'context' | 'slash' | 'at' | 'skill' | null>(null)
 const attachments = ref<ComposerAttachment[]>([])
 const workspaceReferences = ref<WorkspaceReference[]>([])
 const slashCommands = ref<SlashCommand[]>(mergeSlashCommands([]))
@@ -59,6 +64,10 @@ const atFilter = ref('')
 const atSelectedIndex = ref(0)
 const atTriggerStart = ref<number | null>(null)
 const fileEntries = ref<FileSearchEntry[]>([])
+const skills = ref<SkillEntry[]>([])
+const skillFilter = ref('')
+const skillSelectedIndex = ref(0)
+const skillTriggerStart = ref<number | null>(null)
 const isDragActive = ref(false)
 const imageModalOpen = ref(false)
 const imageModalIndex = ref(0)
@@ -136,6 +145,7 @@ const canSend = computed(
 const filteredSlashCommands = computed(() =>
   filterSlashCommands(slashCommands.value, slashFilter.value)
 )
+const filteredSkills = computed(() => filterSkills(skills.value, skillFilter.value))
 const galleryImages = computed(() => galleryImagesFromComposer(attachments.value))
 
 watch(atFilter, filter => {
@@ -154,6 +164,18 @@ const adjustHeight = () => {
 function handleInput() {
   adjustHeight()
   const cursor = textarea.value?.selectionStart ?? input.value.length
+
+  // /skill-list 需优先于普通斜杠命令检测，否则会被当作普通斜杠命令
+  const skillList = findSkillListTrigger(input.value, cursor)
+  if (skillList) {
+    skillFilter.value = skillList.filter
+    skillTriggerStart.value = skillList.start
+    skillSelectedIndex.value = 0
+    openPanel.value = 'skill'
+    vscode.postMessage({ type: 'skills.request' })
+    return
+  }
+
   const slash = findSlashTrigger(input.value, cursor)
   if (slash) {
     slashFilter.value = slash.filter
@@ -176,7 +198,9 @@ function handleInput() {
     return
   }
 
-  if (openPanel.value === 'slash' || openPanel.value === 'at') openPanel.value = null
+  if (openPanel.value === 'slash' || openPanel.value === 'at' || openPanel.value === 'skill') {
+    openPanel.value = null
+  }
 }
 
 function handleSend() {
@@ -249,6 +273,28 @@ function handleKeydown(event: KeyboardEvent) {
     }
   }
 
+  if (openPanel.value === 'skill') {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const direction = event.key === 'ArrowDown' ? 1 : -1
+      skillSelectedIndex.value =
+        (skillSelectedIndex.value + direction + filteredSkills.value.length) %
+        Math.max(filteredSkills.value.length, 1)
+      return
+    }
+    if (event.key === 'Tab' || event.key === 'Enter') {
+      event.preventDefault()
+      const selected = filteredSkills.value[skillSelectedIndex.value]
+      if (selected) applySkill(selected)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      openPanel.value = null
+      return
+    }
+  }
+
   if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault()
     handleSend()
@@ -263,6 +309,26 @@ function applySlashCommand(command: SlashCommand) {
   const normalized = normalizeSlashCommand(command)
   if (normalized.name === 'context') {
     openPanel.value = 'context'
+    return
+  }
+
+  // /skill-list 不作为文本插入，改为打开技能选择弹框
+  if (normalized.name === 'skill-list') {
+    if (slashTriggerStart.value != null) {
+      const cursor = textarea.value?.selectionStart ?? input.value.length
+      const before = input.value.slice(0, slashTriggerStart.value)
+      const after = input.value.slice(cursor)
+      input.value = `${before}${after}`
+      nextTick(() => {
+        textarea.value?.setSelectionRange(before.length, before.length)
+        adjustHeight()
+      })
+    }
+    skillTriggerStart.value = null
+    skillFilter.value = ''
+    skillSelectedIndex.value = 0
+    openPanel.value = 'skill'
+    vscode.postMessage({ type: 'skills.request' })
     return
   }
 
@@ -304,6 +370,24 @@ function applyFileReference(entry: FileSearchEntry) {
   })
 }
 
+function applySkill(skill: SkillEntry) {
+  const cursor = textarea.value?.selectionStart ?? input.value.length
+  // skillTriggerStart 为空表示通过 + 菜单等入口打开，直接插入到光标处
+  const anchor = skillTriggerStart.value ?? cursor
+  const before = input.value.slice(0, anchor)
+  const after = input.value.slice(cursor)
+  const inserted = formatSkillPrompt(skill)
+  input.value = `${before}${inserted}${after}`
+  openPanel.value = null
+  skillTriggerStart.value = null
+  nextTick(() => {
+    const nextCursor = before.length + inserted.length
+    textarea.value?.setSelectionRange(nextCursor, nextCursor)
+    textarea.value?.focus()
+    adjustHeight()
+  })
+}
+
 function selectPermission(mode: PermissionMode) {
   providerStore.setPermissionMode(mode)
   openPanel.value = null
@@ -329,6 +413,14 @@ function openFileReferencePanel() {
   atFilter.value = ''
   atSelectedIndex.value = 0
   vscode.postMessage({ type: 'filesystem.browse', data: {} })
+}
+
+function openSkillListPanel() {
+  openPanel.value = 'skill'
+  skillFilter.value = ''
+  skillSelectedIndex.value = 0
+  skillTriggerStart.value = null
+  vscode.postMessage({ type: 'skills.request' })
 }
 
 async function appendFiles(files: File[]) {
@@ -378,6 +470,11 @@ function handleMessage(event: MessageEvent) {
     slashCommands.value = mergeSlashCommands(message.data.commands || [])
   }
 
+  if (message.type === 'skills.list') {
+    skills.value = message.data.skills || []
+    skillSelectedIndex.value = 0
+  }
+
   if (
     message.type === 'filesystem.search.results' ||
     message.type === 'filesystem.browse.results'
@@ -401,6 +498,7 @@ onMounted(() => {
   window.addEventListener('message', handleMessage)
   document.addEventListener('mousedown', handleClickOutside)
   vscode.postMessage({ type: 'slash.commands.request' })
+  vscode.postMessage({ type: 'skills.request' })
 })
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
@@ -501,6 +599,10 @@ onUnmounted(() => {
         <button class="menu-row" @click="openPanel = 'slash'">
           <Slash />
           <span>斜杠命令</span>
+        </button>
+        <button class="menu-row" @click="openSkillListPanel">
+          <Sparkles />
+          <span>浏览技能</span>
         </button>
       </div>
 
@@ -638,6 +740,15 @@ onUnmounted(() => {
           :selected-index="atSelectedIndex"
           @hover="atSelectedIndex = $event"
           @select="applyFileReference"
+        />
+      </div>
+
+      <div v-if="openPanel === 'skill'" class="floating-panel skill-panel">
+        <SkillListMenu
+          :skills="filteredSkills"
+          :selected-index="skillSelectedIndex"
+          @hover="skillSelectedIndex = $event"
+          @select="applySkill"
         />
       </div>
     </div>
@@ -810,7 +921,8 @@ onUnmounted(() => {
   width: 292px;
 }
 .slash-panel,
-.at-panel {
+.at-panel,
+.skill-panel {
   left: 0;
   right: 0;
   bottom: calc(100% + 10px);

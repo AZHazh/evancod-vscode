@@ -36,6 +36,28 @@ export interface IFileSystemAdapter {
   readFile(path: string): Promise<string>
 
   /**
+   * 读取文件原始字节（用于图片等二进制文件）
+   *
+   * @param path - 文件绝对路径
+   * @returns 文件原始字节
+   * @throws Error 如果文件不存在或无法读取
+   */
+  readFileRaw(path: string): Promise<Uint8Array>
+
+  /**
+   * 读取文件原始字节
+   *
+   * 用于读取图片、二进制文件等非文本内容。
+   * 文本读取（readFile）会把非法字节替换成 U+FFFD 并膨胀 token，
+   * 二进制/图片文件必须走这里拿原始字节再决定如何处理。
+   *
+   * @param path - 文件绝对路径
+   * @returns 文件原始字节（Uint8Array）
+   * @throws Error 如果文件不存在或无法读取
+   */
+  readFileRaw(path: string): Promise<Uint8Array>
+
+  /**
    * 写入文件内容
    * 如果文件不存在会自动创建
    * 如果父目录不存在会自动创建
@@ -115,6 +137,21 @@ export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
 
       // 转换为 UTF-8 字符串
       return Buffer.from(content).toString('utf-8')
+    } catch (error) {
+      throw new Error(`Failed to read file ${filePath}: ${error}`)
+    }
+  }
+
+  /**
+   * 读取文件原始字节
+   *
+   * 与 readFile 不同，不做 UTF-8 解码，直接返回字节。
+   * 用于图片等二进制文件，避免非法字节被替换成 U+FFFD。
+   */
+  async readFileRaw(filePath: string): Promise<Uint8Array> {
+    try {
+      const uri = vscode.Uri.file(filePath)
+      return await vscode.workspace.fs.readFile(uri)
     } catch (error) {
       throw new Error(`Failed to read file ${filePath}: ${error}`)
     }
@@ -242,6 +279,14 @@ export class MockFileSystemAdapter implements IFileSystemAdapter {
       throw new Error(`File not found: ${path}`)
     }
     return content
+  }
+
+  async readFileRaw(path: string): Promise<Uint8Array> {
+    const content = this.files.get(path)
+    if (content === undefined) {
+      throw new Error(`File not found: ${path}`)
+    }
+    return Buffer.from(content, 'utf-8')
   }
 
   async writeFile(path: string, content: string): Promise<void> {

@@ -43,7 +43,10 @@ Skill 是预定义的提示词模板，用于完成特定任务。
   "args": "Fix user authentication bug"
 }
 
-可用的 Skills 可以通过列出 Skills 目录查看。`
+查看所有可用 Skill 清单：
+{
+  "skill": "list"
+}`
   }
 
   get inputSchema(): any {
@@ -73,6 +76,21 @@ Skill 是预定义的提示词模板，用于完成特定任务。
 
   async execute(params: SkillToolParams): Promise<ToolResult> {
     try {
+      // list 动作：直接返回全部已启用 Skill 的清单（双保险，避免模型反复查找）
+      if (params.skill === 'list' || params.skill === '/list') {
+        const skills = this.skillManager.listEnabledSkills()
+        if (skills.length === 0) {
+          return this.createSuccessResult('当前没有可用的 Skill。')
+        }
+        const list = skills
+          .map(s => {
+            const origin = s.source === 'workspace' ? '工作区' : '全局'
+            return `- ${s.metadata.name} [${origin}]: ${s.metadata.description || '无描述'}`
+          })
+          .join('\n')
+        return this.createSuccessResult(`可用的 Skills（共 ${skills.length} 个）：\n${list}`)
+      }
+
       // 获取 Skill
       let skill = this.skillManager.getSkill(params.skill)
 

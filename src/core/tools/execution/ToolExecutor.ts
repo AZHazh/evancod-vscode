@@ -19,6 +19,12 @@ export interface ToolExecutionResult {
   toolCallId: string
   toolName: string
   content: string
+  /**
+   * 结构化内容块（可选）。当工具结果含图片时，携带 Anthropic 风格的
+   * tool_result blocks（text + image），供 QueryEngine 存入 tool 消息，
+   * 使模型能以 vision 方式"看见"图片，而非回灌 base64 文本。
+   */
+  contentBlocks?: unknown[]
 }
 
 export class ToolExecutor {
@@ -68,11 +74,13 @@ export class ToolExecutor {
       const toolResult = await this.executeTool(tool, name, id, executionInput)
       // 发送给前端的内容保留完整 metadata（含仅供 Webview 的预览数据，如图片 base64）
       const webviewContent = this.formatToolResultContent(toolResult, { forWebview: true })
-      // 回灌给 LLM 的内容剔除 _webviewOnly，避免大体积数据（如 base64 图片）灌入模型上下文
+      // 回灌给 LLM 的内容剔除 _webviewOnly 与 image（大体积 base64），避免灌入模型上下文
       const llmContent = this.formatToolResultContent(toolResult, { forWebview: false })
+      // 若结果含图片，构造 vision block：文本占位 + image block，让模型真正"看见"图片
+      const contentBlocks = this.buildVisionBlocks(toolResult, llmContent)
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success })
       this.callbacks.notifyTaskListChange(name)
-      return { toolCallId: id, toolName: name, content: llmContent }
+      return { toolCallId: id, toolName: name, content: llmContent, contentBlocks }
     } catch (error) {
       const content = `Error: ${error instanceof Error ? error.message : '未知错误'}`
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true })
@@ -161,7 +169,13 @@ export class ToolExecutor {
   private formatToolResultContent(toolResult: ToolResult, options?: { forWebview?: boolean }): string {
     if (toolResult.metadata) {
       let metadata = toolResult.metadata
-      // 回灌 LLM 时剔除 _webviewOnly（仅供前端展示的大体积数据，如图片 base64）
+      // image 已由 buildVisionBlocks 单独转为 vision block，前端预览走 _webviewOnly.previews，
+      // 两条通道都不需要 metadata.image 的裸 base64，一律剔除避免重复的大体积数据。
+      if (metadata.image !== undefined) {
+        const { image, ...rest } = metadata
+        metadata = rest
+      }
+      // 回灌 LLM 时额外剔除 _webviewOnly（仅供前端展示的大体积数据，如图片 base64）
       if (!options?.forWebview && metadata._webviewOnly !== undefined) {
         const { _webviewOnly, ...rest } = metadata
         metadata = rest
@@ -175,5 +189,33 @@ export class ToolExecutor {
     }
 
     return toolResult.success ? toolResult.content || 'Success' : `Error: ${toolResult.error}`
+  }
+
+  /**
+   * 若工具结果 metadata 含 image（base64 + mime），构造 Anthropic 风格的
+   * tool_result content blocks：一个 text 占位块 + 一个 image 块。
+   * 这样模型能以 vision 方式"看见"图片，而不是收到裸 base64 文本。
+   *
+   * @param toolResult 工具执行结果
+   * @param llmText    已剔除大体积数据的文本内容（作为 text 占位块）
+   * @returns 含图片时返回 blocks 数组，否则返回 undefined
+   */
+  private buildVisionBlocks(toolResult: ToolResult, llmText: string): unknown[] | undefined {
+    const image = toolResult.metadata?.image as { base64?: string; mime?: string } | undefined
+    if (!image?.base64 || !image?.mime) {
+      return undefined
+    }
+
+    return [
+      { type: 'text', text: llmText },
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: image.mime,
+          data: image.base64,
+        },
+      },
+    ]
   }
 }

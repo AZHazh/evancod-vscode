@@ -45,6 +45,13 @@ export interface FileSearchEntry {
   type: 'file' | 'directory'
 }
 
+export interface SkillEntry {
+  name: string
+  description: string
+  trigger: string
+  source: 'global' | 'workspace'
+}
+
 export interface SessionListItem {
   id: string
   title: string

@@ -385,6 +385,21 @@ export class ChatService {
     }))
   }
 
+  /**
+   * 获取所有已启用的 Skill（供前端 /skill-list 弹框展示）。
+   *
+   * 只暴露展示所需的轻量字段，正文不下发；用户选中后由前端拼成
+   * 自然语言指令发送，模型再按需通过 skill 工具加载正文。
+   */
+  getSkills() {
+    return this.skillManager.listEnabledSkills().map(skill => ({
+      name: skill.metadata.name,
+      description: skill.metadata.description || '',
+      trigger: skill.metadata.trigger || `/${skill.metadata.name}`,
+      source: skill.source,
+    }))
+  }
+
   handlePermissionResponse(response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) {
     this.recordPermissionResponse(response)
     this.queryEngine?.handlePermissionResponse(response)

@@ -178,13 +178,16 @@ async function handleSyncImport(
     },
     async progress => {
       let imported = 0
+      let updated = 0
       const skipped: string[] = []
       const failed: Array<{ name: string; error: string }> = []
 
-      // 获取现有 Provider 列表（用于去重）
+      // 获取现有 Provider 列表（用于去重 / 更新）
+      // key: `${baseUrl}:${apiKey}` -> 已存在的 Provider
       const existingProviders = providerService.getProviders()
-      const existingKeys = new Set(
-        existingProviders.map(p => `${p.baseUrl}:${p.apiKey}`)
+      const normalizeBaseUrl = (url?: string) => (url || '').replace(/\/+$/, '')
+      const existingByKey = new Map(
+        existingProviders.map(p => [`${normalizeBaseUrl(p.baseUrl)}:${p.apiKey}`, p])
       )
 
       console.log(`[NewApi] 现有 Provider 数量: ${existingProviders.length}`)
@@ -208,11 +211,34 @@ async function handleSyncImport(
             ? token.tokenKey
             : `sk-${token.tokenKey}`
 
-          // 去重检查
-          const dedupKey = `${data.siteUrl}:${apiKey}`
-          if (existingKeys.has(dedupKey)) {
-            console.log(`[NewApi] 跳过重复: ${token.tokenName}`)
-            skipped.push(token.tokenName)
+          const siteUrl = normalizeSiteUrl(data.siteUrl)
+          const apiFormat = data.apiFormat || 'openai_chat'
+
+          // 去重检查：同一站点 + 同一 Key 视为同一 Provider
+          const dedupKey = `${siteUrl}:${apiKey}`
+          const existing = existingByKey.get(dedupKey)
+          if (existing) {
+            // 已存在：比较模型映射，有变化则更新，否则跳过
+            const changed =
+              existing.models?.main !== token.mapping.main ||
+              existing.models?.sonnet !== token.mapping.sonnet ||
+              existing.models?.opus !== token.mapping.opus ||
+              existing.models?.haiku !== token.mapping.haiku ||
+              existing.apiFormat !== apiFormat
+
+            if (!changed) {
+              console.log(`[NewApi] 跳过重复（映射未变化）: ${token.tokenName}`)
+              skipped.push(token.tokenName)
+              continue
+            }
+
+            console.log(`[NewApi] 更新已有 Provider 映射: ${existing.name}`)
+            await providerService.updateProvider(existing.id, {
+              apiFormat,
+              models: token.mapping,
+            })
+            updated++
+            console.log(`[NewApi] 成功更新: ${token.tokenName}`)
             continue
           }
 
@@ -220,8 +246,8 @@ async function handleSyncImport(
           const provider: Omit<Provider, 'id' | 'createdAt'> = {
             name: `[甜豆] ${token.tokenName}`,
             type: 'custom',
-            apiFormat: data.apiFormat || 'openai_chat',
-            baseUrl: data.siteUrl,
+            apiFormat,
+            baseUrl: siteUrl,
             apiKey,
             models: token.mapping,
             source: 'newapi-sync',
@@ -229,7 +255,7 @@ async function handleSyncImport(
 
           console.log(`[NewApi] 创建 Provider: ${provider.name}`)
           const createdProvider = await providerService.addProvider(provider)
-          existingKeys.add(dedupKey)
+          existingByKey.set(dedupKey, createdProvider)
           imported++
 
           // 如果是第一个导入的 Provider，自动激活它
@@ -249,13 +275,14 @@ async function handleSyncImport(
         }
       }
 
-      console.log(`[NewApi] 导入完成 - 成功: ${imported}, 跳过: ${skipped.length}, 失败: ${failed.length}`)
+      console.log(`[NewApi] 导入完成 - 新增: ${imported}, 更新: ${updated}, 跳过: ${skipped.length}, 失败: ${failed.length}`)
 
       // 发送完成消息
       webview.postMessage({
         type: 'newapi.sync.complete',
         data: {
           imported,
+          updated,
           skipped: skipped.length,
           failed: failed.length,
           details: {
@@ -267,9 +294,12 @@ async function handleSyncImport(
       })
 
       // 显示成功通知
-      let message = `✅ 成功导入 ${imported} 个 Provider`
+      const changed = imported + updated
+      let message = changed > 0
+        ? `✅ 成功导入 ${imported} 个、更新 ${updated} 个 Provider`
+        : '✅ 同步完成'
       if (skipped.length > 0) {
-        message += `，跳过 ${skipped.length} 个重复项`
+        message += `，跳过 ${skipped.length} 个未变化项`
       }
       if (failed.length > 0) {
         message += `，${failed.length} 个失败`

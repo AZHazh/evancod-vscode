@@ -453,9 +453,11 @@ async function executeImport() {
     console.log('[NewApiSync] 收到响应:', response.data)
 
     const imported = response.data.imported ?? response.data.count ?? 0
+    const updated = response.data.updated ?? 0
+    const changed = imported + updated
     const failed = response.data.failed ?? 0
 
-    if (imported === 0) {
+    if (changed === 0) {
       if (failed > 0) {
         const firstError = response.data.details?.failed?.[0]?.error
         console.error('[NewApiSync] 全部失败:', firstError)
@@ -463,15 +465,15 @@ async function executeImport() {
       }
       if ((response.data.skipped ?? 0) > 0) {
         console.warn('[NewApiSync] 全部跳过')
-        throw new Error('选中的 Token 已全部导入过，无需重复导入')
+        throw new Error('选中的 Token 模型映射未变化，无需重复导入')
       }
       console.error('[NewApiSync] 没有导入任何 Provider')
       throw new Error('没有导入任何 Provider')
     }
 
-    console.log(`[NewApiSync] 导入成功: ${imported} 个`)
+    console.log(`[NewApiSync] 导入成功: 新增 ${imported} 个，更新 ${updated} 个`)
     // 成功
-    emit('success', imported)
+    emit('success', changed)
     handleClose()
   } catch (error) {
     console.error('[NewApiSync] 导入异常:', error)

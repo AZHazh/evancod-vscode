@@ -390,7 +390,41 @@ export class QueryEngine {
 
 工具执行契约：
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
-- 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。`
+- 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。${this.buildSkillCatalog()}`
+  }
+
+  /**
+   * 构建 Skill 索引（渐进式披露）。
+   *
+   * 只把每个已启用 Skill 的名称与描述注入系统提示，作为「目录」。
+   * 真正的正文按需通过 skill 工具加载（skill 工具支持 {"skill":"<name>"}
+   * 加载单个技能，或 {"skill":"list"} 返回完整清单）。
+   *
+   * 这样做的目的：
+   * - 用户问「有哪些 skill」时，模型看索引即可直接回答，不必反复查找目录（避免死循环）。
+   * - 每轮请求只多一份短索引，token 开销随技能数线性但可控。
+   */
+  private buildSkillCatalog(): string {
+    const skillManager = this.config.skillManager
+    if (!skillManager) return ''
+
+    const skills = skillManager.listEnabledSkills()
+    if (skills.length === 0) return ''
+
+    const lines = skills.map(skill => {
+      const origin = skill.source === 'workspace' ? '工作区' : '全局'
+      return `- ${skill.metadata.name}（${origin}）：${skill.metadata.description || '无描述'}`
+    })
+
+    return `
+
+可用 Skill 目录（共 ${skills.length} 个）：
+${lines.join('\n')}
+
+Skill 使用契约：
+- 用户询问「有哪些 skill / 技能」时，直接依据上面的目录回答，不要用 bash、glob 等工具去磁盘查找。
+- 需要执行某个 Skill 时，调用 skill 工具并传入其名称（如 {"skill":"${skills[0].metadata.name}"}）加载正文后再照做。
+- 需要完整清单时，可调用 {"skill":"list"}。`
   }
 
   /**
@@ -823,7 +857,7 @@ export class QueryEngine {
    * @param toolCalls - 工具调用列表
    * @returns Promise<ToolResult[]> 工具执行结果
    */
-  private async executeToolCalls(toolCalls: ToolCall[]): Promise<Array<{ toolCallId: string; toolName: string; content: string }>> {
+  private async executeToolCalls(toolCalls: ToolCall[]): Promise<Array<{ toolCallId: string; toolName: string; content: string; contentBlocks?: unknown[] }>> {
     if (!this.toolOrchestrator) {
       throw new Error('Tool orchestrator not initialized')
     }

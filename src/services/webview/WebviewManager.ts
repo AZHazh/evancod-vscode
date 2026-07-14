@@ -214,6 +214,12 @@ export class WebviewManager {
                 commands: this.chatService.getSlashCommands(),
               },
             })
+            this.postMessage({
+              type: 'skills.list',
+              data: {
+                skills: this.chatService.getSkills(),
+              },
+            })
             this.sendSessionList()
             this.postRuntimeState()
             // 会话恢复后主动刷新当前会话任务列表，避免重新打开对话后任务丢失
@@ -292,6 +298,15 @@ export class WebviewManager {
               type: 'slash.commands',
               data: {
                 commands: this.chatService.getSlashCommands(),
+              },
+            })
+            break
+
+          case 'skills.request':
+            this.postMessage({
+              type: 'skills.list',
+              data: {
+                skills: this.chatService.getSkills(),
               },
             })
             break

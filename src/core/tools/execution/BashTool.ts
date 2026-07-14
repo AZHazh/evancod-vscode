@@ -9,6 +9,7 @@
 
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import * as fs from 'fs'
 
 /**
  * BashTool 参数
@@ -74,6 +75,9 @@ export class BashTool extends Tool {
 
   private readonly running = new Map<string, RunningProcess>()
 
+  /** 缓存探测到的 shell，避免每次执行都做文件系统探测 */
+  private cachedShell?: string | boolean
+
   /**
    * 构造函数
    *
@@ -133,7 +137,7 @@ export class BashTool extends Tool {
 
       const child = spawn(args.command, {
         cwd: this.cwd,
-        shell: true,
+        shell: this.resolveShell(),
         env: {
           ...process.env,
           LANG: 'en_US.UTF-8',
@@ -265,6 +269,50 @@ export class BashTool extends Tool {
 
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
+  }
+
+  /**
+   * 解析要使用的 shell
+   *
+   * - 非 Windows（Mac/Linux）：返回 true，沿用 Node 默认的 /bin/sh，行为不变
+   * - Windows：模型倾向于生成 sed/head/grep 等 POSIX 命令，而默认的 cmd.exe 不支持，
+   *   因此优先探测 git-bash（开发者大多已安装），探测不到时退回 PowerShell
+   *
+   * 结果会缓存，避免每次执行都做文件系统探测
+   */
+  private resolveShell(): string | boolean {
+    if (this.cachedShell !== undefined) {
+      return this.cachedShell
+    }
+
+    if (process.platform !== 'win32') {
+      // Mac / Linux：保持原有行为
+      this.cachedShell = true
+      return this.cachedShell
+    }
+
+    // Windows：探测 git-bash 常见安装路径
+    const candidates = [
+      process.env.ProgramFiles ? `${process.env.ProgramFiles}\\Git\\bin\\bash.exe` : undefined,
+      process.env['ProgramFiles(x86)'] ? `${process.env['ProgramFiles(x86)']}\\Git\\bin\\bash.exe` : undefined,
+      process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\Git\\bin\\bash.exe` : undefined,
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+    ].filter((p): p is string => !!p)
+
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          this.cachedShell = candidate
+          return this.cachedShell
+        }
+      } catch {
+        // 忽略探测错误，继续尝试下一个候选
+      }
+    }
+
+    // 未找到 git-bash，退回 PowerShell
+    this.cachedShell = 'powershell.exe'
+    return this.cachedShell
   }
 
   /**
