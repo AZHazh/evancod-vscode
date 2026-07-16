@@ -25,8 +25,8 @@
 
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { IFileSystemAdapter } from '../../../adapters/FileSystemAdapter'
+import { mapLimit } from '../../../utils/concurrency'
 import * as path from 'path'
-import * as fs from 'fs'
 
 /**
  * ListDirectoryTool 参数
@@ -104,6 +104,11 @@ export class ListDirectoryTool extends Tool {
    * 工具描述
    */
   readonly description = '列出指定目录下的文件和子目录。可以递归列举，显示文件大小和修改时间。用于了解项目结构、查看目录内容。'
+
+  /**
+   * 单层目录内并发递归的最大并发数
+   */
+  private readonly CONCURRENCY = 16
 
   /**
    * 构造函数
@@ -224,67 +229,61 @@ export class ListDirectoryTool extends Tool {
     maxDepth: number,
     currentDepth: number
   ): Promise<FileInfo[]> {
-    const files: FileInfo[] = []
-
+    let entries
     try {
-      // 读取目录内容
-      const entries = await this.fs.readDirectory(dirPath)
-
-      for (const entry of entries) {
-        // 跳过隐藏文件（以 . 开头）
-        if (!showHidden && entry.startsWith('.')) {
-          continue
-        }
-
-        const fullPath = path.join(dirPath, entry)
-        const relativePath = path.relative(this.cwd, fullPath)
-
-        try {
-          // 获取文件信息
-          const stats = fs.statSync(fullPath)
-
-          const fileInfo: FileInfo = {
-            name: entry,
-            path: relativePath,
-            type: stats.isDirectory() ? 'directory' : 'file',
-            size: stats.isFile() ? stats.size : undefined,
-            mtime: stats.mtime.getTime(),
-          }
-
-          // 递归列举子目录
-          if (
-            stats.isDirectory() &&
-            recursive &&
-            currentDepth < maxDepth
-          ) {
-            fileInfo.children = await this.listDirectory(
-              fullPath,
-              recursive,
-              showHidden,
-              maxDepth,
-              currentDepth + 1
-            )
-          }
-
-          files.push(fileInfo)
-        } catch (error) {
-          // 跳过无法访问的文件
-          continue
-        }
-      }
-
-      // 排序：目录在前，文件在后
-      files.sort((a, b) => {
-        if (a.type === b.type) {
-          return a.name.localeCompare(b.name)
-        }
-        return a.type === 'directory' ? -1 : 1
-      })
-
-      return files
-    } catch (error) {
+      // 一次拿到条目及类型，避免逐条 statSync（且不再同步阻塞事件循环）
+      entries = await this.fs.readDirectoryWithTypes(dirPath)
+    } catch {
       return []
     }
+
+    // 过滤隐藏文件
+    const visible = showHidden
+      ? entries
+      : entries.filter(e => !e.name.startsWith('.'))
+
+    // 并发处理每个条目（stat 拿大小/时间 + 递归子目录）
+    const files = await mapLimit(visible, this.CONCURRENCY, async entry => {
+      const fullPath = path.join(dirPath, entry.name)
+      const relativePath = path.relative(this.cwd, fullPath)
+
+      const fileInfo: FileInfo = {
+        name: entry.name,
+        path: relativePath,
+        type: entry.isDirectory ? 'directory' : 'file',
+      }
+
+      try {
+        const st = await this.fs.stat(fullPath)
+        fileInfo.size = entry.isFile ? st.size : undefined
+        fileInfo.mtime = st.mtime
+      } catch {
+        // stat 失败不致命，保留类型信息即可
+      }
+
+      // 递归列举子目录
+      if (entry.isDirectory && recursive && currentDepth < maxDepth) {
+        fileInfo.children = await this.listDirectory(
+          fullPath,
+          recursive,
+          showHidden,
+          maxDepth,
+          currentDepth + 1
+        )
+      }
+
+      return fileInfo
+    })
+
+    // 排序：目录在前，文件在后
+    files.sort((a, b) => {
+      if (a.type === b.type) {
+        return a.name.localeCompare(b.name)
+      }
+      return a.type === 'directory' ? -1 : 1
+    })
+
+    return files
   }
 
   /**

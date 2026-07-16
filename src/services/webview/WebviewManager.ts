@@ -20,6 +20,7 @@
 
 import * as vscode from 'vscode'
 import * as path from 'path'
+import { execFile } from 'child_process'
 import { ChatService } from '../chat/ChatService'
 import { ProviderService } from '../provider/ProviderService'
 import { TaskManager } from '../task/TaskManager'
@@ -506,6 +507,58 @@ export class WebviewManager {
     })
   }
 
+  /**
+   * 使用 `git check-ignore` 过滤掉被 .gitignore 排除的文件。
+   *
+   * 为什么用 git 而不是自己解析 .gitignore：
+   * - git 天然遵守嵌套 .gitignore、全局 gitignore、.git/info/exclude 等全部规则
+   * - 零额外依赖
+   *
+   * 行为：
+   * - 非 git 仓库或 git 不可用时，原样返回（不过滤），保证功能可用
+   * - 通过 stdin 批量传入，避免命令行长度限制
+   *
+   * @param files - findFiles 返回的文件 Uri 列表
+   * @param cwd - git 工作目录（工作区根路径）
+   * @returns 未被 gitignore 排除的文件列表
+   */
+  private async filterGitIgnored(
+    files: vscode.Uri[],
+    cwd: string
+  ): Promise<vscode.Uri[]> {
+    if (files.length === 0) return files
+
+    // 用绝对路径喂给 git check-ignore，避免相对路径解析歧义
+    const paths = files.map(f => f.fsPath)
+
+    const ignored = await new Promise<Set<string>>(resolve => {
+      const child = execFile(
+        'git',
+        // --stdin: 从标准输入读取路径；-z: 用 NUL 分隔，兼容含空格/换行的路径
+        ['check-ignore', '--stdin', '-z'],
+        { cwd, maxBuffer: 1024 * 1024 * 16 },
+        (error, stdout) => {
+          // exit code 0: 有被忽略的路径；1: 没有任何被忽略的路径（都不是错误）
+          // 其它情况（非 git 仓库、git 未安装等）视为不过滤
+          if (error && (error as { code?: number }).code !== 1 && !stdout) {
+            resolve(new Set())
+            return
+          }
+          const set = new Set(
+            stdout.split('\0').map(p => p.trim()).filter(Boolean)
+          )
+          resolve(set)
+        }
+      )
+
+      child.on('error', () => resolve(new Set()))
+      child.stdin?.end(paths.join('\0'))
+    })
+
+    if (ignored.size === 0) return files
+    return files.filter(f => !ignored.has(f.fsPath))
+  }
+
   private async handleWorkspacePick(query?: string): Promise<void> {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]
     if (!workspaceFolder) {
@@ -517,7 +570,8 @@ export class WebviewManager {
     }
 
     const pattern = query?.trim() ? `**/*${query.trim()}*` : '**/*'
-    const files = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist}/**', 100)
+    const found = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist}/**', 300)
+    const files = (await this.filterGitIgnored(found, workspaceFolder.uri.fsPath)).slice(0, 100)
     const picked = await vscode.window.showQuickPick(
       files.map(file => ({
         label: vscode.workspace.asRelativePath(file),
@@ -552,7 +606,8 @@ export class WebviewManager {
 
     const normalizedQuery = query?.trim() || ''
     const pattern = normalizedQuery ? `**/*${normalizedQuery}*` : '**/*'
-    const files = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist,build}/**', 100)
+    const found = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist,build}/**', 300)
+    const files = (await this.filterGitIgnored(found, workspaceFolder.uri.fsPath)).slice(0, 100)
     this.postMessage({
       type: 'filesystem.search.results',
       data: {
@@ -586,7 +641,8 @@ export class WebviewManager {
     }
 
     if (normalizedTarget === normalizedRoot) {
-      const files = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,dist,build}/**', 100)
+      const found = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,dist,build}/**', 300)
+      const files = (await this.filterGitIgnored(found, rootPath)).slice(0, 100)
       this.postMessage({
         type: 'filesystem.browse.results',
         data: {

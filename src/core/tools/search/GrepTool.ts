@@ -25,6 +25,7 @@
 
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { IFileSystemAdapter } from '../../../adapters/FileSystemAdapter'
+import { mapLimit } from '../../../utils/concurrency'
 import * as path from 'path'
 
 /**
@@ -108,6 +109,12 @@ export class GrepTool extends Tool {
    * 避免返回过多结果
    */
   private readonly MAX_RESULTS = 100
+
+  /**
+   * 单层目录内并发读取/递归的最大并发数。
+   * 太大反而会因文件句柄争用变慢，16 是经验上的稳妥值。
+   */
+  private readonly CONCURRENCY = 16
 
   /**
    * 构造函数
@@ -226,57 +233,59 @@ export class GrepTool extends Tool {
     const results: GrepMatch[] = []
 
     try {
-      // 检查目录是否存在
-      const exists = await this.fs.exists(dir)
-      if (!exists) {
-        return results
-      }
+      // 一次拿到目录内所有条目及其类型，避免逐条 stat 探测
+      const entries = await this.fs.readDirectoryWithTypes(dir)
 
-      // 读取目录内容
-      const entries = await this.fs.readDirectory(dir)
-
+      // 分离出「要搜的文件」和「要递归的子目录」
+      const files: string[] = []
+      const dirs: string[] = []
       for (const entry of entries) {
-        const fullPath = path.join(dir, entry)
-
-        // 跳过常见的忽略目录
-        if (this.shouldIgnore(entry)) {
+        if (this.shouldIgnore(entry.name)) {
           continue
         }
-
-        try {
-          // 尝试作为文件处理
-          const content = await this.fs.readFile(fullPath)
-
-          // 文件类型过滤
-          if (args.file_pattern && !this.matchFilePattern(entry, args.file_pattern)) {
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory) {
+          dirs.push(fullPath)
+        } else if (entry.isFile) {
+          // 关键：先按 file_pattern 过滤，再决定是否读取，
+          // 避免把不匹配的文件（如 *.png/*.lock）全读进内存再丢弃
+          if (args.file_pattern && !this.matchFilePattern(entry.name, args.file_pattern)) {
             continue
           }
+          files.push(fullPath)
+        }
+      }
 
-          // 在文件内容中搜索
-          const fileMatches = this.searchInFile(fullPath, content, args)
-          results.push(...fileMatches)
-
-          // 限制结果数量
-          if (results.length >= this.MAX_RESULTS) {
-            break
-          }
+      // 并发读取并搜索本层文件
+      const fileMatchLists = await mapLimit(files, this.CONCURRENCY, async filePath => {
+        try {
+          const content = await this.fs.readFile(filePath)
+          return this.searchInFile(filePath, content, args)
         } catch {
-          // 不是文件或无法读取，尝试作为目录递归搜索
-          try {
-            const subResults = await this.searchContent(fullPath, args)
-            results.push(...subResults)
+          // 无法读取（权限/二进制等），跳过
+          return []
+        }
+      })
+      for (const list of fileMatchLists) {
+        results.push(...list)
+        if (results.length >= this.MAX_RESULTS) {
+          return results.slice(0, this.MAX_RESULTS)
+        }
+      }
 
-            if (results.length >= this.MAX_RESULTS) {
-              break
-            }
-          } catch {
-            // 既不是文件也不是目录，跳过
-          }
+      // 并发递归子目录
+      const subLists = await mapLimit(dirs, this.CONCURRENCY, subDir =>
+        this.searchContent(subDir, args)
+      )
+      for (const list of subLists) {
+        results.push(...list)
+        if (results.length >= this.MAX_RESULTS) {
+          return results.slice(0, this.MAX_RESULTS)
         }
       }
 
       return results.slice(0, this.MAX_RESULTS)
-    } catch (error) {
+    } catch {
       return results
     }
   }
@@ -293,8 +302,11 @@ export class GrepTool extends Tool {
     const matches: GrepMatch[] = []
     const lines = content.split('\n')
 
-    // 创建正则表达式
-    const flags = args.case_sensitive === false ? 'gi' : 'g'
+    // 创建正则表达式：不带 g 标志。
+    // 之前用 g 标志复用同一个正则反复 .test()，会因 lastIndex 记忆状态导致隔行漏匹配
+    // （匹配成功后 lastIndex 前移，下一行从该位置起测，短行就被跳过）。
+    // 这里按行匹配，无需全局标志，去掉 g 即可保证每行独立判断。
+    const flags = args.case_sensitive === false ? 'i' : ''
     const regex = new RegExp(args.pattern, flags)
 
     // 搜索每一行

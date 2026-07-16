@@ -23,8 +23,8 @@
 
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { IFileSystemAdapter } from '../../../adapters/FileSystemAdapter'
+import { mapLimit } from '../../../utils/concurrency'
 import * as path from 'path'
-import * as fs from 'fs'
 
 /**
  * FindTool 参数
@@ -91,6 +91,11 @@ export class FindTool extends Tool {
    * 工具描述
    */
   readonly description = '高级文件查找工具。支持按文件名、类型、大小、修改时间等条件查找。例如：找出最近修改的大文件、查找特定扩展名的文件。'
+
+  /**
+   * 单层目录内并发递归的最大并发数
+   */
+  private readonly CONCURRENCY = 16
 
   /**
    * 构造函数
@@ -202,81 +207,85 @@ export class FindTool extends Tool {
       return results
     }
 
+    let entries
     try {
-      const entries = await this.fs.readDirectory(dir)
-
-      for (const entry of entries) {
-        // 跳过隐藏文件和常见忽略目录
-        if (entry.startsWith('.') || entry === 'node_modules') {
-          continue
-        }
-
-        const fullPath = path.join(dir, entry)
-
-        try {
-          const stats = fs.statSync(fullPath)
-          const isFile = stats.isFile()
-          const isDir = stats.isDirectory()
-
-          // 检查类型过滤
-          if (criteria.type) {
-            if (criteria.type === 'f' && !isFile) continue
-            if (criteria.type === 'd' && !isDir) continue
-          }
-
-          // 检查文件名过滤
-          if (criteria.name && !this.matchPattern(entry, criteria.name)) {
-            if (!isDir) continue
-          }
-
-          // 检查大小过滤
-          if (
-            criteria.size &&
-            isFile &&
-            !this.matchSize(stats.size, criteria.size)
-          ) {
-            continue
-          }
-
-          // 检查修改时间过滤
-          if (
-            criteria.mtime !== undefined &&
-            !this.matchMtime(stats.mtime.getTime(), criteria.mtime)
-          ) {
-            continue
-          }
-
-          // 匹配成功
-          if (
-            !criteria.name ||
-            this.matchPattern(entry, criteria.name) ||
-            isDir
-          ) {
-            results.push({
-              path: fullPath,
-              name: entry,
-              type: isFile ? 'file' : 'directory',
-              size: stats.size,
-              mtime: stats.mtime.getTime(),
-            })
-          }
-
-          // 递归搜索子目录
-          if (isDir) {
-            const subResults = await this.findFiles(
-              fullPath,
-              criteria,
-              maxDepth,
-              currentDepth + 1
-            )
-            results.push(...subResults)
-          }
-        } catch {
-          continue
-        }
-      }
+      // 一次拿到条目及类型，避免逐条 statSync（且不再同步阻塞事件循环）
+      entries = await this.fs.readDirectoryWithTypes(dir)
     } catch {
       return results
+    }
+
+    // 过滤掉隐藏文件和 node_modules，分出待递归的子目录
+    const visible = entries.filter(
+      e => !e.name.startsWith('.') && e.name !== 'node_modules'
+    )
+
+    // 是否需要每个条目的大小/时间信息（只有用到 size/mtime 过滤时才 stat，省掉多余调用）
+    const needStat = criteria.size !== undefined || criteria.mtime !== undefined
+
+    // 并发处理本层条目
+    const perEntry = await mapLimit(visible, this.CONCURRENCY, async entry => {
+      const fullPath = path.join(dir, entry.name)
+      const isFile = entry.isFile
+      const isDir = entry.isDirectory
+
+      const out: FindResult[] = []
+
+      // 类型过滤
+      const typeOk =
+        !criteria.type ||
+        (criteria.type === 'f' && isFile) ||
+        (criteria.type === 'd' && isDir)
+
+      // 文件名过滤（目录即使名字不匹配也要保留以便递归）
+      const nameOk = !criteria.name || this.matchPattern(entry.name, criteria.name)
+
+      if (typeOk && (nameOk || isDir)) {
+        let size = 0
+        let mtime = 0
+        let statOk = true
+
+        if (needStat) {
+          try {
+            const st = await this.fs.stat(fullPath)
+            size = st.size
+            mtime = st.mtime
+          } catch {
+            statOk = false
+          }
+        }
+
+        // 大小过滤（仅对文件）
+        if (statOk && criteria.size && isFile && !this.matchSize(size, criteria.size)) {
+          statOk = false
+        }
+        // 修改时间过滤
+        if (statOk && criteria.mtime !== undefined && !this.matchMtime(mtime, criteria.mtime)) {
+          statOk = false
+        }
+
+        if (statOk && (nameOk || isDir)) {
+          out.push({
+            path: fullPath,
+            name: entry.name,
+            type: isFile ? 'file' : 'directory',
+            size,
+            mtime,
+          })
+        }
+      }
+
+      // 递归子目录
+      if (isDir) {
+        const sub = await this.findFiles(fullPath, criteria, maxDepth, currentDepth + 1)
+        out.push(...sub)
+      }
+
+      return out
+    })
+
+    for (const list of perEntry) {
+      results.push(...list)
     }
 
     return results

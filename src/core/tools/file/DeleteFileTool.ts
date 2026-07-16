@@ -26,7 +26,7 @@
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { IFileSystemAdapter } from '../../../adapters/FileSystemAdapter'
 import * as path from 'path'
-import * as fs from 'fs'
+import * as fsp from 'fs/promises'
 
 /**
  * DeleteFileTool 参数
@@ -167,8 +167,8 @@ export class DeleteFileTool extends Tool {
       }
 
       // 5. 判断是文件还是目录
-      const stats = fs.statSync(absolutePath)
-      const isDirectory = stats.isDirectory()
+      const stats = await this.fs.stat(absolutePath)
+      const isDirectory = stats.isDirectory
 
       if (isDirectory) {
         // 删除目录
@@ -203,17 +203,15 @@ export class DeleteFileTool extends Tool {
    * @param dirPath - 目录绝对路径
    */
   private async deleteDirectory(dirPath: string): Promise<void> {
-    // 读取目录内容
-    const entries = await this.fs.readDirectory(dirPath)
+    // 一次拿到条目及类型，避免逐条 statSync
+    const entries = await this.fs.readDirectoryWithTypes(dirPath)
 
     // 删除所有子项
     for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry)
+      const fullPath = path.join(dirPath, entry.name)
 
       try {
-        const stats = fs.statSync(fullPath)
-
-        if (stats.isDirectory()) {
+        if (entry.isDirectory) {
           // 递归删除子目录
           await this.deleteDirectory(fullPath)
         } else {
@@ -226,7 +224,7 @@ export class DeleteFileTool extends Tool {
       }
     }
 
-    // 删除空目录
-    fs.rmdirSync(dirPath)
+    // 删除空目录（异步，不阻塞事件循环）
+    await fsp.rmdir(dirPath)
   }
 }

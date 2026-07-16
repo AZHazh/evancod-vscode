@@ -4,6 +4,7 @@ import DiffViewer from '@/components/diff/DiffViewer.vue'
 import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
 import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { base64ToDataUrl } from '@/utils/imageAttachments'
+import { summarizeError } from '@/utils/errorSummary'
 import type { BashRuntimeState, AgentTaskNotification } from '@/types'
 
 const props = defineProps<{
@@ -172,10 +173,26 @@ const resultSummary = computed(() => {
 
 const expandable = computed(() => true)
 
-function formatResult(value: unknown): string {
-  if (typeof value === 'string') return value
-  return JSON.stringify(value, null, 2)
-}
+// 结果预览上限：超过则截断，避免把整段结果/日志全量塞进 DOM 做布局
+const RESULT_MAX_CHARS = 4000
+
+const resultFullText = computed(() =>
+  typeof props.result === 'string' ? props.result : JSON.stringify(props.result, null, 2)
+)
+const resultExpanded = ref(false)
+const resultTruncated = computed(() => resultFullText.value.length > RESULT_MAX_CHARS)
+const resultDisplayText = computed(() =>
+  !resultTruncated.value || resultExpanded.value
+    ? resultFullText.value
+    : resultFullText.value.slice(0, RESULT_MAX_CHARS)
+)
+
+// 错误结果：提炼一句话主旨，原始文本默认折叠
+const resultErrorSummary = computed(() =>
+  props.resultError ? summarizeError(props.result) : undefined
+)
+// 有主旨时，原始文本默认折叠（点“查看详情”才展开）；无主旨则直接展示（截断的）原文
+const rawResultCollapsed = ref(true)
 
 const hasResult = computed(() => {
   return props.result !== undefined && (['read_file', 'grep', 'glob'].includes(props.toolName) || isTaskTool.value)
@@ -400,10 +417,48 @@ function openImageAt(index: number) {
       <DiffViewer v-else-if="toolName === 'write_file' && content" :file-path="filePath" :content="content" />
 
       <div v-else-if="hasResult" class="tool-result-container" :class="{ 'tool-result-container--error': resultError }">
-        <div class="tool-result-header">
-          <span>{{ resultError ? '执行错误' : '执行结果' }}</span>
-        </div>
-        <pre class="tool-result-content">{{ formatResult(result) }}</pre>
+        <!-- 错误且能提炼主旨：默认只显示一句话，原始日志折叠 -->
+        <template v-if="resultErrorSummary">
+          <div class="tool-result-header">
+            <span class="tool-result-summary-text">{{ resultErrorSummary }}</span>
+            <button
+              class="tool-result-toggle"
+              type="button"
+              @click.stop="rawResultCollapsed = !rawResultCollapsed"
+            >
+              {{ rawResultCollapsed ? '查看详情' : '收起' }}
+            </button>
+          </div>
+          <pre v-if="!rawResultCollapsed" class="tool-result-content">{{ resultDisplayText
+            }}<span v-if="resultTruncated && !resultExpanded" class="tool-result-ellipsis">
+… 已截断 {{ resultFullText.length - RESULT_MAX_CHARS }} 字符</span></pre>
+          <button
+            v-if="!rawResultCollapsed && resultTruncated"
+            class="tool-result-toggle tool-result-toggle--block"
+            type="button"
+            @click.stop="resultExpanded = !resultExpanded"
+          >
+            {{ resultExpanded ? '收起全部' : `显示全部 (${resultFullText.length} 字符)` }}
+          </button>
+        </template>
+
+        <!-- 无主旨（成功结果或无法提炼）：沿用截断预览 -->
+        <template v-else>
+          <div class="tool-result-header">
+            <span>{{ resultError ? '执行错误' : '执行结果' }}</span>
+            <button
+              v-if="resultTruncated"
+              class="tool-result-toggle"
+              type="button"
+              @click.stop="resultExpanded = !resultExpanded"
+            >
+              {{ resultExpanded ? '收起' : `显示全部 (${resultFullText.length} 字符)` }}
+            </button>
+          </div>
+          <pre class="tool-result-content">{{ resultDisplayText
+            }}<span v-if="resultTruncated && !resultExpanded" class="tool-result-ellipsis">
+… 已截断 {{ resultFullText.length - RESULT_MAX_CHARS }} 字符</span></pre>
+        </template>
       </div>
 
       <div v-else-if="toolName === 'mcp'" class="tool-summary vertical">
@@ -696,6 +751,43 @@ code,
   color: var(--chat-color-error);
 }
 
+.tool-result-toggle {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 50%, transparent);
+  border-radius: var(--chat-radius-full);
+  background: transparent;
+  color: var(--chat-color-text-tertiary);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+
+  &:hover {
+    color: var(--chat-color-text-primary);
+    background: var(--chat-color-surface-container-low);
+  }
+}
+
+/* 折叠原文下方的“显示全部”按钮，占整行 */
+.tool-result-toggle--block {
+  width: 100%;
+  margin-top: 6px;
+  text-align: center;
+}
+
+/* 错误主旨文本：可换行显示完整一句话 */
+.tool-result-summary-text {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.tool-result-ellipsis {
+  color: var(--chat-color-text-tertiary);
+  font-style: italic;
+}
+
 .tool-result-content {
   max-height: 320px;
   overflow: auto;
@@ -707,6 +799,9 @@ code,
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 离屏时跳过内容渲染，降低长列表的布局成本 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 
 @media (max-width: 640px) {

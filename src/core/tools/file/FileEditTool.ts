@@ -152,13 +152,8 @@ export class FileEditTool extends Tool {
         return this.createErrorResult('安全错误：不能访问工作目录外的文件')
       }
 
-      // 检查文件是否存在
-      const exists = await this.fs.exists(absolutePath)
-      if (!exists) {
-        return this.createErrorResult(`文件不存在: ${args.file_path}`)
-      }
-
       // 4. 读取文件内容
+      // 不再先 exists 再读（两次调用）：直接读，文件不存在时由下方 catch 统一转成友好错误
       const originalContent = await this.fs.readFile(absolutePath)
 
       // 检测文件原有的换行风格（CRLF / LF），写回时保留，避免整文件 diff 噪音
@@ -217,6 +212,10 @@ export class FileEditTool extends Tool {
         newLength: newContent.length,
       })
     } catch (error) {
+      // 文件不存在时给出友好提示（readFile 抛出的 ENOENT 会包在错误信息里）
+      if (String(error).includes('ENOENT')) {
+        return this.createErrorResult(`文件不存在: ${args.file_path}`)
+      }
       return this.createErrorResult(error)
     }
   }

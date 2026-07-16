@@ -127,13 +127,8 @@ export class FileReadTool extends Tool {
         return this.createErrorResult('安全错误：不能访问工作目录外的文件')
       }
 
-      // 3. 检查文件是否存在
-      const exists = await this.fs.exists(absolutePath)
-      if (!exists) {
-        return this.createErrorResult(`文件不存在: ${args.path}`)
-      }
-
-      // 4. 按类型分流读取
+      // 3. 按类型分流读取
+      // 不再先 exists 再读（两次 IPC/系统调用）：直接读，文件不存在时由 catch 统一转成友好错误
       const ext = path.extname(args.path).toLowerCase()
       const imageMime = IMAGE_MIME_BY_EXT[ext]
 
@@ -186,10 +181,24 @@ export class FileReadTool extends Tool {
         size: content.length,
       })
     } catch (error) {
-      // 错误处理
+      // 文件不存在时给出友好提示（原先靠先行 exists 检查，现在合并为一次读 + 捕获）
+      if (isNotFound(error)) {
+        return this.createErrorResult(`文件不存在: ${args.path}`)
+      }
       return this.createErrorResult(error)
     }
   }
+}
+
+/**
+ * 判断错误是否为「文件/目录不存在」。
+ * 兼容 Node 原生错误（code=ENOENT）与被包装成字符串的错误信息。
+ */
+function isNotFound(error: unknown): boolean {
+  const code = (error as { code?: string })?.code
+  if (code === 'ENOENT') return true
+  const msg = error instanceof Error ? error.message : String(error)
+  return msg.includes('ENOENT') || msg.includes('EntryNotFound') || msg.includes('FileNotFound')
 }
 
 /**

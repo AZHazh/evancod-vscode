@@ -316,7 +316,14 @@ export class OpenAIChatClient implements ApiClient {
       const decoder = new TextDecoder()
       let buffer = ''
       let fullContent = ''
-      const toolCallChunks = new Map<number, any>()
+      // OpenAI 流式工具调用重组。中转网关的实现千奇百怪，必须容忍两类畸形：
+      //  1) 同一个调用的整名在多帧里重复下发 —— 不能盲目累加，否则得到 "read_fileread_file"；
+      //  2) 复用同一个 index 承载多个不同调用 —— 必须靠 id / 换名另起 slot，
+      //     否则两个工具名拼成 "list_directoryskill"。
+      // 规则：函数名只在调用的首帧出现，续传帧只带 arguments。
+      const slots: Array<{ id: string; name: string; inputJson: string }> = []
+      const byId = new Map<string, number>()
+      const byIndex = new Map<number, number>()
 
       while (true) {
         const { value, done } = await reader.read()
@@ -346,16 +353,43 @@ export class OpenAIChatClient implements ApiClient {
 
           if (Array.isArray(delta.tool_calls)) {
             for (const toolCall of delta.tool_calls) {
-              const index = toolCall.index ?? 0
-              const current = toolCallChunks.get(index) || {
-                id: toolCall.id || `call_${index}`,
-                name: '',
-                inputJson: '',
+              const fnName = toolCall.function?.name || ''
+              const fnArgs = toolCall.function?.arguments || ''
+              const id: string | undefined = toolCall.id || undefined
+              const index = typeof toolCall.index === 'number' ? toolCall.index : undefined
+
+              // 先尝试定位这一帧属于哪个已存在的调用：id 最可靠，其次 index。
+              let slotIdx =
+                (id !== undefined ? byId.get(id) : undefined) ??
+                (index !== undefined ? byIndex.get(index) : undefined)
+
+              // 判定是否要另起一个新调用：
+              //  - 还没有任何 slot；
+              //  - 或带了函数名，但定位到的 slot 名字不同（同一 index 被复用给了别的工具）。
+              const located = slotIdx !== undefined ? slots[slotIdx] : undefined
+              const isNewCall =
+                located === undefined ||
+                (!!fnName && !!located.name && located.name !== fnName)
+
+              if (isNewCall) {
+                slots.push({
+                  id: id || `call_${slots.length}`,
+                  name: fnName,
+                  inputJson: fnArgs,
+                })
+                slotIdx = slots.length - 1
+                if (id !== undefined) byId.set(id, slotIdx)
+                if (index !== undefined) byIndex.set(index, slotIdx)
+              } else if (located) {
+                // 续传帧：补齐 id，名字只在缺失时填一次（绝不累加，避免 "read_fileread_file"），
+                // arguments 才是需要跨帧拼接的部分。
+                if (id && located.id.startsWith('call_')) {
+                  located.id = id
+                  byId.set(id, slotIdx as number)
+                }
+                if (!located.name && fnName) located.name = fnName
+                located.inputJson += fnArgs
               }
-              current.id = toolCall.id || current.id
-              current.name += toolCall.function?.name || ''
-              current.inputJson += toolCall.function?.arguments || ''
-              toolCallChunks.set(index, current)
             }
           }
         }
@@ -363,11 +397,13 @@ export class OpenAIChatClient implements ApiClient {
 
       onStream('', 'end')
 
-      const toolCalls = Array.from(toolCallChunks.values()).map(toolCall => ({
-        id: toolCall.id,
-        name: toolCall.name,
-        input: parseJsonObject(toolCall.inputJson),
-      }))
+      const toolCalls = slots
+        .filter(slot => slot.name)
+        .map(slot => ({
+          id: slot.id,
+          name: slot.name,
+          input: parseJsonObject(slot.inputJson),
+        }))
 
       return {
         content: fullContent,
@@ -434,7 +470,6 @@ export class OpenAIResponsesClient implements ApiClient {
   }
 
   async sendMessageStream(messages: Message[], onStream: StreamCallback, tools?: any[], options?: ApiClientOptions): Promise<ApiClientResponse> {
-    void tools
     // 已吐出正文或图片增量后不再重连，避免内容重复
     let streamedContent = false
 
@@ -442,13 +477,25 @@ export class OpenAIResponsesClient implements ApiClient {
     throwIfAborted(options?.signal)
     onStream('', 'start')
 
-    const response = await this.fetchStream('/v1/responses', {
+    const requestBody: any = {
       model: this.config.model,
-      input: this.config.systemPrompt ? `${this.config.systemPrompt}\n\n${convertResponsesInput(messages)}` : convertResponsesInput(messages),
+      // 结构化 input 数组，承载文本 / 工具调用 / 工具结果
+      input: convertResponsesInputItems(messages),
       max_output_tokens: this.config.maxTokens || 4096,
       temperature: this.config.temperature ?? 1,
       stream: true,
-    }, options?.signal)
+    }
+
+    // system prompt 走顶层 instructions（Responses 规范），不进 input
+    if (this.config.systemPrompt) {
+      requestBody.instructions = this.config.systemPrompt
+    }
+
+    if (tools && tools.length > 0) {
+      requestBody.tools = convertResponsesTools(tools)
+    }
+
+    const response = await this.fetchStream('/v1/responses', requestBody, options?.signal)
 
     const reader = response.body?.getReader()
     if (!reader) throw new Error('上游没有返回流式内容')
@@ -463,6 +510,22 @@ export class OpenAIResponsesClient implements ApiClient {
     let pendingImageB64: string | undefined
     let pendingImageMime = 'image/png'
     let imageSeq = 0
+
+    // 工具调用重组：Responses 用独立的 function_call 事件流表达工具调用。
+    //  - response.output_item.added（item.type === 'function_call'）：新调用开始，带 call_id/name
+    //  - response.function_call_arguments.delta：逐块累加 arguments
+    //  - response.function_call_arguments.done：该调用参数结束
+    // 用 output_index 作为分片归属键（Responses 每个 output item 有稳定的 index）；
+    // 缺失时用事件里的 item_id 兜底。
+    const toolSlots: Array<{ id: string; name: string; argsJson: string }> = []
+    const toolIndexMap = new Map<number, number>()
+    const toolItemIdMap = new Map<string, number>()
+
+    const locateToolSlot = (outputIndex: number | undefined, itemId: string | undefined): number | undefined => {
+      if (outputIndex !== undefined && toolIndexMap.has(outputIndex)) return toolIndexMap.get(outputIndex)
+      if (itemId !== undefined && toolItemIdMap.has(itemId)) return toolItemIdMap.get(itemId)
+      return undefined
+    }
 
     const flushImage = () => {
       if (pendingImageId && pendingImageB64) {
@@ -502,6 +565,65 @@ export class OpenAIResponsesClient implements ApiClient {
         }
 
         const type: string = typeof event.type === 'string' ? event.type : ''
+
+        // === 工具调用：function_call 生命周期 ===
+        if (type === 'response.output_item.added' && event.item?.type === 'function_call') {
+          const item = event.item
+          const outputIndex: number | undefined = typeof event.output_index === 'number' ? event.output_index : undefined
+          const itemId: string | undefined = typeof item.id === 'string' ? item.id : undefined
+          toolSlots.push({
+            id: item.call_id || item.id || `call_${toolSlots.length}`,
+            name: item.name || '',
+            argsJson: typeof item.arguments === 'string' ? item.arguments : '',
+          })
+          const slotIdx = toolSlots.length - 1
+          if (outputIndex !== undefined) toolIndexMap.set(outputIndex, slotIdx)
+          if (itemId !== undefined) toolItemIdMap.set(itemId, slotIdx)
+          continue
+        }
+
+        if (type === 'response.function_call_arguments.delta') {
+          const outputIndex: number | undefined = typeof event.output_index === 'number' ? event.output_index : undefined
+          const itemId: string | undefined = typeof event.item_id === 'string' ? event.item_id : undefined
+          const slotIdx = locateToolSlot(outputIndex, itemId)
+          const delta = typeof event.delta === 'string' ? event.delta : ''
+          if (slotIdx !== undefined) {
+            toolSlots[slotIdx].argsJson += delta
+          } else {
+            // 未见过 added 事件时兜底：新建一个 slot（缺名字，后续 done 事件补齐）
+            toolSlots.push({ id: itemId || `call_${toolSlots.length}`, name: '', argsJson: delta })
+            const idx = toolSlots.length - 1
+            if (outputIndex !== undefined) toolIndexMap.set(outputIndex, idx)
+            if (itemId !== undefined) toolItemIdMap.set(itemId, idx)
+          }
+          continue
+        }
+
+        if (type === 'response.function_call_arguments.done') {
+          const outputIndex: number | undefined = typeof event.output_index === 'number' ? event.output_index : undefined
+          const itemId: string | undefined = typeof event.item_id === 'string' ? event.item_id : undefined
+          const slotIdx = locateToolSlot(outputIndex, itemId)
+          // done 事件通常携带完整 arguments，用它校正累加结果，避免分片丢失
+          if (slotIdx !== undefined && typeof event.arguments === 'string' && event.arguments) {
+            toolSlots[slotIdx].argsJson = event.arguments
+          }
+          continue
+        }
+
+        // output_item.done 补齐 function_call 的 name/call_id（某些实现在 added 时不带全）
+        if (type === 'response.output_item.done' && event.item?.type === 'function_call') {
+          const item = event.item
+          const outputIndex: number | undefined = typeof event.output_index === 'number' ? event.output_index : undefined
+          const itemId: string | undefined = typeof item.id === 'string' ? item.id : undefined
+          const slotIdx = locateToolSlot(outputIndex, itemId)
+          if (slotIdx !== undefined) {
+            const slot = toolSlots[slotIdx]
+            if (!slot.name && item.name) slot.name = item.name
+            if (item.call_id) slot.id = item.call_id
+            if (typeof item.arguments === 'string' && item.arguments) slot.argsJson = item.arguments
+          }
+          continue
+        }
 
         // === 原生生图：image_generation_call 生命周期 ===
         if (type === 'response.output_item.added' && event.item?.type === 'image_generation_call') {
@@ -553,7 +675,20 @@ export class OpenAIResponsesClient implements ApiClient {
     flushImage()
 
     onStream('', 'end')
-    return { content: fullContent }
+
+    // 组装工具调用：过滤掉没拿到名字的残缺 slot，arguments 解析成对象
+    const toolCalls = toolSlots
+      .filter(slot => slot.name)
+      .map(slot => ({
+        id: slot.id,
+        name: slot.name,
+        input: parseJsonObject(slot.argsJson),
+      }))
+
+    return {
+      content: fullContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    }
     }
 
     return withStreamRetry(attempt, { signal: options?.signal, hasStreamedContent: () => streamedContent })
@@ -840,6 +975,103 @@ function convertResponsesInput(messages: Message[]): string {
     .filter(message => message.role !== 'tool')
     .map(message => `${message.role}: ${message.content}`)
     .join('\n\n')
+}
+
+/**
+ * 把内部 Message[] 转成 OpenAI Responses API 的结构化 `input` 数组。
+ *
+ * 相比旧的 convertResponsesInput（拍平成一段纯文本），结构化 input 是承载
+ * 工具调用/工具结果的前提：
+ *  - assistant 的 tool_use → `function_call` item（arguments 为 JSON 字符串）
+ *  - tool 结果 → `function_call_output` item（用 call_id 与上面对应）
+ *  - user/assistant 文本 → message item，多模态图片走 input_image
+ *
+ * system prompt 不进 input，改由顶层 `instructions` 字段承载（Responses 规范）。
+ */
+function convertResponsesInputItems(messages: Message[]): any[] {
+  const items: any[] = []
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      // system 由顶层 instructions 承载，这里跳过
+      continue
+    }
+
+    if (message.role === 'tool') {
+      // 工具执行结果：Responses 用独立的 function_call_output item，
+      // 通过 call_id 与前面的 function_call 对应。output 必须是字符串。
+      items.push({
+        type: 'function_call_output',
+        call_id: message.toolCallId || '',
+        output: stringifyToolResultContent(message.content),
+      })
+      continue
+    }
+
+    if (message.role === 'assistant') {
+      // 先放文本（若有），再把每个工具调用展开成 function_call item
+      if (message.content) {
+        items.push({
+          role: 'assistant',
+          content: [{ type: 'output_text', text: message.content }],
+        })
+      }
+
+      if (message.toolCalls?.length) {
+        for (const toolCall of message.toolCalls) {
+          items.push({
+            type: 'function_call',
+            call_id: toolCall.id,
+            name: toolCall.name,
+            arguments: JSON.stringify(toolCall.input ?? toolCall.args ?? {}),
+          })
+        }
+      }
+      continue
+    }
+
+    // user：支持多模态（文本 + 图片）
+    items.push({
+      role: 'user',
+      content: buildResponsesUserContent(message),
+    })
+  }
+
+  return items
+}
+
+/**
+ * 构造 Responses user 消息的 content 数组。
+ * 纯文本时用 input_text；带 contentBlocks 时把 image 转成 input_image（data URL）。
+ */
+function buildResponsesUserContent(message: Message): any[] {
+  if (message.contentBlocks?.length) {
+    return message.contentBlocks.map(block => {
+      if (block.type === 'image' && block.source) {
+        return {
+          type: 'input_image',
+          image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+        }
+      }
+      return { type: 'input_text', text: block.text ?? '' }
+    })
+  }
+
+  return [{ type: 'input_text', text: message.content }]
+}
+
+/**
+ * 把内部工具定义转成 Responses API 的 tools 格式。
+ * 注意：Responses 的 function 是扁平结构（name/description/parameters 直接平铺），
+ * 不像 Chat Completions 那样再套一层 `function: {}`。
+ */
+function convertResponsesTools(tools: any[]): any[] {
+  return tools.map(tool => ({
+    type: 'function',
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.input_schema,
+  }))
 }
 
 function buildUrl(provider: Provider, endpoint: string): string {

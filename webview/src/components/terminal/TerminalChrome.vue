@@ -125,6 +125,13 @@ defineEmits<{
   word-break: break-word;
 }
 
+/* 长输出限高滚动，避免把卡片撑高；离屏时跳过内容渲染 */
+.terminal-output {
+  max-height: 320px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
 .terminal-command span {
   color: var(--chat-color-terminal-accent);
 }

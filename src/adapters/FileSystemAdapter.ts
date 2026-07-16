@@ -22,6 +22,37 @@
  */
 
 /**
+ * 目录条目（含类型信息）
+ *
+ * 为什么需要它：
+ * readDirectory 只返回名字，遍历工具就得对每个条目再发一次 stat 去问"是文件还是目录"，
+ * 在大目录里就是 O(N) 次多余的往返。readDirectoryWithTypes 一次调用把类型一起带回来，
+ * 直接消除这些探测调用。
+ */
+export interface DirEntry {
+  /** 文件或目录名 */
+  name: string
+  /** 是否为目录 */
+  isDirectory: boolean
+  /** 是否为普通文件 */
+  isFile: boolean
+}
+
+/**
+ * 文件/目录元信息
+ */
+export interface FileStat {
+  /** 字节大小 */
+  size: number
+  /** 修改时间（毫秒时间戳） */
+  mtime: number
+  /** 是否为普通文件 */
+  isFile: boolean
+  /** 是否为目录 */
+  isDirectory: boolean
+}
+
+/**
  * 文件系统适配器接口
  * 定义了文件操作的标准方法
  */
@@ -102,6 +133,26 @@ export interface IFileSystemAdapter {
   readDirectory(path: string): Promise<string[]>
 
   /**
+   * 列出目录内容，并一次性带回每个条目的类型（文件/目录）
+   *
+   * 相比 readDirectory + 逐条 stat，这里只需一次系统调用即可拿到全部类型，
+   * 是遍历类工具（grep/find/list）避免 O(N) 次多余往返的关键。
+   *
+   * @param path - 目录绝对路径
+   * @returns 目录条目数组（含类型）
+   */
+  readDirectoryWithTypes(path: string): Promise<DirEntry[]>
+
+  /**
+   * 获取文件/目录的元信息（大小、修改时间、类型）
+   *
+   * @param path - 绝对路径
+   * @returns 元信息
+   * @throws Error 如果路径不存在
+   */
+  stat(path: string): Promise<FileStat>
+
+  /**
    * 按 glob 模式搜索文件
    *
    * @param pattern - glob 模式
@@ -117,26 +168,26 @@ export interface IFileSystemAdapter {
  */
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as fsp from 'fs/promises'
 
+/**
+ * 为什么读操作走 Node 原生 fs 而不是 vscode.workspace.fs：
+ * - vscode.workspace.fs 每次调用都是「扩展进程 → VSCode 主进程」的跨进程 IPC，
+ *   单次往返延迟远高于 Node 原生 fs 的直接系统调用。
+ * - grep/find/list 这类工具要遍历成百上千个文件，IPC 往返累积起来就是主要耗时来源。
+ * - 扩展宿主与工作区文件同处一台机器（本地或远程开发场景下宿主都运行在文件所在侧），
+ *   Node fs 能正确访问，且读盘语义与 workspace.fs 一致（都读磁盘，不读编辑器未保存缓冲区）。
+ *
+ * 写操作仍保留 vscode.workspace.fs（见 writeFile/createDirectory/deleteFile），
+ * 以维持与编辑器状态、文件事件、回收站等的集成，且写操作频率低、不是性能瓶颈。
+ */
 export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
   /**
-   * 读取文件内容
-   *
-   * VSCode API 流程：
-   * 1. 将路径字符串转换为 VSCode Uri
-   * 2. 使用 workspace.fs.readFile 读取（返回 Uint8Array）
-   * 3. 将 Uint8Array 转换为 UTF-8 字符串
+   * 读取文件内容（Node 原生 fs，无 IPC）
    */
   async readFile(filePath: string): Promise<string> {
     try {
-      // 转换为 VSCode Uri
-      const uri = vscode.Uri.file(filePath)
-
-      // 读取文件（返回 Uint8Array）
-      const content = await vscode.workspace.fs.readFile(uri)
-
-      // 转换为 UTF-8 字符串
-      return Buffer.from(content).toString('utf-8')
+      return await fsp.readFile(filePath, 'utf-8')
     } catch (error) {
       throw new Error(`Failed to read file ${filePath}: ${error}`)
     }
@@ -150,8 +201,7 @@ export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
    */
   async readFileRaw(filePath: string): Promise<Uint8Array> {
     try {
-      const uri = vscode.Uri.file(filePath)
-      return await vscode.workspace.fs.readFile(uri)
+      return await fsp.readFile(filePath)
     } catch (error) {
       throw new Error(`Failed to read file ${filePath}: ${error}`)
     }
@@ -194,11 +244,9 @@ export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
    */
   async exists(filePath: string): Promise<boolean> {
     try {
-      const uri = vscode.Uri.file(filePath)
-      await vscode.workspace.fs.stat(uri)
+      await fsp.stat(filePath)
       return true
-    } catch (error) {
-      // FileNotFound 错误表示文件不存在
+    } catch {
       return false
     }
   }
@@ -242,13 +290,34 @@ export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
    */
   async readDirectory(dirPath: string): Promise<string[]> {
     try {
-      const uri = vscode.Uri.file(dirPath)
-      const entries = await vscode.workspace.fs.readDirectory(uri)
-      // entries 格式: [['file1.txt', FileType.File], ['dir1', FileType.Directory]]
-      // 只返回名称
-      return entries.map(([name]) => name)
+      // withFileTypes 一次拿到 Dirent，无需逐条 stat；Node fs 直接读盘，无 IPC
+      const entries = await fsp.readdir(dirPath, { withFileTypes: true })
+      return entries.map(e => e.name)
     } catch (error) {
       throw new Error(`Failed to read directory ${dirPath}: ${error}`)
+    }
+  }
+
+  async readDirectoryWithTypes(dirPath: string): Promise<DirEntry[]> {
+    try {
+      const entries = await fsp.readdir(dirPath, { withFileTypes: true })
+      return entries.map(e => ({
+        name: e.name,
+        isDirectory: e.isDirectory(),
+        isFile: e.isFile(),
+      }))
+    } catch (error) {
+      throw new Error(`Failed to read directory ${dirPath}: ${error}`)
+    }
+  }
+
+  async stat(filePath: string): Promise<FileStat> {
+    const s = await fsp.stat(filePath)
+    return {
+      size: s.size,
+      mtime: s.mtimeMs,
+      isFile: s.isFile(),
+      isDirectory: s.isDirectory(),
     }
   }
 
@@ -319,6 +388,42 @@ export class MockFileSystemAdapter implements IFileSystemAdapter {
       }
     }
     return files
+  }
+
+  async readDirectoryWithTypes(path: string): Promise<DirEntry[]> {
+    const prefix = path.endsWith('/') ? path : path + '/'
+    const seen = new Map<string, boolean>() // name -> isDirectory
+    for (const filePath of this.files.keys()) {
+      if (filePath.startsWith(prefix)) {
+        const relativePath = filePath.slice(prefix.length)
+        const parts = relativePath.split('/')
+        const firstPart = parts[0]
+        if (firstPart && !seen.has(firstPart)) {
+          // 有后续路径段说明它是目录
+          seen.set(firstPart, parts.length > 1)
+        }
+      }
+    }
+    return Array.from(seen.entries()).map(([name, isDirectory]) => ({
+      name,
+      isDirectory,
+      isFile: !isDirectory,
+    }))
+  }
+
+  async stat(path: string): Promise<FileStat> {
+    const content = this.files.get(path)
+    if (content !== undefined) {
+      return { size: content.length, mtime: 0, isFile: true, isDirectory: false }
+    }
+    // 若作为目录前缀存在，则视为目录
+    const prefix = path.endsWith('/') ? path : path + '/'
+    for (const filePath of this.files.keys()) {
+      if (filePath.startsWith(prefix)) {
+        return { size: 0, mtime: 0, isFile: false, isDirectory: true }
+      }
+    }
+    throw new Error(`Path not found: ${path}`)
   }
 
   async glob(pattern: string, searchPath: string): Promise<string[]> {

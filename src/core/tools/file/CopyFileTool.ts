@@ -21,7 +21,6 @@
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { IFileSystemAdapter } from '../../../adapters/FileSystemAdapter'
 import * as path from 'path'
-import * as fs from 'fs'
 
 /**
  * CopyFileTool 参数
@@ -158,8 +157,8 @@ export class CopyFileTool extends Tool {
       }
 
       // 6. 判断是文件还是目录
-      const stats = fs.statSync(sourcePath)
-      const isDirectory = stats.isDirectory()
+      const stats = await this.fs.stat(sourcePath)
+      const isDirectory = stats.isDirectory
 
       if (isDirectory) {
         // 复制目录
@@ -222,17 +221,15 @@ export class CopyFileTool extends Tool {
     // 创建目标目录
     await this.fs.createDirectory(dest)
 
-    // 读取源目录内容
-    const entries = await this.fs.readDirectory(source)
+    // 读取源目录内容（一次带回类型，免去逐条 statSync）
+    const entries = await this.fs.readDirectoryWithTypes(source)
 
     for (const entry of entries) {
-      const sourcePath = path.join(source, entry)
-      const destPath = path.join(dest, entry)
+      const sourcePath = path.join(source, entry.name)
+      const destPath = path.join(dest, entry.name)
 
       try {
-        const stats = fs.statSync(sourcePath)
-
-        if (stats.isDirectory()) {
+        if (entry.isDirectory) {
           // 递归复制子目录
           await this.copyDirectory(sourcePath, destPath, overwrite)
         } else {
