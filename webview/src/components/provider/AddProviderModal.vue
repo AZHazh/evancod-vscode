@@ -4,7 +4,7 @@ import { X } from 'lucide-vue-next'
 import { useVSCode } from '@/composables/useVSCode'
 import Button from '@/components/common/Button.vue'
 
-type ProviderApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses'
+type ProviderApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses' | 'openai_image'
 type ProviderAuthStrategy = 'api_key' | 'auth_token' | 'auth_token_empty_api_key' | 'dual_same_token' | 'dual_dummy'
 
 type Provider = {
@@ -70,6 +70,7 @@ const isEditMode = computed(() => !!props.provider)
 const title = computed(() => isEditMode.value ? '编辑服务商' : '新增服务商')
 const needsBaseUrl = computed(() => form.value.type === 'custom')
 const isAnthropicFormat = computed(() => form.value.apiFormat === 'anthropic')
+const isImageFormat = computed(() => form.value.apiFormat === 'openai_image')
 
 watch(
   () => props.provider,
@@ -200,7 +201,7 @@ function handleClose() {
 
 function normalizeApiFormat(apiFormat: any): ProviderApiFormat {
   if (apiFormat === 'openai') return 'openai_chat'
-  if (apiFormat === 'openai_chat' || apiFormat === 'openai_responses') return apiFormat
+  if (apiFormat === 'openai_chat' || apiFormat === 'openai_responses' || apiFormat === 'openai_image') return apiFormat
   return 'anthropic'
 }
 
@@ -251,8 +252,9 @@ watch(
                 <option value="anthropic">Anthropic Messages</option>
                 <option value="openai_chat">OpenAI Chat Completions</option>
                 <option value="openai_responses">OpenAI Responses</option>
+                <option value="openai_image">OpenAI Image Generations</option>
               </select>
-              <span class="form-hint">OpenAI 协议会按桌面端逻辑转换为可对话格式</span>
+              <span class="form-hint">OpenAI 协议会按桌面端逻辑转换为可对话格式；Image 协议专用于生图</span>
             </div>
           </div>
 
@@ -283,38 +285,40 @@ watch(
           </div>
 
           <div class="form-section">
-            <h3>模型配置</h3>
-            <p class="section-hint">和桌面端一致，四类模型会用于主对话、Sonnet、Opus、Haiku 场景。</p>
+            <h3>{{ isImageFormat ? '生图模型配置' : '模型配置' }}</h3>
+            <p class="section-hint">{{ isImageFormat ? '配置生图使用的模型名称，如 gpt-image-2、dall-e-3 等。' : '和桌面端一致，四类模型会用于主对话、Sonnet、Opus、Haiku 场景。' }}</p>
 
             <div class="form-group">
-              <label>主模型（对话）*</label>
-              <input v-model="form.models.main" type="text" placeholder="claude-3-5-sonnet-20241022 或 gpt-4.1" :class="{ error: errors.mainModel }" />
+              <label>{{ isImageFormat ? '生图模型 *' : '主模型（对话）*' }}</label>
+              <input v-model="form.models.main" type="text" :placeholder="isImageFormat ? 'gpt-image-2' : 'claude-3-5-sonnet-20241022 或 gpt-4.1'" :class="{ error: errors.mainModel }" />
               <span v-if="errors.mainModel" class="error-message">{{ errors.mainModel }}</span>
             </div>
 
-            <div class="form-row two-columns">
-              <div class="form-group">
-                <label>Sonnet 模型</label>
-                <input v-model="form.models.sonnet" type="text" placeholder="claude-3-5-sonnet-20241022" />
+            <template v-if="!isImageFormat">
+              <div class="form-row two-columns">
+                <div class="form-group">
+                  <label>Sonnet 模型</label>
+                  <input v-model="form.models.sonnet" type="text" placeholder="claude-3-5-sonnet-20241022" />
+                </div>
+
+                <div class="form-group">
+                  <label>Opus 模型</label>
+                  <input v-model="form.models.opus" type="text" placeholder="claude-3-opus-20240229" />
+                </div>
               </div>
 
-              <div class="form-group">
-                <label>Opus 模型</label>
-                <input v-model="form.models.opus" type="text" placeholder="claude-3-opus-20240229" />
-              </div>
-            </div>
+              <div class="form-row two-columns">
+                <div class="form-group">
+                  <label>Haiku 模型</label>
+                  <input v-model="form.models.haiku" type="text" placeholder="claude-3-5-haiku-20241022" />
+                </div>
 
-            <div class="form-row two-columns">
-              <div class="form-group">
-                <label>Haiku 模型</label>
-                <input v-model="form.models.haiku" type="text" placeholder="claude-3-5-haiku-20241022" />
+                <div class="form-group">
+                  <label>自动压缩窗口</label>
+                  <input v-model="form.autoCompactWindow" type="number" min="0" placeholder="可选，例如 160000" />
+                </div>
               </div>
-
-              <div class="form-group">
-                <label>自动压缩窗口</label>
-                <input v-model="form.autoCompactWindow" type="number" min="0" placeholder="可选，例如 160000" />
-              </div>
-            </div>
+            </template>
           </div>
         </form>
       </div>

@@ -4,10 +4,13 @@
  * 支持两条上游路径，按"模型名"自动路由：
  * - OpenAI 兼容：/v1/images/generations（gpt-image-* / dall-e-* 等），
  *   一次性 JSON 响应，Authorization: Bearer。
+ *   当存在 apiFormat 为 openai_image 的生图服务商时，优先使用该服务商的
+ *   baseUrl / apiKey / models.main。
  * - Gemini：{model}:streamGenerateContent?alt=sse（gemini-*-image 系列），
  *   SSE 流式响应，x-goog-api-key，需 responseModalities:["TEXT","IMAGE"]。
  *
  * 凭证来自当前激活的 Provider（apiKey / baseUrl），与对话共用。
+ * 若配置了专用生图服务商（openai_image），则优先使用其凭证。
  * Gemini 路径下：若 provider.baseUrl 非 Google 域名，则回退到 AI Studio 官方域名。
  *
  * 返回值约定（与 ToolExecutor / 前端配合）：
@@ -20,6 +23,7 @@
 import { Tool, ToolDefinition, ToolResult } from '../base/Tool'
 import type { Provider } from '../../../types'
 import { saveGeneratedImages, type RawImage } from './imageStorage'
+import { buildOpenAIImageUrl, downloadAsBase64 } from './imageUtils'
 
 /** 允许的输出尺寸（OpenAI 图像 API 常见取值） */
 const ALLOWED_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536', '1792x1024', '1024x1792']
@@ -60,10 +64,12 @@ export class ImageGenTool extends Tool {
   /**
    * @param cwd - 工作目录（图片保存的基准路径）
    * @param provider - 当前激活的服务商（提供 apiKey / baseUrl）
+   * @param imageProvider - 专用生图服务商（apiFormat 为 openai_image），可选
    */
   constructor(
     private cwd: string,
-    private provider: Provider
+    private provider: Provider,
+    private imageProvider?: Provider
   ) {
     super()
   }
@@ -116,18 +122,24 @@ export class ImageGenTool extends Tool {
         return this.createErrorResult('prompt 不能为空')
       }
 
+      // === 确定使用哪个 Provider ===
+      // 优先使用专用生图服务商（openai_image），否则回退到当前激活的服务商
+      const effectiveProvider = this.imageProvider || this.provider
+      console.log('[ImageGenTool] execute called, imageProvider:', this.imageProvider?.name, 'effectiveProvider:', effectiveProvider?.name)
+
       // === 校验服务商配置 ===
-      if (!this.provider) {
+      if (!effectiveProvider) {
         return this.createErrorResult('未配置服务商（Provider），无法生成图片。请先在设置中配置并激活一个服务商。')
       }
-      if (!this.provider.apiKey) {
+      if (!effectiveProvider.apiKey) {
         return this.createErrorResult(
-          `当前服务商 "${this.provider.name}" 未配置 API Key，无法调用图像生成接口。`
+          `当前服务商 "${effectiveProvider.name}" 未配置 API Key，无法调用图像生成接口。`
         )
       }
 
       const prompt = args.prompt.trim()
-      const model = args.model || DEFAULT_OPENAI_IMAGE_MODEL
+      // 如果有专用生图服务商，默认使用其 main 模型；否则使用参数指定或默认模型
+      const model = args.model || (this.imageProvider ? this.imageProvider.models.main : DEFAULT_OPENAI_IMAGE_MODEL)
 
       // === 按模型名路由：Gemini 生图 or OpenAI 兼容生图 ===
       let rawImages: RawImage[]
@@ -138,10 +150,10 @@ export class ImageGenTool extends Tool {
         rawImages = result.images
         meta = `模型：${model}（Gemini）`
       } else {
-        const result = await this.generateWithOpenAI(model, prompt, args)
+        const result = await this.generateWithOpenAI(model, prompt, args, effectiveProvider)
         if ('error' in result) return this.createErrorResult(result.error)
         rawImages = result.images
-        meta = `模型：${model}\n尺寸：${args.size || '1024x1024'}，质量：${args.quality || 'auto'}`
+        meta = `模型：${model}\n尺寸：1024x1024，质量：high`
       }
 
       if (rawImages.length === 0) {
@@ -177,16 +189,27 @@ export class ImageGenTool extends Tool {
   private async generateWithOpenAI(
     model: string,
     prompt: string,
-    args: ImageGenParams
+    args: ImageGenParams,
+    effectiveProvider: Provider
   ): Promise<{ images: RawImage[] } | { error: string }> {
-    if (!this.provider.baseUrl) {
-      return { error: `当前服务商 "${this.provider.name}" 未配置 Base URL，无法调用图像生成接口。` }
+    if (!effectiveProvider.baseUrl) {
+      return { error: `当前服务商 "${effectiveProvider.name}" 未配置 Base URL，无法调用图像生成接口。` }
     }
 
-    const size = args.size || '1024x1024'
-    const quality = args.quality || 'auto'
     const n = Math.min(Math.max(args.n || 1, 1), 4)
-    const url = this.buildOpenAIImageUrl(this.provider.baseUrl)
+    const url = buildOpenAIImageUrl(effectiveProvider.baseUrl)
+
+    // 使用 /v1/images/generations 协议入参
+    const body: Record<string, any> = {
+      model,
+      prompt,
+      n,
+      size: '1024x1024',
+      quality: 'high',
+      response_format: 'url'
+    }
+
+    console.log('[ImageGenTool] generateWithOpenAI request:', url, JSON.stringify(body))
 
     let response: Response
     try {
@@ -194,31 +217,38 @@ export class ImageGenTool extends Tool {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.provider.apiKey}`
+          Authorization: `Bearer ${effectiveProvider.apiKey}`
         },
-        body: JSON.stringify({ model, prompt, n, size, quality, response_format: 'b64_json' })
+        body: JSON.stringify(body)
       })
     } catch (err) {
+      console.error('[ImageGenTool] generateWithOpenAI network error:', err)
       return { error: `图像生成请求失败（网络错误）：${err instanceof Error ? err.message : String(err)}` }
     }
 
+    console.log('[ImageGenTool] generateWithOpenAI response status:', response.status)
+
     if (!response.ok) {
       const errText = await response.text().catch(() => '')
+      console.error('[ImageGenTool] generateWithOpenAI HTTP error:', response.status, errText.slice(0, 200))
       return { error: `图像生成接口返回错误 HTTP ${response.status}：${this.truncate(errText, 500)}` }
     }
 
     const data: any = await response.json()
     const items: any[] = Array.isArray(data?.data) ? data.data : []
+    console.log('[ImageGenTool] generateWithOpenAI response items:', items.length,
+      items.map((it: any, i: number) => `[${i}] url=${!!it?.url} b64=${!!it?.b64_json}`).join(', '))
+
     if (items.length === 0) {
       return { error: `接口未返回图片数据。原始响应：${this.truncate(JSON.stringify(data), 500)}` }
     }
 
     const images: RawImage[] = []
     for (const item of items) {
-      const b64 = typeof item?.b64_json === 'string' ? item.b64_json : undefined
-      const remoteUrl = typeof item?.url === 'string' ? item.url : undefined
-      // 部分服务商忽略 response_format 仍返回 URL，此时下载后转 base64
-      const base64 = b64 || (remoteUrl ? await this.downloadAsBase64(remoteUrl) : undefined)
+      const b64 = typeof item?.b64_json === 'string' && item.b64_json ? item.b64_json : undefined
+      const remoteUrl = typeof item?.url === 'string' && item.url ? item.url : undefined
+      // 优先使用 url（下载后转 base64），其次使用 b64_json
+      const base64 = remoteUrl ? await downloadAsBase64(remoteUrl) : b64
       if (base64) images.push({ base64, mime: 'image/png' })
     }
     return { images }
@@ -247,6 +277,7 @@ export class ImageGenTool extends Tool {
 
     let response: Response
     try {
+      console.log('[ImageGenTool] generateWithGemini request:', url)
       response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -256,11 +287,15 @@ export class ImageGenTool extends Tool {
         body: JSON.stringify(payload)
       })
     } catch (err) {
+      console.error('[ImageGenTool] generateWithGemini network error:', err)
       return { error: `Gemini 生图请求失败（网络错误）：${err instanceof Error ? err.message : String(err)}` }
     }
 
+    console.log('[ImageGenTool] generateWithGemini response status:', response.status)
+
     if (!response.ok || !response.body) {
       const errText = await response.text().catch(() => '')
+      console.error('[ImageGenTool] generateWithGemini HTTP error:', response.status, errText.slice(0, 200))
       return { error: `Gemini 生图接口返回错误 HTTP ${response.status}：${this.truncate(errText, 500)}` }
     }
 
@@ -324,24 +359,13 @@ export class ImageGenTool extends Tool {
     if (images.length === 0 && streamError) {
       return { error: `Gemini 生图失败：${streamError}` }
     }
+    console.log('[ImageGenTool] parseGeminiStream complete, images found:', images.length)
     return { images }
   }
 
   // =========================================================================
   // 公共：URL 拼接、辅助
   // =========================================================================
-
-  /**
-   * 拼接 OpenAI 图像生成端点 URL。
-   * baseUrl 已含 /vN 时直接追加 /images/generations，否则补 /v1/images/generations。
-   */
-  private buildOpenAIImageUrl(baseUrl: string): string {
-    const trimmed = baseUrl.replace(/\/+$/, '')
-    if (/\/v\d+$/.test(trimmed)) {
-      return `${trimmed}/images/generations`
-    }
-    return `${trimmed}/v1/images/generations`
-  }
 
   /**
    * 确定 Gemini 请求的 Base URL。
@@ -353,18 +377,6 @@ export class ImageGenTool extends Tool {
       return baseUrl.replace(/\/+$/, '').replace(/\/v\d+(beta)?$/, '')
     }
     return GEMINI_AI_STUDIO_BASE
-  }
-
-  /** 下载远程图片并转为 base64。 */
-  private async downloadAsBase64(url: string): Promise<string | undefined> {
-    try {
-      const res = await fetch(url)
-      if (!res.ok) return undefined
-      const buf = Buffer.from(await res.arrayBuffer())
-      return buf.toString('base64')
-    } catch {
-      return undefined
-    }
   }
 
   private truncate(value: string, length: number): string {

@@ -169,7 +169,7 @@ export interface Session {
 }
 
 export type ProviderType = 'anthropic' | 'bedrock' | 'vertex' | 'azure' | 'custom'
-export type ProviderApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses'
+export type ProviderApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses' | 'openai_image'
 export type ProviderAuthStrategy =
   | 'api_key'
   | 'auth_token'

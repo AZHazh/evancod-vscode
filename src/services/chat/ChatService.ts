@@ -14,7 +14,7 @@
  */
 
 import * as vscode from 'vscode'
-import type { Session, Message, AttachmentContext, AgentTranscriptBlock, TokenUsage } from '../../types'
+import type { Session, Message, AttachmentContext, AgentTranscriptBlock, TokenUsage, Provider } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { ProviderService } from '../provider/ProviderService'
 import { TaskManager } from '../task/TaskManager'
@@ -24,7 +24,8 @@ import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
 import { QueryEngine } from '../../core/engine/QueryEngine'
-import { readImageAsBase64 } from '../../core/tools/image/imageStorage'
+import { readImageAsBase64, saveGeneratedImages, timestampedImagePath } from '../../core/tools/image/imageStorage'
+import { buildOpenAIImageUrl, downloadAsBase64 } from '../../core/tools/image/imageUtils'
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
@@ -475,8 +476,12 @@ export class ChatService {
     const messageContent = this.buildMessageContent(commandResult.content, attachmentContexts)
     const userContentBlocks = this.buildUserContentBlocks(commandResult.content, attachmentContexts)
 
-    // 3. 初始化 QueryEngine
-    if (!this.queryEngine) {
+    // 检测是否为 openai_image 格式的 Provider —— 不需要初始化 QueryEngine
+    const activeProvider = this.providerService.getActiveProvider()
+    const isDirectImageGen = activeProvider?.apiFormat === 'openai_image'
+
+    // 3. 初始化 QueryEngine（openai_image 格式不需要）
+    if (!isDirectImageGen && !this.queryEngine) {
       await this.initializeQueryEngine()
     }
 
@@ -521,6 +526,13 @@ export class ChatService {
     this.isStreaming = true
 
     try {
+      // openai_image 格式 Provider —— 直接走图片生成路径
+      if (isDirectImageGen && activeProvider) {
+        await this.handleDirectImageGeneration(commandResult.content, session, activeProvider)
+        this.isStreaming = false
+        return
+      }
+
       // 4. 调用 QueryEngine 发送消息
       await this.queryEngine!.query(messageContent, userContentBlocks)
 
@@ -572,6 +584,126 @@ export class ChatService {
     } finally {
       // 标记为非流式接收
       this.isStreaming = false
+    }
+  }
+
+  /**
+   * openai_image 格式 Provider 的直接生图路径。
+   * 用户输入直接作为 prompt 调用 /v1/images/generations，
+   * 通过 image_generation 事件驱动前端骨架屏和图片展示。
+   */
+  private async handleDirectImageGeneration(
+    prompt: string,
+    session: Session,
+    provider: Provider
+  ): Promise<void> {
+    const imageId = `imggen-direct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const model = provider.models.main || 'gpt-image-2'
+    const now = Date.now()
+
+    // 1. 发送骨架屏事件
+    const startEvent = { type: 'image_generation' as const, imageId, phase: 'start' as const, prompt }
+    this.recordAgentEvent(startEvent)
+    this.agentEventCallback?.(startEvent)
+
+    try {
+      if (!provider.baseUrl) {
+        throw new Error(`服务商 "${provider.name}" 未配置 Base URL`)
+      }
+      if (!provider.apiKey) {
+        throw new Error(`服务商 "${provider.name}" 未配置 API Key`)
+      }
+
+      const url = buildOpenAIImageUrl(provider.baseUrl)
+      const body = {
+        model,
+        prompt: prompt.trim(),
+        n: 1,
+        size: '1024x1024',
+        quality: 'high',
+        response_format: 'url',
+      }
+
+      console.log('[ChatService] handleDirectImageGeneration request:', url, JSON.stringify(body))
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${provider.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      })
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '')
+        throw new Error(`图像生成接口返回错误 HTTP ${response.status}：${errText.slice(0, 500)}`)
+      }
+
+      const data: any = await response.json()
+      const items: any[] = Array.isArray(data?.data) ? data.data : []
+      console.log('[ChatService] handleDirectImageGeneration response items:', items.length)
+
+      if (items.length === 0) {
+        throw new Error(`接口未返回图片数据。原始响应：${JSON.stringify(data).slice(0, 500)}`)
+      }
+
+      // 解析图片：优先 url 下载转 base64，其次 b64_json
+      let base64: string | undefined
+      let mime = 'image/png'
+      for (const item of items) {
+        const b64 = typeof item?.b64_json === 'string' && item.b64_json ? item.b64_json : undefined
+        const remoteUrl = typeof item?.url === 'string' && item.url ? item.url : undefined
+        base64 = remoteUrl ? await downloadAsBase64(remoteUrl) : b64
+        if (base64) break
+      }
+
+      if (!base64) {
+        throw new Error('图片下载失败或接口未返回有效图片数据')
+      }
+
+      // 保存到磁盘
+      const saved = await saveGeneratedImages(session.workDir, [{ base64, mime }], timestampedImagePath(mime))
+      const savedPath = saved.length > 0 ? saved[0].path : undefined
+      const name = saved.length > 0 ? saved[0].name : undefined
+
+      // 2. 发送完成事件（图片展示）
+      const completeEvent = {
+        type: 'image_generation' as const,
+        imageId,
+        phase: 'complete' as const,
+        prompt,
+        image: { base64, mime, path: savedPath, name },
+      }
+      this.recordAgentEvent(completeEvent)
+      this.agentEventCallback?.(completeEvent)
+
+    } catch (error) {
+      console.error('[ChatService] handleDirectImageGeneration error:', error)
+      // 生成失败：发送一条 assistant 错误消息
+      const errorMessage: Message = {
+        id: this.generateId(),
+        role: 'assistant',
+        content: `图片生成失败：${error instanceof Error ? error.message : String(error)}`,
+        timestamp: Date.now(),
+      }
+      session.messages.push(errorMessage)
+      this.appendOrUpdateTranscript(session, {
+        id: errorMessage.id,
+        type: 'assistant_text',
+        content: errorMessage.content,
+        timestamp: errorMessage.timestamp,
+        model,
+      })
+      if (this.messageCallback) {
+        this.messageCallback(errorMessage)
+      }
+    } finally {
+      // 3. 发送 message_complete 事件
+      this.agentEventCallback?.({ type: 'message_complete' })
+      session.updatedAt = Date.now()
+      session.messageCount = session.messages.length
+      this.saveSessions()
     }
   }
 
@@ -849,6 +981,7 @@ export class ChatService {
       memoryManager: this.memoryManager,
       onTaskListChange: () => this.taskManager.notifyTaskList(),
       permissionMode: this.permissionMode,
+      imageProvider: this.providerService.getImageProvider() || undefined,
     })
 
     // 设置流式回调

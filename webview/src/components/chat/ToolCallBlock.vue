@@ -24,7 +24,7 @@ const emit = defineEmits<{
   cancelBash: [toolUseId: string, taskId?: string]
 }>()
 
-const expanded = ref(false)
+const expanded = ref(props.toolName === 'image_gen')
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -236,6 +236,17 @@ const activeImageIndex = ref(0)
 function openImageAt(index: number) {
   activeImageIndex.value = index
   modalOpen.value = true
+}
+
+function downloadImage(image: GeneratedImage) {
+  window.vscode?.postMessage({
+    type: 'image.save',
+    data: {
+      name: image.name,
+      base64: image.src.replace(/^data:[^;]+;base64,/, ''),
+      mime: image.src.startsWith('data:image/png') ? 'image/png' : 'image/jpeg',
+    },
+  })
 }
 
 </script>
@@ -477,18 +488,44 @@ function openImageAt(index: number) {
 
       <div v-else-if="toolName === 'image_gen'" class="tool-summary vertical">
         <div v-if="imagePrompt"><span class="summary-label">提示词</span><code>{{ imagePrompt }}</code></div>
-        <div v-if="generatedImages.length > 0" class="image-gen-grid" :class="{ single: generatedImages.length === 1 }">
-          <button
+
+        <!-- 骨架屏：生成中 -->
+        <div v-if="isPending" class="image-gen-skeleton">
+          <div class="image-gen-skeleton__shimmer" />
+          <div class="image-gen-skeleton__label">
+            <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="image-gen-skeleton__icon">
+              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="5.5" cy="6.5" r="1" fill="currentColor"/>
+              <path d="M3 12l3.5-3.5L9 11l2-2 2 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>正在生成图片…</span>
+          </div>
+        </div>
+
+        <!-- 生成完成：图片 + 下载 -->
+        <div v-else-if="generatedImages.length > 0" class="image-gen-grid" :class="{ single: generatedImages.length === 1 }">
+          <div
             v-for="(image, index) in generatedImages"
             :key="`${image.name}-${index}`"
-            type="button"
-            class="image-gen-card"
-            @click="openImageAt(index)"
+            class="image-gen-card-wrapper"
           >
-            <img :src="image.src" :alt="image.name" loading="lazy" />
-            <span class="image-gen-name">{{ image.name }}</span>
-          </button>
+            <button
+              type="button"
+              class="image-gen-card"
+              @click="openImageAt(index)"
+            >
+              <img :src="image.src" :alt="image.name" loading="lazy" />
+              <span class="image-gen-name">{{ image.name }}</span>
+            </button>
+            <button type="button" class="image-gen-download" @click.stop="downloadImage(image)">
+              <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="image-gen-download__icon">
+                <path d="M8 2v9M8 11l-3-3M8 11l3-3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>下载</span>
+            </button>
+          </div>
         </div>
+
         <pre v-else class="tool-json compact">{{ inputText }}</pre>
 
         <ImageGalleryModal
@@ -722,6 +759,95 @@ code,
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ===== image_gen 骨架屏 ===== */
+.image-gen-skeleton {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-height: 280px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
+  border-radius: 12px;
+  background: var(--chat-color-surface-container-low, rgba(255, 255, 255, 0.04));
+}
+
+.image-gen-skeleton__shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in srgb, var(--chat-color-brand, #c084fc) 22%, transparent) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: image-gen-shimmer 1.4s ease-in-out infinite;
+}
+
+.image-gen-skeleton__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--chat-color-text-tertiary);
+  font-size: 13px;
+}
+
+.image-gen-skeleton__icon {
+  width: 28px;
+  height: 28px;
+  opacity: 0.7;
+  animation: image-gen-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes image-gen-shimmer {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+
+@keyframes image-gen-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.96); }
+  50% { opacity: 0.85; transform: scale(1.04); }
+}
+
+/* ===== image_gen 下载按钮 ===== */
+.image-gen-card-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.image-gen-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--chat-color-border) 50%, transparent);
+  border-radius: var(--chat-radius-full, 999px);
+  background: transparent;
+  color: var(--chat-color-text-tertiary);
+  cursor: pointer;
+  font-size: 11px;
+  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--vscode-focusBorder) 50%, transparent);
+    background: var(--chat-color-surface-container-low);
+    color: var(--chat-color-text-primary);
+  }
+}
+
+.image-gen-download__icon {
+  width: 12px;
+  height: 12px;
 }
 
 .tool-result-container {

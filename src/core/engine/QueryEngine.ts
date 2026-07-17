@@ -160,6 +160,12 @@ export interface QueryEngineConfig {
   effortLevel?: 'low' | 'medium' | 'high' | 'max'
 
   /**
+   * 专用生图服务商（可选）
+   * apiFormat 为 openai_image 的 Provider，用于调用 /v1/images/generations
+   */
+  imageProvider?: Provider
+
+  /**
    * 工具调用循环的最大迭代次数（可选）
    * 每次 API 轮次（含工具调用）消耗一次迭代。多步任务需要较高的上限，
    * 否则会在闭环前被截断。默认 100。
@@ -321,7 +327,7 @@ export class QueryEngine {
       new NotebookEditTool(),
 
       // 图像生成工具（使用当前服务商凭证调用图像 API）
-      new ImageGenTool(this.config.cwd, this.config.provider),
+      new ImageGenTool(this.config.cwd, this.config.provider, this.config.imageProvider),
     ]
 
     // 添加 Task 工具（如果提供了 TaskManager）
@@ -390,7 +396,8 @@ export class QueryEngine {
 
 工具执行契约：
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
-- 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。${this.buildSkillCatalog()}`
+- 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。
+- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${this.buildSkillCatalog()}`
   }
 
   /**

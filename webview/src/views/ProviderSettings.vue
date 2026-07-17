@@ -12,7 +12,7 @@ interface Provider {
   name: string
   type: 'anthropic' | 'bedrock' | 'vertex' | 'azure' | 'custom'
   presetId?: string
-  apiFormat: 'anthropic' | 'openai_chat' | 'openai_responses'
+  apiFormat: 'anthropic' | 'openai_chat' | 'openai_responses' | 'openai_image'
   runtimeKind?: 'anthropic_compatible' | 'openai_oauth'
   authStrategy?: 'api_key' | 'auth_token' | 'auth_token_empty_api_key' | 'dual_same_token' | 'dual_dummy'
   baseUrl?: string

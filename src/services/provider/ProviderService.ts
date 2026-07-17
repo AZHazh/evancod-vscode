@@ -96,6 +96,13 @@ export class ProviderService {
     return this.providers.find(p => p.id === this.activeProviderId) || null
   }
 
+  /**
+   * 获取生图服务商（apiFormat 为 openai_image 的第一个 Provider）
+   */
+  getImageProvider(): Provider | null {
+    return this.providers.find(p => p.apiFormat === 'openai_image') || null
+  }
+
   async addProvider(provider: Omit<Provider, 'id' | 'createdAt'>): Promise<Provider> {
     const newProvider = this.normalizeProvider({
       ...provider,
@@ -238,7 +245,7 @@ export class ProviderService {
 
   private normalizeApiFormat(apiFormat: any): ProviderApiFormat {
     if (apiFormat === 'openai') return 'openai_chat'
-    if (apiFormat === 'anthropic' || apiFormat === 'openai_chat' || apiFormat === 'openai_responses') {
+    if (apiFormat === 'anthropic' || apiFormat === 'openai_chat' || apiFormat === 'openai_responses' || apiFormat === 'openai_image') {
       return apiFormat
     }
     return 'anthropic'
