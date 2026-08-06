@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { EffortLevel, Message, Provider, TokenUsage } from '../../../types'
 import { resolveThinkingParam, resolveMaxTokens } from '../../../utils/thinking'
+import { sanitizeToolMessageSequence } from './toolMessageSanitizer'
 
 export interface ApiClientConfig {
   provider: Provider
@@ -33,6 +34,10 @@ export interface ApiClientResponse {
   content: string
   toolCalls?: any[]
   usage?: TokenUsage
+  /** 上游返回的原始停止原因，例如 end_turn / tool_use / max_tokens / length。 */
+  stopReason?: string
+  /** 输出被限长截断，或流在明确完成事件之前结束。 */
+  incomplete?: boolean
 }
 
 export interface ApiClientOptions {
@@ -176,6 +181,8 @@ export class AnthropicClient implements ApiClient {
       const toolCalls: any[] = []
       let currentToolCall: any = null
       let usage: TokenUsage | undefined
+      let stopReason: string | undefined
+      let receivedMessageStop = false
 
       for await (const event of stream) {
         throwIfAborted(options?.signal)
@@ -225,9 +232,11 @@ export class AnthropicClient implements ApiClient {
 
           case 'message_delta':
             usage = mergeClientUsage(usage, normalizeAnthropicUsage(event.usage))
+            stopReason = (event.delta as { stop_reason?: string | null })?.stop_reason || stopReason
             break
 
           case 'message_stop':
+            receivedMessageStop = true
             trackedStream('', 'end')
             break
         }
@@ -237,6 +246,8 @@ export class AnthropicClient implements ApiClient {
         content: fullContent,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         usage,
+        stopReason,
+        incomplete: !receivedMessageStop || isOutputLimitStopReason(stopReason),
       }
     }
 
@@ -324,6 +335,8 @@ export class OpenAIChatClient implements ApiClient {
       const slots: Array<{ id: string; name: string; inputJson: string }> = []
       const byId = new Map<string, number>()
       const byIndex = new Map<number, number>()
+      let finishReason: string | undefined
+      let receivedDone = false
 
       while (true) {
         const { value, done } = await reader.read()
@@ -339,10 +352,18 @@ export class OpenAIChatClient implements ApiClient {
           if (!line.startsWith('data:')) continue
 
           const data = line.slice(5).trim()
-          if (!data || data === '[DONE]') continue
+          if (!data) continue
+          if (data === '[DONE]') {
+            receivedDone = true
+            continue
+          }
 
           const chunk = JSON.parse(data)
-          const delta = chunk.choices?.[0]?.delta
+          const choice = chunk.choices?.[0]
+          if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
+            finishReason = choice.finish_reason
+          }
+          const delta = choice?.delta
           if (!delta) continue
 
           if (delta.content) {
@@ -408,6 +429,9 @@ export class OpenAIChatClient implements ApiClient {
       return {
         content: fullContent,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        stopReason: finishReason,
+        incomplete:
+          isOutputLimitStopReason(finishReason) || (!receivedDone && !finishReason),
       }
     }
 
@@ -510,6 +534,10 @@ export class OpenAIResponsesClient implements ApiClient {
     let pendingImageB64: string | undefined
     let pendingImageMime = 'image/png'
     let imageSeq = 0
+    let receivedDone = false
+    let receivedTerminalEvent = false
+    let stopReason: string | undefined
+    let responseIncomplete = false
 
     // 工具调用重组：Responses 用独立的 function_call 事件流表达工具调用。
     //  - response.output_item.added（item.type === 'function_call'）：新调用开始，带 call_id/name
@@ -555,7 +583,11 @@ export class OpenAIResponsesClient implements ApiClient {
         if (!line.startsWith('data:')) continue
 
         const data = line.slice(5).trim()
-        if (!data || data === '[DONE]') continue
+        if (!data) continue
+        if (data === '[DONE]') {
+          receivedDone = true
+          continue
+        }
 
         let event: any
         try {
@@ -565,6 +597,28 @@ export class OpenAIResponsesClient implements ApiClient {
         }
 
         const type: string = typeof event.type === 'string' ? event.type : ''
+
+        if (type === 'response.completed') {
+          receivedTerminalEvent = true
+          stopReason = event.response?.status || 'completed'
+          continue
+        }
+
+        if (type === 'response.incomplete') {
+          receivedTerminalEvent = true
+          responseIncomplete = true
+          stopReason =
+            event.response?.incomplete_details?.reason ||
+            event.response?.status ||
+            'incomplete'
+          continue
+        }
+
+        if (type === 'response.failed' || type === 'error') {
+          const message =
+            event.response?.error?.message || event.error?.message || event.message || 'Responses 流执行失败'
+          throw new Error(message)
+        }
 
         // === 工具调用：function_call 生命周期 ===
         if (type === 'response.output_item.added' && event.item?.type === 'function_call') {
@@ -688,6 +742,11 @@ export class OpenAIResponsesClient implements ApiClient {
     return {
       content: fullContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      stopReason,
+      incomplete:
+        responseIncomplete ||
+        isOutputLimitStopReason(stopReason) ||
+        (!receivedDone && !receivedTerminalEvent),
     }
     }
 
@@ -798,6 +857,11 @@ function isRetryableStreamError(error: unknown): boolean {
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
+function isOutputLimitStopReason(reason?: string): boolean {
+  if (!reason) return false
+  return /max[_-]?(?:output[_-]?)?tokens?|length|incomplete/i.test(reason)
+}
+
 /**
  * 为流式请求提供有限重试。
  *
@@ -842,7 +906,9 @@ async function withStreamRetry(
   throw lastError
 }
 
-function convertAnthropicMessages(messages: Message[]): AnthropicMessage[] {
+function convertAnthropicMessages(rawMessages: Message[]): AnthropicMessage[] {
+  // 兜底修复未配对的 tool_use / tool_result，否则 Anthropic 直接 400
+  const messages = sanitizeToolMessageSequence(rawMessages)
   const converted: AnthropicMessage[] = []
   let pendingToolResultBlocks: AnthropicContentBlock[] = []
 
@@ -916,7 +982,9 @@ function convertAnthropicMessages(messages: Message[]): AnthropicMessage[] {
   return converted
 }
 
-function convertOpenAIChatMessages(messages: Message[]): any[] {
+function convertOpenAIChatMessages(rawMessages: Message[]): any[] {
+  // 兜底修复未配对的 tool_calls / tool 结果，否则 OpenAI 直接 400
+  const messages = sanitizeToolMessageSequence(rawMessages)
   const converted: any[] = []
 
   for (const message of messages) {
@@ -988,7 +1056,9 @@ function convertResponsesInput(messages: Message[]): string {
  *
  * system prompt 不进 input，改由顶层 `instructions` 字段承载（Responses 规范）。
  */
-function convertResponsesInputItems(messages: Message[]): any[] {
+function convertResponsesInputItems(rawMessages: Message[]): any[] {
+  // 兜底修复未配对的 function_call / function_call_output，否则 Responses 直接 400
+  const messages = sanitizeToolMessageSequence(rawMessages)
   const items: any[] = []
 
   for (const message of messages) {

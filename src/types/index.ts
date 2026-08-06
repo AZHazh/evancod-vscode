@@ -128,6 +128,8 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   timestamp: number
+  /** 仅供模型运行时控制流程；会持久化以支持恢复，但不在 UI 展示。 */
+  internal?: boolean
   toolCalls?: ToolCall[]
   toolCallId?: string
   toolName?: string

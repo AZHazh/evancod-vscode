@@ -260,6 +260,7 @@ export const useChatStore = defineStore('chat', () => {
 
     for (let i = startIndex; i < currentSession.value.messages.length; i++) {
       const message = currentSession.value.messages[i]
+      if (message.internal) continue
       if (message.role === 'user') {
         nextMessages.push({
           id: message.id,

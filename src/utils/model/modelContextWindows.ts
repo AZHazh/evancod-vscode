@@ -1,36 +1,8 @@
-import { getCanonicalName } from './modelStrings'
-
 /**
  * 获取模型的上下文窗口大小（单位：tokens）
  */
-export function getContextWindowForModel(model: string): number {
-  const canonical = getCanonicalName(model)
-
-  // Claude 4 系列
-  if (canonical.includes('opus-4') || canonical.includes('sonnet-4') || canonical.includes('haiku-4')) {
-    return 200_000
-  }
-
-  // Claude 3 系列
-  if (canonical.includes('claude-3')) {
-    return 200_000
-  }
-
-  // GPT-4 系列
-  if (canonical.includes('gpt-4')) {
-    if (canonical.includes('32k')) return 32_768
-    if (canonical.includes('turbo')) return 128_000
-    return 8_192
-  }
-
-  // GPT-3.5
-  if (canonical.includes('gpt-3.5')) {
-    if (canonical.includes('16k')) return 16_384
-    return 4_096
-  }
-
-  // 保守默认值
-  return 200_000
+export function getContextWindowForModel(_model: string): number {
+  return 1_000_000
 }
 
 /**

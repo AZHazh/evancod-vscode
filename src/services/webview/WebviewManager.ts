@@ -252,7 +252,7 @@ export class WebviewManager {
           }
 
           case 'chat.stop': {
-            const session = this.chatService.stopGeneration()
+            const session = await this.chatService.stopGeneration()
             this.postMessage({
               type: 'agent.event',
               data: { type: 'status', state: 'idle', verb: 'stopped' },

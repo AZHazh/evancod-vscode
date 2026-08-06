@@ -50,7 +50,7 @@ export function getModelMaxOutputTokens(model: string): ModelOutputLimits {
   }
 
   // 未知模型的保守默认值
-  return { default: 32_000, upperLimit: 64_000 }
+  return { default: 64_000, upperLimit: 128_000 }
 }
 
 /**

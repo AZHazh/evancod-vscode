@@ -98,6 +98,32 @@ export class ToolExecutor {
     this.bashTool.cancelAll()
   }
 
+  /**
+   * 发出「命中去重缓存」的工具事件。
+   * 这类调用没有真正执行，但仍需在 UI 上留痕，
+   * 否则用户会看到模型行为与界面不一致。
+   */
+  emitCachedResult(toolCall: ToolCall, content: string): void {
+    this.callbacks.emitEvent({
+      type: 'content_start',
+      blockType: 'tool_use',
+      toolName: toolCall.name,
+      toolUseId: toolCall.id,
+    })
+    this.callbacks.emitEvent({
+      type: 'tool_use_complete',
+      toolName: toolCall.name,
+      toolUseId: toolCall.id,
+      input: toolCall.input ?? toolCall.args,
+    })
+    this.callbacks.emitEvent({
+      type: 'tool_result',
+      toolUseId: toolCall.id,
+      content,
+      isError: false,
+    })
+  }
+
   private async executeTool(tool: Tool, toolName: string, toolUseId: string, input: unknown): Promise<ToolResult> {
     if (toolName !== 'bash') {
       return tool.execute(input, { toolUseId })

@@ -101,6 +101,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   timestamp: number
+  internal?: boolean
   toolCalls?: ToolCall[]
   toolCallId?: string
   toolName?: string

@@ -23,7 +23,7 @@ import { AgentCoordinator } from '../agent/AgentCoordinator'
 import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
-import { QueryEngine } from '../../core/engine/QueryEngine'
+import { QueryCancelledError, QueryEngine } from '../../core/engine/QueryEngine'
 import { readImageAsBase64, saveGeneratedImages, timestampedImagePath } from '../../core/tools/image/imageStorage'
 import { buildOpenAIImageUrl, downloadAsBase64 } from '../../core/tools/image/imageUtils'
 import { commandManager } from '../command/CommandManager'
@@ -67,6 +67,8 @@ export class ChatService {
    * 用于防止重复发送、显示加载状态等
    */
   private isStreaming = false
+  private activeRequest?: Promise<void>
+  private requestQueue: Promise<void> = Promise.resolve()
 
   /**
    * QueryEngine 实例
@@ -410,10 +412,14 @@ export class ChatService {
     return this.queryEngine?.cancelBash(toolUseId, taskId) ?? false
   }
 
-  stopGeneration(): Session | null {
+  async stopGeneration(): Promise<Session | null> {
     const session = this.getCurrentSession()
     this.queryEngine?.cancel('用户停止生成')
-    this.isStreaming = false
+
+    const activeRequest = this.activeRequest
+    if (activeRequest) {
+      await activeRequest.catch(() => undefined)
+    }
 
     if (session) {
       this.expirePendingTranscript(session)
@@ -460,6 +466,27 @@ export class ChatService {
    * Phase 2 Week 3: 实现图片上传
    */
   async sendMessage(content: string, attachments: (string | AttachmentContext)[] = []): Promise<void> {
+    const previousRequest = this.activeRequest
+    const request = this.requestQueue
+      .catch(() => undefined)
+      .then(async () => {
+        if (previousRequest) {
+          await previousRequest.catch(() => undefined)
+        }
+        await this.runMessage(content, attachments)
+      })
+    this.requestQueue = request
+    this.activeRequest = request
+    try {
+      await request
+    } finally {
+      if (this.activeRequest === request) {
+        this.activeRequest = undefined
+      }
+    }
+  }
+
+  private async runMessage(content: string, attachments: (string | AttachmentContext)[] = []): Promise<void> {
     // 1. 验证会话
     const session = this.getCurrentSession()
     if (!session) {
@@ -549,6 +576,22 @@ export class ChatService {
     } catch (error) {
       // 错误处理
       console.error('Failed to send message:', error)
+
+      // 先补齐 QueryEngine 里未闭合的 tool_use，再把修复后的完整历史同步回会话。
+      // 否则两边状态分叉：会话只多了一条错误消息，而 engine 留着孤儿 tool_use，
+      // 之后每次「继续」都会被 API 以 400 拒绝，且损坏的历史还会被持久化。
+      if (this.queryEngine) {
+        this.queryEngine.closeDanglingToolCalls()
+        session.messages = this.queryEngine.getMessages()
+      }
+
+      if (error instanceof QueryCancelledError) {
+        this.expirePendingTranscript(session)
+        session.updatedAt = Date.now()
+        session.messageCount = session.messages.length
+        this.saveSessions(true)
+        return
+      }
 
       // 添加错误消息
       const errorMessage: Message = {

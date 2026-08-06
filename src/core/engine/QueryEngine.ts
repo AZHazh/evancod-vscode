@@ -36,7 +36,8 @@ import { TaskManager } from '../../services/task/TaskManager'
 import { PlanModeManager } from '../../services/plan/PlanModeManager'
 import { AgentCoordinator } from '../../services/agent/AgentCoordinator'
 import { getContextWindowForModel, getEffectiveContextWindow } from '../../utils/model/modelContextWindows'
-import { microcompact } from '../../services/compact/microcompact'
+import { microcompact, shouldMicrocompact, estimateMessagesTokens } from '../../services/compact/microcompact'
+import { closeDanglingToolCalls as repairDanglingToolCalls } from '../services/api/toolMessageSanitizer'
 import { compactConversation } from '../../services/compact/compact'
 import { shouldAutoCompact } from '../../services/compact/autoCompact'
 import {
@@ -73,7 +74,7 @@ import { MCPConnectionManager } from '../../services/mcp/MCPConnectionManager'
 import { SkillManager } from '../../services/skill/SkillManager'
 import { MemoryManager } from '../../services/memory/MemoryManager'
 import { ToolExecutor } from '../tools/execution/ToolExecutor'
-import { ToolOrchestrator } from '../tools/execution/ToolOrchestrator'
+import { ToolOrchestrator, type RunToolsOutcome } from '../tools/execution/ToolOrchestrator'
 
 /**
  * QueryEngine 配置
@@ -227,6 +228,11 @@ function mergeUsage(current: TokenUsage | undefined, next: unknown): TokenUsage 
   return merged
 }
 
+function isExplicitContinuationRequest(content: string): boolean {
+  const normalized = content.trim().toLowerCase()
+  return /^(继续|继续执行|接着|接着做|往下做|continue|resume)[\s，。,.!！?？]*/.test(normalized)
+}
+
 export class QueryEngine {
   /**
    * 配置
@@ -277,6 +283,7 @@ export class QueryEngine {
    */
   constructor(config: QueryEngineConfig) {
     this.config = config
+    this.closeDanglingToolCalls()
     this.initializeApiClient()
     this.initializeTools()
   }
@@ -561,15 +568,26 @@ Skill 使用契约：
       // 记录最后一轮是否以工具调用结尾。若循环因触顶而退出且最后一轮是工具调用，
       // 需要补一轮无工具的收尾请求，避免留下空的 assistant 消息、闭环失败。
       let lastTurnHadToolCalls = false
+      // 连续「整轮只有重复工具调用」的次数。用于兜底打断探查死循环。
+      let consecutiveNoProgressTurns = 0
+      // 循环是否被死循环断路器主动打断（而非正常闭环或触顶）
+      let loopBroken = false
+      let continuationCount = 0
+      const MAX_OUTPUT_CONTINUATIONS = 3
+      let taskContinuationCount = 0
+      const MAX_TASK_CONTINUATIONS = 8
+      let taskWorkflowActive =
+        isExplicitContinuationRequest(content) &&
+        (this.config.taskManager?.listTasks().some(
+          task => task.status === 'pending' || task.status === 'in_progress'
+        ) ?? false)
+
+      // 新一轮用户请求：清空上一轮的工具去重缓存
+      this.toolOrchestrator?.resetDedup()
 
       while (iteration < MAX_ITERATIONS) {
         this.throwIfCancelled()
         iteration++
-
-        // 微压缩：每轮前清理旧的工具结果内容
-        if (iteration > 1) {
-          this.config.messages = microcompact(this.config.messages, 5)
-        }
 
         // 检查是否需要自动压缩
         if (totalUsage?.lastPromptTokens) {
@@ -607,12 +625,23 @@ Skill 使用契约：
 
         const imageSavePromises: Promise<void>[] = []
 
+        // 只在上下文确实接近窗口上限时才做有损的 microcompact，且只作用于
+        // 「发给 API 的副本」——this.config.messages 始终保留完整历史。
+        //
+        // 之前的实现从第 2 轮起无条件覆盖 this.config.messages，导致模型刚读过的
+        // 文件正文被清空，于是反复重读同一批文件（探查死循环），且被清空的历史
+        // 会经 ChatService 写回并持久化，无法恢复。
+        const requestMessages = this.buildRequestMessages()
+
+        const continuingOutput = continuationCount > 0 || taskContinuationCount > 0
         const response = await this.apiClient.sendMessageStream(
-          this.config.messages,
+          requestMessages,
           (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
             if (this.cancelled) return
             if (type === 'start') {
-              this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+              if (!continuingOutput) {
+                this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+              }
               return
             }
 
@@ -649,8 +678,54 @@ Skill 使用契约：
         assistantContent = response.content
         totalUsage = mergeUsage(totalUsage, response.usage)
 
+        if (response.incomplete) {
+          if (response.toolCalls?.length) {
+            console.warn('Discarding tool calls from an incomplete model response')
+          }
+
+          if (assistantContent) {
+            this.config.messages.push({
+              id: this.generateId(),
+              role: 'assistant',
+              content: assistantContent,
+              timestamp: Date.now(),
+            })
+          }
+
+          continuationCount++
+          if (continuationCount > MAX_OUTPUT_CONTINUATIONS) {
+            throw new Error(
+              '模型输出连续 ' + MAX_OUTPUT_CONTINUATIONS + ' 次被截断（' +
+              (response.stopReason || '流未完整结束') +
+              '），已保留现有进度，请再次发送“继续”恢复执行。'
+            )
+          }
+
+          if (assistantContent) {
+            this.config.messages.push({
+              id: this.generateId(),
+              role: 'user',
+              content:
+                '[内部续跑指令] 上一段输出因长度限制或流中断而未完成。请从中断处直接继续，' +
+                '不要重复已经完成的分析或工具调用；继续推进当前任务，直到真正完成。',
+              timestamp: Date.now(),
+              internal: true,
+            })
+          }
+          continue
+        }
+
+        continuationCount = 0
+
         if (response.toolCalls?.length) {
           lastTurnHadToolCalls = true
+          if (
+            response.toolCalls.some(
+              toolCall => toolCall.name === 'task_create' || toolCall.name === 'task_update'
+            )
+          ) {
+            taskWorkflowActive = true
+          }
           const assistantToolCalls: ToolCall[] = response.toolCalls.map(toolCall => ({
             id: toolCall.id,
             name: toolCall.name,
@@ -672,7 +747,7 @@ Skill 使用契约：
           })
 
           this.throwIfCancelled()
-          const toolResults = await this.executeToolCalls(assistantToolCalls)
+          const { results: toolResults, noProgress } = await this.executeToolCalls(assistantToolCalls)
           this.throwIfCancelled()
           for (const result of toolResults) {
             this.throwIfCancelled()
@@ -683,25 +758,85 @@ Skill 使用契约：
               timestamp: Date.now(),
               toolCallId: result.toolCallId,
               toolName: result.toolName,
+              // 工具结果的结构化 blocks（如图片 vision block）必须一起保留，
+              // 否则 ToolExecutor 构造的图片块在回灌时被丢弃，模型看不到图片。
+              contentBlocks: result.contentBlocks as ContentBlock[] | undefined,
             })
           }
 
+          // 兜底断路器：连续多轮都只有重复的只读调用，说明模型在原地打转。
+          // 此时不再继续工具循环，直接进入无工具的收尾请求让它给出结论。
+          if (noProgress) {
+            consecutiveNoProgressTurns++
+            if (consecutiveNoProgressTurns >= 2) {
+              console.warn('Detected tool-call loop with no progress, forcing final answer')
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_complete',
+                data: { message: '检测到重复探查，已中断循环并要求模型给出结论', success: true },
+              })
+              loopBroken = true
+              break
+            }
+          } else {
+            consecutiveNoProgressTurns = 0
+          }
+
           continue
+        }
+
+        const unfinishedTasks = this.config.taskManager
+          ?.listTasks()
+          .filter(task => task.status === 'pending' || task.status === 'in_progress') || []
+        if (
+          taskWorkflowActive &&
+          unfinishedTasks.length > 0 &&
+          taskContinuationCount < MAX_TASK_CONTINUATIONS
+        ) {
+          if (assistantContent) {
+            this.config.messages.push({
+              id: this.generateId(),
+              role: 'assistant',
+              content: assistantContent,
+              timestamp: Date.now(),
+            })
+          }
+
+          taskContinuationCount++
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content:
+              '[内部任务续跑指令] 当前任务列表仍有 ' + unfinishedTasks.length +
+              ' 项未完成。不要结束回答；检查任务状态，从当前 in_progress 或下一项可执行任务继续，' +
+              '完成实现与验证并更新任务状态。只有全部任务完成或存在必须由用户处理的真实阻塞时才能停止。',
+            timestamp: Date.now(),
+            internal: true,
+          })
+          continue
+        }
+
+        if (taskWorkflowActive && unfinishedTasks.length > 0) {
+          console.warn(
+            'Task continuation limit reached with unfinished tasks:',
+            unfinishedTasks.map(task => ({ id: task.id, status: task.status }))
+          )
         }
 
         finalContent = assistantContent
         break
       }
 
-      // 循环因触顶退出，且最后一轮以工具调用结尾：此时 finalContent 仍为空，
-      // 直接落一条空 assistant 消息会导致闭环失败、任务面板停在半途。
-      // 补一轮"无工具"的收尾请求，让模型基于已有工具结果给出总结/收尾。
-      if (iteration >= MAX_ITERATIONS && lastTurnHadToolCalls) {
-        console.warn(`Reached maximum iterations (${MAX_ITERATIONS}), requesting final summary`)
+      // 循环未正常闭环（触顶或被死循环断路器打断），且最后一轮以工具调用结尾：
+      // 此时 finalContent 仍为空，直接落一条空 assistant 消息会导致闭环失败、
+      // 任务面板停在半途。补一轮"无工具"的收尾请求，让模型基于已有结果给出总结。
+      const needsClosing = (iteration >= MAX_ITERATIONS || loopBroken) && lastTurnHadToolCalls && !finalContent
+      if (needsClosing) {
+        console.warn('Tool loop ended without a final answer, requesting closing summary')
         this.throwIfCancelled()
         this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
         const closingResponse = await this.apiClient.sendMessageStream(
-          this.config.messages,
+          this.buildRequestMessages(),
           (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
             if (this.cancelled) return
             if (type === 'start') {
@@ -758,9 +893,32 @@ Skill 使用契约：
       this.onCompleteCallback?.(finalMessage)
       return finalMessage
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error))
+      // 关键：本轮可能在 push 了带 toolCalls 的 assistant 消息之后、push 工具结果
+      // 之前就中断（用户点停止 / 网络错误 / 429）。此时历史里留下没有配对结果的
+      // tool_use，而 QueryEngine 跨请求复用同一份 messages，导致之后每次请求都被
+      // API 以 400 拒绝——表现为「会话断掉后再也无法继续」。这里立即补齐。
+      this.closeDanglingToolCalls()
+
+      const err = this.cancelled || this.abortController.signal.aborted
+        ? new QueryCancelledError(this.cancelReason)
+        : error instanceof Error
+          ? error
+          : new Error(String(error))
       this.onErrorCallback?.(err)
       throw err
+    }
+  }
+
+  /**
+   * 补齐历史中未闭合的 tool_use，使会话在下一次请求时本身就是合法的。
+   * 供中断路径与 ChatService 的错误处理调用。
+   */
+  closeDanglingToolCalls(): boolean {
+    try {
+      return repairDanglingToolCalls(this.config.messages)
+    } catch (error) {
+      console.error('[QueryEngine] 修复未闭合工具调用失败:', error)
+      return false
     }
   }
 
@@ -846,7 +1004,7 @@ Skill 使用契约：
    * @returns 消息数组
    */
   getMessages(): Message[] {
-    return this.config.messages
+    return [...this.config.messages]
   }
 
   /**
@@ -864,12 +1022,30 @@ Skill 使用契约：
    * @param toolCalls - 工具调用列表
    * @returns Promise<ToolResult[]> 工具执行结果
    */
-  private async executeToolCalls(toolCalls: ToolCall[]): Promise<Array<{ toolCallId: string; toolName: string; content: string; contentBlocks?: unknown[] }>> {
+  private async executeToolCalls(toolCalls: ToolCall[]): Promise<RunToolsOutcome> {
     if (!this.toolOrchestrator) {
       throw new Error('Tool orchestrator not initialized')
     }
 
     return this.toolOrchestrator.runTools(toolCalls)
+  }
+
+  /**
+   * 构建发给 API 的消息副本。
+   *
+   * this.config.messages 是会话的真实历史，必须保持完整（它会被 ChatService
+   * 写回 session 并持久化）。只有在估算 token 接近有效窗口时，才对副本做
+   * 有损的 microcompact，避免模型丢失刚获取的工具结果而重复调用。
+   */
+  private buildRequestMessages(): Message[] {
+    const effectiveWindow = getEffectiveContextWindow(this.config.model)
+    const estimated = estimateMessagesTokens(this.config.messages)
+
+    if (!shouldMicrocompact(estimated, effectiveWindow)) {
+      return this.config.messages
+    }
+
+    return microcompact(this.config.messages, 5)
   }
 
   /**
