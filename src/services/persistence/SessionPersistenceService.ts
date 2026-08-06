@@ -209,13 +209,28 @@ export class SessionPersistenceService {
 
   /**
    * 创建会话快照（用于增量比对）
-   * 只包含关键字段的哈希
+   *
+   * 性能优化修复：原快照只含 updatedAt / messageCount / transcriptLength / name，
+   * 但流式过程中 transcript 的 length 不变（同一个 streaming-assistant block 被 splice 替换），
+   * 只有 content 变了，导致快照不变 → 增量比对认为「没变化」→ 跳过保存（数据丢失 bug）。
+   * 现在加入 transcript 最后一个 block 的 content 长度和 id，确保流式更新能被检测到。
    */
   private createSessionSnapshot(session: Session): string {
+    // 轻量指纹：取 transcript 末尾 block 的 id + content 长度，足以检测流式追加
+    const transcript = session.transcript
+    const lastBlock = transcript && transcript.length > 0 ? transcript[transcript.length - 1] : undefined
+    const lastBlockId = lastBlock?.id ?? ''
+    // 用 content 长度而非完整 content，避免大字符串序列化开销
+    const lastBlockContentLen = lastBlock && 'content' in lastBlock && typeof lastBlock.content === 'string'
+      ? lastBlock.content.length
+      : 0
+
     return JSON.stringify({
       updatedAt: session.updatedAt,
       messageCount: session.messageCount ?? session.messages.length,
       transcriptLength: session.transcript?.length ?? 0,
+      lastBlockId,
+      lastBlockContentLen,
       name: session.name,
     })
   }

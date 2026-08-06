@@ -62,13 +62,10 @@ export const usePlanStore = defineStore('plan', () => {
   }
 
   function approvePlan() {
-    console.log('[PlanStore] approvePlan 被调用')
     if (!currentPlan.value) {
       console.error('[PlanStore] currentPlan 为空，无法批准')
       return
     }
-
-    console.log('[PlanStore] 发送 plan.approve 消息:', currentPlan.value.id)
 
     // 发送批准消息到 Extension
     window.vscode?.postMessage({
@@ -78,18 +75,14 @@ export const usePlanStore = defineStore('plan', () => {
       }
     })
 
-    console.log('[PlanStore] 关闭审批对话框')
     showApprovalDialog.value = false
   }
 
   function rejectPlan(reason: string) {
-    console.log('[PlanStore] rejectPlan 被调用，原因:', reason)
     if (!currentPlan.value) {
       console.error('[PlanStore] currentPlan 为空，无法拒绝')
       return
     }
-
-    console.log('[PlanStore] 发送 plan.reject 消息:', currentPlan.value.id)
 
     // 发送拒绝消息到 Extension
     window.vscode?.postMessage({
@@ -100,7 +93,6 @@ export const usePlanStore = defineStore('plan', () => {
       }
     })
 
-    console.log('[PlanStore] 关闭审批对话框')
     showApprovalDialog.value = false
   }
 

@@ -1229,7 +1229,14 @@ export class ChatService {
     }
 
     session.updatedAt = Date.now()
-    this.saveSessions()
+    // 性能优化：高频事件（content_delta / thinking / bash_output）不再每次都 saveSessions，
+    // 避免每个 token 都触发 persistence.scheduleSave 的 clearTimeout + setTimeout。
+    // 只在关键节点（tool_use_complete / tool_result / message_complete / permission_request 等）保存。
+    // content_delta 和 thinking 的 transcript 更新已在上面写入内存，延迟保存不影响数据正确性
+    // （SessionPersistenceService 的延迟保存会在 1s 后统一写盘）。
+    if (event.type !== 'content_delta' && event.type !== 'thinking' && event.type !== 'bash_output') {
+      this.saveSessions()
+    }
   }
 
   private appendOrUpdateTranscript(session: Session, block: AgentTranscriptBlock): void {

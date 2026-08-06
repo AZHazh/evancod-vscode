@@ -17,8 +17,8 @@ let browserState: any = undefined
 
 function createBrowserFallback(): VSCodeAPI {
   return {
-    postMessage(message: any) {
-      console.log('[VSCode API fallback] postMessage:', message)
+    postMessage(_message: any) {
+      // fallback 模式下不发消息（开发调试用，生产不输出避免高频 I/O）
     },
     getState() {
       return browserState

@@ -65,6 +65,77 @@ export const useChatStore = defineStore('chat', () => {
   const agentTaskNotifications = ref<Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>>({})
   const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
+  // ===== 性能优化：流式更新 rAF 批量合并 =====
+  // 高频事件（content_delta / thinking / bash_output）不再每个 token 都触发
+  // findIndex + splice + Vue 响应式更新，而是合并到每帧最多执行一次。
+  // 这是导致对话列表卡顿的核心原因：几百 token 的回答会产生几百次 O(n)
+  // 数组扫描 + splice 重渲染，主线程被占满后虚拟滚动测量也跟不上。
+  let assistantTextRaf = 0
+  let thinkingBlockRaf = 0
+  let bashUpdateRaf = 0
+  let toolUseRaf = 0
+  let pendingThinkingDelta = ''
+  const pendingBashUpdates = new Map<string, { stdout: string; stderr: string; taskId?: string }>()
+
+  // 性能优化：缓存 streaming-assistant / streaming-thinking / tool_use 消息的索引，
+  // 避免 upsert 时每次都 O(n) findIndex。当 uiMessages 被全量重建时需重置为 -1 / clear。
+  let streamingAssistantIndex = -1
+  let streamingThinkingIndex = -1
+  const toolUseIndexCache = new Map<string, number>()
+
+  function scheduleAssistantTextUpdate() {
+    if (assistantTextRaf) return
+    assistantTextRaf = window.requestAnimationFrame(() => {
+      assistantTextRaf = 0
+      upsertAssistantText()
+    })
+  }
+
+  function scheduleToolUseUpdate() {
+    if (toolUseRaf) return
+    toolUseRaf = window.requestAnimationFrame(() => {
+      toolUseRaf = 0
+      upsertToolUse()
+    })
+  }
+
+  function scheduleThinkingBlockUpdate(delta: string) {
+    pendingThinkingDelta += delta
+    if (thinkingBlockRaf) return
+    thinkingBlockRaf = window.requestAnimationFrame(() => {
+      thinkingBlockRaf = 0
+      const text = pendingThinkingDelta
+      pendingThinkingDelta = ''
+      if (text) upsertThinkingBlock(text)
+    })
+  }
+
+  function scheduleBashOutput(toolUseId: string, stream: 'stdout' | 'stderr', text: string, taskId?: string) {
+    const pending = pendingBashUpdates.get(toolUseId) || { stdout: '', stderr: '', taskId }
+    if (stream === 'stdout') pending.stdout += text
+    else pending.stderr += text
+    if (taskId) pending.taskId = taskId
+    pendingBashUpdates.set(toolUseId, pending)
+    if (bashUpdateRaf) return
+    bashUpdateRaf = window.requestAnimationFrame(() => {
+      bashUpdateRaf = 0
+      for (const [id, batch] of pendingBashUpdates) {
+        if (batch.stdout) appendBashOutput(id, 'stdout', batch.stdout, batch.taskId)
+        if (batch.stderr) appendBashOutput(id, 'stderr', batch.stderr, batch.taskId)
+      }
+      pendingBashUpdates.clear()
+    })
+  }
+
+  function flushStreamingRafs() {
+    if (assistantTextRaf) { window.cancelAnimationFrame(assistantTextRaf); assistantTextRaf = 0 }
+    if (thinkingBlockRaf) { window.cancelAnimationFrame(thinkingBlockRaf); thinkingBlockRaf = 0 }
+    if (bashUpdateRaf) { window.cancelAnimationFrame(bashUpdateRaf); bashUpdateRaf = 0 }
+    if (toolUseRaf) { window.cancelAnimationFrame(toolUseRaf); toolUseRaf = 0 }
+    pendingThinkingDelta = ''
+    pendingBashUpdates.clear()
+  }
+
   const currentModel = computed(() => providerStore.currentModel)
   const messages = computed(() => currentSession.value?.messages || [])
 
@@ -162,12 +233,10 @@ export const useChatStore = defineStore('chat', () => {
 
     // 合并 agentTaskNotifications，保留本地已有的通知（避免被后端旧数据覆盖）
     const incomingNotifications = currentSession.value.agentTaskNotifications || {}
-    console.log('[syncUiMessages] incoming notifications:', Object.keys(incomingNotifications).length, incomingNotifications)
     agentTaskNotifications.value = {
       ...agentTaskNotifications.value,
       ...incomingNotifications,
     }
-    console.log('[syncUiMessages] merged notifications:', Object.keys(agentTaskNotifications.value).length, agentTaskNotifications.value)
 
     let transcriptNotificationCount = 0
     for (const block of currentSession.value.transcript || []) {
@@ -190,8 +259,6 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
     }
-    console.log('[syncUiMessages] from transcript:', transcriptNotificationCount, 'agent tools:',
-      currentSession.value.transcript?.filter(b => b.type === 'tool_use' && (b as any).toolName === 'agent').length)
     agentStore.restoreFromNotifications(agentTaskNotifications.value)
 
     if (currentSession.value.transcript?.length) {
@@ -236,6 +303,10 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       uiMessages.value = rebuiltMessages
+      // 缓存索引失效：uiMessages 被全量重建
+      streamingAssistantIndex = -1
+      streamingThinkingIndex = -1
+      toolUseIndexCache.clear()
       tokenUsage.value = currentSession.value.tokenUsage || null
       return
     }
@@ -318,6 +389,10 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     uiMessages.value = removeReconciledOptimisticMessages(nextMessages)
+    // 缓存索引失效：uiMessages 被全量重建
+    streamingAssistantIndex = -1
+    streamingThinkingIndex = -1
+    toolUseIndexCache.clear()
   }
 
   function removeReconciledOptimisticMessages(nextMessages: UIMessage[]) {
@@ -404,11 +479,13 @@ export const useChatStore = defineStore('chat', () => {
             finalizeCurrentThinkingSegment()
           }
           streamingText.value += event.text
-          upsertAssistantText()
+          // 性能优化：rAF 合并，每帧最多 upsert 一次，避免每 token 都 findIndex + splice
+          scheduleAssistantTextUpdate()
         }
         if (typeof event.toolInput === 'string') {
           streamingToolInput.value += event.toolInput
-          upsertToolUse()
+          // 工具输入增量同样高频，rAF 合并
+          scheduleToolUseUpdate()
         }
         break
 
@@ -442,7 +519,8 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'bash_output':
-        appendBashOutput(event.toolUseId, event.stream, event.text, event.taskId)
+        // 性能优化：bash 输出增量高频，合并到每帧处理一次
+        scheduleBashOutput(event.toolUseId, event.stream, event.text, event.taskId)
         break
 
       case 'bash_status':
@@ -474,7 +552,8 @@ export const useChatStore = defineStore('chat', () => {
       case 'thinking':
         chatState.value = 'thinking'
         streamingText.value = event.text
-        upsertThinkingBlock(event.text)
+        // 性能优化：thinking 增量高频，rAF 合并，每帧最多 upsert 一次
+        scheduleThinkingBlockUpdate(event.text)
         break
 
       case 'image_generation':
@@ -505,6 +584,11 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'message_complete':
+        // flush 所有待处理的流式 rAF，确保最终状态立即落地
+        if (assistantTextRaf) { window.cancelAnimationFrame(assistantTextRaf); assistantTextRaf = 0; upsertAssistantText() }
+        if (thinkingBlockRaf) { window.cancelAnimationFrame(thinkingBlockRaf); thinkingBlockRaf = 0; if (pendingThinkingDelta) { upsertThinkingBlock(pendingThinkingDelta); pendingThinkingDelta = '' } }
+        if (toolUseRaf) { window.cancelAnimationFrame(toolUseRaf); toolUseRaf = 0; upsertToolUse() }
+        if (bashUpdateRaf) { window.cancelAnimationFrame(bashUpdateRaf); bashUpdateRaf = 0; for (const [id, batch] of pendingBashUpdates) { if (batch.stdout) appendBashOutput(id, 'stdout', batch.stdout, batch.taskId); if (batch.stderr) appendBashOutput(id, 'stderr', batch.stderr, batch.taskId) }; pendingBashUpdates.clear() }
         chatState.value = 'idle'
         isStreaming.value = false
         streamingText.value = ''
@@ -530,7 +614,15 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function upsertAssistantText() {
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
+    // 如果缓存的索引已失效（消息被 finalize 改名或数组被重建），重新查找
+    const len = uiMessages.value.length
+    let idx = streamingAssistantIndex
+    if (idx < 0 || idx >= len || uiMessages.value[idx]?.type !== 'assistant_text' || (uiMessages.value[idx] as any)?.id !== 'streaming-assistant') {
+      // 回退到 O(n) 查找，但只查一次，后续命中缓存
+      idx = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
+    }
+    streamingAssistantIndex = idx
+
     const payload = {
       id: 'streaming-assistant',
       type: 'assistant_text' as const,
@@ -538,17 +630,24 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: Date.now(),
     }
 
-    if (existingIndex === -1) {
+    if (idx === -1) {
       uiMessages.value.push(payload)
+      streamingAssistantIndex = uiMessages.value.length - 1
       return
     }
 
-    uiMessages.value.splice(existingIndex, 1, payload)
+    uiMessages.value.splice(idx, 1, payload)
   }
 
   function upsertThinkingBlock(text: string) {
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
-    const existing = existingIndex === -1 ? null : uiMessages.value[existingIndex]
+    const len = uiMessages.value.length
+    let idx = streamingThinkingIndex
+    if (idx < 0 || idx >= len || uiMessages.value[idx]?.type !== 'thinking' || (uiMessages.value[idx] as any)?.id !== 'streaming-thinking') {
+      idx = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
+    }
+    streamingThinkingIndex = idx
+
+    const existing = idx === -1 ? null : uiMessages.value[idx]
     const payload = {
       id: 'streaming-thinking',
       type: 'thinking' as const,
@@ -556,32 +655,42 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: existing?.timestamp ?? Date.now(),
     }
 
-    if (existingIndex === -1) {
+    if (idx === -1) {
       uiMessages.value.push(payload)
+      streamingThinkingIndex = uiMessages.value.length - 1
       return
     }
 
-    uiMessages.value.splice(existingIndex, 1, payload)
+    uiMessages.value.splice(idx, 1, payload)
   }
 
   function finalizeCurrentThinkingSegment() {
     const existingIndex = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
-    if (existingIndex === -1) return
+    if (existingIndex === -1) {
+      streamingThinkingIndex = -1
+      return
+    }
 
     const existing = uiMessages.value[existingIndex]
-    if (existing.type !== 'thinking' || !existing.content.trim()) return
+    if (existing.type !== 'thinking' || !existing.content.trim()) {
+      streamingThinkingIndex = -1
+      return
+    }
 
     // 给当前 thinking 段分配永久 ID，下次 thinking 事件将创建新块
     uiMessages.value.splice(existingIndex, 1, {
       ...existing,
       id: `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     })
+    // 缓存失效：finalize 后 streaming-thinking 块已改名，下次需重新查找
+    streamingThinkingIndex = -1
   }
 
   function finalizeCurrentAssistantSegment() {
     const existingIndex = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
     // 重置流式文本缓冲，使工具之后的新文字从空开始，另起新块排在工具下方
     streamingText.value = ''
+    streamingAssistantIndex = -1
     if (existingIndex === -1) return
 
     const existing = uiMessages.value[existingIndex]
@@ -630,10 +739,16 @@ export const useChatStore = defineStore('chat', () => {
     const toolUseId = input?.toolUseId || activeToolUseId.value || ''
     const toolName = input?.toolName || activeToolName.value || ''
     const partialInput = streamingToolInput.value || undefined
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'tool_use' && message.toolUseId === toolUseId)
+
+    // 使用缓存索引，避免每次 O(n) findIndex
+    const len = uiMessages.value.length
+    let existingIndex = toolUseIndexCache.get(toolUseId) ?? -1
+    if (existingIndex < 0 || existingIndex >= len || uiMessages.value[existingIndex]?.type !== 'tool_use' || (uiMessages.value[existingIndex] as any)?.toolUseId !== toolUseId) {
+      existingIndex = uiMessages.value.findIndex(message => message.type === 'tool_use' && message.toolUseId === toolUseId)
+    }
     const existingItem = existingIndex === -1 || uiMessages.value[existingIndex].type !== 'tool_use'
       ? null
-      : uiMessages.value[existingIndex]
+      : uiMessages.value[existingIndex] as Extract<UIMessage, { type: 'tool_use' }>
     const nextItem = {
       id: toolUseId,
       type: 'tool_use' as const,
@@ -650,10 +765,12 @@ export const useChatStore = defineStore('chat', () => {
 
     if (existingIndex === -1) {
       uiMessages.value.push(nextItem)
+      toolUseIndexCache.set(toolUseId, uiMessages.value.length - 1)
       return
     }
 
     uiMessages.value.splice(existingIndex, 1, nextItem)
+    toolUseIndexCache.set(toolUseId, existingIndex)
   }
 
   function upsertToolResult(event: Extract<AgentServerEvent, { type: 'tool_result' }>) {
@@ -857,6 +974,8 @@ export const useChatStore = defineStore('chat', () => {
       type: 'chat.stop',
       data: { sessionId: currentSession.value?.id },
     })
+    // flush 所有待处理的流式 rAF，确保停止前最终状态落地
+    flushStreamingRafs()
     // 停止时把流式的 thinking/assistant 段定型改名，避免残留的固定 id 旧块
     // 在下一轮被 upsert 命中，导致新回答追加到旧位置产生顺序错乱
     finalizeCurrentThinkingSegment()

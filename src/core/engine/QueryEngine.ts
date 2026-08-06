@@ -276,6 +276,61 @@ export class QueryEngine {
   private cancelReason = 'Query cancelled'
   private consecutiveCompactFailures = 0
 
+  // 性能优化：content_delta / thinking 批量合并
+  // 高频事件在微任务队列中累积，每 ~32ms 发送一次合并后的事件，
+  // 减少 onAgentEventCallback 的调用次数（链路上接了 recordAgentEvent + postMessage）。
+  // 关键事件（message_complete / tool_use_complete / permission_request 等）不合并。
+  private pendingContentDeltas = ''
+  private pendingThinkingDeltas = ''
+  private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * 立即 flush 所有待处理的 delta 事件，保证顺序：在发送关键事件前先 flush。
+   */
+  private flushPendingDeltas(): void {
+    if (this.deltaFlushTimer) {
+      clearTimeout(this.deltaFlushTimer)
+      this.deltaFlushTimer = undefined
+    }
+    if (this.pendingContentDeltas) {
+      const text = this.pendingContentDeltas
+      this.pendingContentDeltas = ''
+      this.onAgentEventCallback?.({ type: 'content_delta', text })
+    }
+    if (this.pendingThinkingDeltas) {
+      const text = this.pendingThinkingDeltas
+      this.pendingThinkingDeltas = ''
+      this.onAgentEventCallback?.({ type: 'thinking', text })
+    }
+  }
+
+  /**
+   * 累积 content_delta，32ms 后批量发送。
+   */
+  private emitContentDelta(text: string): void {
+    this.pendingContentDeltas += text
+    this.onMessageCallback?.(text, false)
+    if (!this.deltaFlushTimer) {
+      this.deltaFlushTimer = setTimeout(() => {
+        this.deltaFlushTimer = undefined
+        this.flushPendingDeltas()
+      }, 32)
+    }
+  }
+
+  /**
+   * 累积 thinking delta，32ms 后批量发送。
+   */
+  private emitThinkingDelta(text: string): void {
+    this.pendingThinkingDeltas += text
+    if (!this.deltaFlushTimer) {
+      this.deltaFlushTimer = setTimeout(() => {
+        this.deltaFlushTimer = undefined
+        this.flushPendingDeltas()
+      }, 32)
+    }
+  }
+
   /**
    * 构造函数
    *
@@ -647,13 +702,14 @@ Skill 使用契约：
 
             if (type === 'thinking') {
               // 思考增量：单独走 thinking 事件，交由 UI 折叠展示
-              this.onAgentEventCallback?.({ type: 'thinking', text: delta })
+              // 性能优化：批量合并，每 32ms 发送一次
+              this.emitThinkingDelta(delta)
               return
             }
 
             if (type === 'delta') {
-              this.onAgentEventCallback?.({ type: 'content_delta', text: delta })
-              this.onMessageCallback?.(delta, false)
+              // 性能优化：批量合并 content_delta，每 32ms 发送一次
+              this.emitContentDelta(delta)
               return
             }
 
@@ -844,12 +900,11 @@ Skill 使用契约：
               return
             }
             if (type === 'thinking') {
-              this.onAgentEventCallback?.({ type: 'thinking', text: delta })
+              this.emitThinkingDelta(delta)
               return
             }
             if (type === 'delta') {
-              this.onAgentEventCallback?.({ type: 'content_delta', text: delta })
-              this.onMessageCallback?.(delta, false)
+              this.emitContentDelta(delta)
               return
             }
             this.onMessageCallback?.('', true)
@@ -866,6 +921,8 @@ Skill 使用契约：
       }
 
       this.throwIfCancelled()
+      // flush 所有待处理的 delta，确保最终内容在 message_complete 前完整发送
+      this.flushPendingDeltas()
       const finalMessage: Message = {
         id: this.generateId(),
         role: 'assistant',
@@ -972,6 +1029,8 @@ Skill 使用契约：
     if (this.cancelled) return
     this.cancelled = true
     this.cancelReason = reason
+    // flush 残留 delta，避免取消后定时器仍然触发
+    this.flushPendingDeltas()
     this.abortController.abort()
     this.toolExecutor?.cancelAll()
     this.bashTool?.cancelAll()

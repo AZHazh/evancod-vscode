@@ -16,7 +16,6 @@ app.mount('#app')
 // 设置消息监听器
 window.addEventListener('message', (event) => {
   const message = event.data
-  console.log('[Main] 收到消息:', message.type, message)
 
   // 获取 store 实例
   const chatStore = useChatStore()
@@ -44,10 +43,8 @@ window.addEventListener('message', (event) => {
 
     // ============ Plan 相关消息 ============
     case 'plan.submitted':
-      console.log('[Main] 处理 plan.submitted')
       planStore.setPlan(message.data.plan)
       chatStore.upsertPlanApprovalMessage(message.data.plan)
-      console.log('[Main] planStore.currentPlan =', planStore.currentPlan)
       break
 
     case 'plan.approved':
@@ -68,7 +65,6 @@ window.addEventListener('message', (event) => {
 
     // ============ Question 相关消息 ============
     case 'question.ask':
-      console.log('Question asked:', message.data.question)
       break
 
     // ============ Agent 相关消息 ============

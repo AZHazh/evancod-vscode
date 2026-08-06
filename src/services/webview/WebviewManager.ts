@@ -55,6 +55,17 @@ export class WebviewManager {
   private disposables: vscode.Disposable[] = []
 
   /**
+   * 性能优化：权限回调和问题回调的内存缓存
+   *
+   * 原代码把这些回调存在 context.globalState 中，每次点击授权按钮都要：
+   *   globalState.get → 查找 → delete → await globalState.update
+   * 这是一串异步操作 + 序列化开销，导致从点击到回调执行有明显延迟。
+   * 改为纯内存 Map 后，查找和执行都是同步的，去除所有 async/await 和序列化。
+   */
+  private permissionCallbacks = new Map<string, (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => void>()
+  private questionCallbacks = new Map<string, (answer: any) => void>()
+
+  /**
    * 构造函数 - 依赖注入
    *
    * @param context - VSCode 扩展上下文
@@ -422,7 +433,54 @@ export class WebviewManager {
   }
 
   private setupChatEventForwarding() {
+    // 性能优化：agent 事件批量转发
+    // 高频事件（content_delta / thinking / bash_output）在 ~32ms 内累积，
+    // 合并为一条消息发送，避免每个 token 都 postMessage。
+    // 关键事件（message_complete / permission_request / tool_use_complete 等）立即 flush。
+    let pendingDeltas: { text: string }[] = []
+    let pendingThinkingDeltas: { text: string }[] = []
+    let flushTimer: NodeJS.Timeout | undefined
+
+    const HIGH_FREQUENCY_TYPES = new Set(['content_delta', 'thinking'])
+
+    const flushPending = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = undefined
+      }
+      // 先 flush 累积的 delta，再发后续事件，保证顺序
+      const deltas = pendingDeltas
+      const thinkingDeltas = pendingThinkingDeltas
+      pendingDeltas = []
+      pendingThinkingDeltas = []
+      for (const d of deltas) {
+        this.sendAgentEvent({ type: 'content_delta', text: d.text })
+      }
+      for (const d of thinkingDeltas) {
+        this.sendAgentEvent({ type: 'thinking', text: d.text })
+      }
+    }
+
     this.chatService.onAgentEvent(event => {
+      // 高频事件累积，低频事件立即 flush 后直接发送
+      if (event.type === 'content_delta' && typeof event.text === 'string') {
+        pendingDeltas.push({ text: event.text })
+        if (!flushTimer) {
+          flushTimer = setTimeout(flushPending, 32)
+        }
+        return
+      }
+
+      if (event.type === 'thinking' && typeof event.text === 'string') {
+        pendingThinkingDeltas.push({ text: event.text })
+        if (!flushTimer) {
+          flushTimer = setTimeout(flushPending, 32)
+        }
+        return
+      }
+
+      // 其余事件：先 flush 累积的 delta 保证顺序，再发送当前事件
+      flushPending()
       this.sendAgentEvent(event)
     })
   }
@@ -781,17 +839,13 @@ export class WebviewManager {
   /**
    * 处理问题回答
    */
-  private async handleQuestionAnswer(data: { questionId: string; answer: any }): Promise<void> {
+  private handleQuestionAnswer(data: { questionId: string; answer: any }): void {
     try {
-      // 问题回答通过全局状态传递给 AskUserQuestionTool
-      // 这里只需要记录到 context 即可
-      const callbacks = this.context.globalState.get('questionCallbacks', new Map())
-      const callback = callbacks.get(data.questionId)
-
-      if (callback && typeof callback === 'function') {
+      // 性能优化：从内存 Map 同步查找回调，不再经过 globalState 异步读写
+      const callback = this.questionCallbacks.get(data.questionId)
+      if (callback) {
+        this.questionCallbacks.delete(data.questionId)
         callback(data.answer)
-        callbacks.delete(data.questionId)
-        await this.context.globalState.update('questionCallbacks', callbacks)
       }
     } catch (error) {
       console.error('Failed to handle question answer:', error)
@@ -801,15 +855,13 @@ export class WebviewManager {
   /**
    * 处理 Agent 取消
    */
-  private async handlePermissionResponse(data: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }): Promise<void> {
+  private handlePermissionResponse(data: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }): void {
     try {
-      const callbacks = this.context.globalState.get('permissionCallbacks', new Map())
-      const callback = callbacks.get(data.requestId)
-
-      if (callback && typeof callback === 'function') {
+      // 性能优化：从内存 Map 同步查找回调，不再经过 globalState 异步读写
+      const callback = this.permissionCallbacks.get(data.requestId)
+      if (callback) {
+        this.permissionCallbacks.delete(data.requestId)
         callback(data)
-        callbacks.delete(data.requestId)
-        await this.context.globalState.update('permissionCallbacks', callbacks)
       }
 
       // 同步转给 QueryEngine，确保工具执行闭环
