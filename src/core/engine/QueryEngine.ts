@@ -631,6 +631,7 @@ Skill 使用契约：
       const MAX_OUTPUT_CONTINUATIONS = 3
       let taskContinuationCount = 0
       const MAX_TASK_CONTINUATIONS = 8
+      let taskCompletionReviewRequested = false
       let taskWorkflowActive =
         isExplicitContinuationRequest(content) &&
         (this.config.taskManager?.listTasks().some(
@@ -877,6 +878,40 @@ Skill 使用契约：
             'Task continuation limit reached with unfinished tasks:',
             unfinishedTasks.map(task => ({ id: task.id, status: task.status }))
           )
+        }
+
+        // 任务刚全部清零时不能立即结束。模型经常会先把最后一个 task 标记 completed，
+        // 随后用一句“现在进行最终编译/验证”结束当前 turn；此时任务列表虽是 7/7，
+        // 但承诺的收尾动作尚未执行。强制增加一次复核轮，让模型真正运行最终验证、
+        // 检查 task_list 并给出完整总结。复核只触发一次，避免正常完成后循环。
+        if (
+          taskWorkflowActive &&
+          unfinishedTasks.length === 0 &&
+          !taskCompletionReviewRequested
+        ) {
+          if (assistantContent) {
+            this.config.messages.push({
+              id: this.generateId(),
+              role: 'assistant',
+              content: assistantContent,
+              timestamp: Date.now(),
+            })
+          }
+
+          taskCompletionReviewRequested = true
+          taskContinuationCount++
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content:
+              '[内部完成复核指令] 任务列表已全部完成，但当前工作流还不能立即结束。' +
+              '检查上一段回答中是否还有“现在验证、接下来编译、最后确认”等尚未执行的承诺；' +
+              '实际运行适用的最终编译、测试或构建，调用 task_list 确认所有任务状态，' +
+              '然后再给出最终总结。如果验证失败，继续修复并重新验证；不要只描述将要执行的动作。',
+            timestamp: Date.now(),
+            internal: true,
+          })
+          continue
         }
 
         finalContent = assistantContent
