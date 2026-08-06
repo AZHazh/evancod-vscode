@@ -128,12 +128,33 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function flushStreamingRafs() {
-    if (assistantTextRaf) { window.cancelAnimationFrame(assistantTextRaf); assistantTextRaf = 0 }
-    if (thinkingBlockRaf) { window.cancelAnimationFrame(thinkingBlockRaf); thinkingBlockRaf = 0 }
-    if (bashUpdateRaf) { window.cancelAnimationFrame(bashUpdateRaf); bashUpdateRaf = 0 }
-    if (toolUseRaf) { window.cancelAnimationFrame(toolUseRaf); toolUseRaf = 0 }
-    pendingThinkingDelta = ''
-    pendingBashUpdates.clear()
+    if (assistantTextRaf) {
+      window.cancelAnimationFrame(assistantTextRaf)
+      assistantTextRaf = 0
+      upsertAssistantText()
+    }
+    if (thinkingBlockRaf) {
+      window.cancelAnimationFrame(thinkingBlockRaf)
+      thinkingBlockRaf = 0
+      if (pendingThinkingDelta) {
+        upsertThinkingBlock(pendingThinkingDelta)
+        pendingThinkingDelta = ''
+      }
+    }
+    if (toolUseRaf) {
+      window.cancelAnimationFrame(toolUseRaf)
+      toolUseRaf = 0
+      upsertToolUse()
+    }
+    if (bashUpdateRaf) {
+      window.cancelAnimationFrame(bashUpdateRaf)
+      bashUpdateRaf = 0
+      for (const [id, batch] of pendingBashUpdates) {
+        if (batch.stdout) appendBashOutput(id, 'stdout', batch.stdout, batch.taskId)
+        if (batch.stderr) appendBashOutput(id, 'stderr', batch.stderr, batch.taskId)
+      }
+      pendingBashUpdates.clear()
+    }
   }
 
   const currentModel = computed(() => providerStore.currentModel)
@@ -476,6 +497,14 @@ export const useChatStore = defineStore('chat', () => {
           // 首次收到最终回答时，finalize 当前 thinking 段
           const existingAssistant = uiMessages.value.find(m => m.type === 'assistant_text' && m.id === 'streaming-assistant')
           if (!existingAssistant) {
+            if (thinkingBlockRaf) {
+              window.cancelAnimationFrame(thinkingBlockRaf)
+              thinkingBlockRaf = 0
+              if (pendingThinkingDelta) {
+                upsertThinkingBlock(pendingThinkingDelta)
+                pendingThinkingDelta = ''
+              }
+            }
             finalizeCurrentThinkingSegment()
           }
           streamingText.value += event.text
@@ -490,6 +519,8 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'tool_use_complete':
+        // 关键事件可能在下一帧前到达，先落地最后一批增量，避免文字被清空或错序。
+        flushStreamingRafs()
         // 工具调用完成时，finalize 当前 thinking 段与文字段，
         // 使后续文字另起新块排在工具之后，实现文字与工具交错
         finalizeCurrentThinkingSegment()
@@ -584,11 +615,9 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'message_complete':
-        // flush 所有待处理的流式 rAF，确保最终状态立即落地
-        if (assistantTextRaf) { window.cancelAnimationFrame(assistantTextRaf); assistantTextRaf = 0; upsertAssistantText() }
-        if (thinkingBlockRaf) { window.cancelAnimationFrame(thinkingBlockRaf); thinkingBlockRaf = 0; if (pendingThinkingDelta) { upsertThinkingBlock(pendingThinkingDelta); pendingThinkingDelta = '' } }
-        if (toolUseRaf) { window.cancelAnimationFrame(toolUseRaf); toolUseRaf = 0; upsertToolUse() }
-        if (bashUpdateRaf) { window.cancelAnimationFrame(bashUpdateRaf); bashUpdateRaf = 0; for (const [id, batch] of pendingBashUpdates) { if (batch.stdout) appendBashOutput(id, 'stdout', batch.stdout, batch.taskId); if (batch.stderr) appendBashOutput(id, 'stderr', batch.stderr, batch.taskId) }; pendingBashUpdates.clear() }
+        flushStreamingRafs()
+        finalizeCurrentThinkingSegment()
+        finalizeCurrentAssistantSegment()
         chatState.value = 'idle'
         isStreaming.value = false
         streamingText.value = ''
@@ -623,20 +652,21 @@ export const useChatStore = defineStore('chat', () => {
     }
     streamingAssistantIndex = idx
 
-    const payload = {
-      id: 'streaming-assistant',
-      type: 'assistant_text' as const,
-      content: streamingText.value,
-      timestamp: Date.now(),
-    }
-
     if (idx === -1) {
-      uiMessages.value.push(payload)
+      uiMessages.value.push({
+        id: 'streaming-assistant',
+        type: 'assistant_text',
+        content: streamingText.value,
+        timestamp: Date.now(),
+      })
       streamingAssistantIndex = uiMessages.value.length - 1
       return
     }
 
-    uiMessages.value.splice(idx, 1, payload)
+    const existing = uiMessages.value[idx]
+    if (existing.type === 'assistant_text') {
+      existing.content = streamingText.value
+    }
   }
 
   function upsertThinkingBlock(text: string) {
@@ -648,20 +678,20 @@ export const useChatStore = defineStore('chat', () => {
     streamingThinkingIndex = idx
 
     const existing = idx === -1 ? null : uiMessages.value[idx]
-    const payload = {
-      id: 'streaming-thinking',
-      type: 'thinking' as const,
-      content: existing && existing.type === 'thinking' ? `${existing.content}${text}` : text,
-      timestamp: existing?.timestamp ?? Date.now(),
-    }
-
     if (idx === -1) {
-      uiMessages.value.push(payload)
+      uiMessages.value.push({
+        id: 'streaming-thinking',
+        type: 'thinking',
+        content: text,
+        timestamp: Date.now(),
+      })
       streamingThinkingIndex = uiMessages.value.length - 1
       return
     }
 
-    uiMessages.value.splice(idx, 1, payload)
+    if (existing?.type === 'thinking') {
+      existing.content += text
+    }
   }
 
   function finalizeCurrentThinkingSegment() {
@@ -769,7 +799,7 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    uiMessages.value.splice(existingIndex, 1, nextItem)
+    Object.assign(uiMessages.value[existingIndex], nextItem)
     toolUseIndexCache.set(toolUseId, existingIndex)
   }
 
@@ -826,7 +856,7 @@ export const useChatStore = defineStore('chat', () => {
   ) {
     const index = uiMessages.value.findIndex(message => message.type === 'tool_use' && message.toolUseId === toolUseId)
     if (index === -1 || uiMessages.value[index].type !== 'tool_use') return
-    uiMessages.value.splice(index, 1, updater(uiMessages.value[index]))
+    Object.assign(uiMessages.value[index], updater(uiMessages.value[index]))
   }
 
   function appendBashOutput(toolUseId: string, stream: 'stdout' | 'stderr', text: string, taskId?: string) {

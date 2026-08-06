@@ -433,53 +433,67 @@ export class WebviewManager {
   }
 
   private setupChatEventForwarding() {
-    // 性能优化：agent 事件批量转发
-    // 高频事件（content_delta / thinking / bash_output）在 ~32ms 内累积，
-    // 合并为一条消息发送，避免每个 token 都 postMessage。
-    // 关键事件（message_complete / permission_request / tool_use_complete 等）立即 flush。
-    let pendingDeltas: { text: string }[] = []
-    let pendingThinkingDeltas: { text: string }[] = []
+    // 高频事件跨进程发送前再做一次短窗口合并。缓冲区保持原始事件顺序，
+    // 只合并相邻且同类型的事件，避免 content/thinking/bash 之间被重新排序。
+    let pendingEvents: AgentServerEvent[] = []
     let flushTimer: NodeJS.Timeout | undefined
-
-    const HIGH_FREQUENCY_TYPES = new Set(['content_delta', 'thinking'])
+    const FLUSH_INTERVAL_MS = 50
 
     const flushPending = () => {
       if (flushTimer) {
         clearTimeout(flushTimer)
         flushTimer = undefined
       }
-      // 先 flush 累积的 delta，再发后续事件，保证顺序
-      const deltas = pendingDeltas
-      const thinkingDeltas = pendingThinkingDeltas
-      pendingDeltas = []
-      pendingThinkingDeltas = []
-      for (const d of deltas) {
-        this.sendAgentEvent({ type: 'content_delta', text: d.text })
+      const events = pendingEvents
+      pendingEvents = []
+      for (const event of events) {
+        this.sendAgentEvent(event)
       }
-      for (const d of thinkingDeltas) {
-        this.sendAgentEvent({ type: 'thinking', text: d.text })
+    }
+
+    const enqueueHighFrequencyEvent = (event: AgentServerEvent) => {
+      const last = pendingEvents[pendingEvents.length - 1]
+
+      if (event.type === 'content_delta' && typeof event.text === 'string') {
+        if (last?.type === 'content_delta' && typeof last.text === 'string' && !last.toolInput) {
+          last.text += event.text
+        } else {
+          pendingEvents.push({ ...event })
+        }
+      } else if (event.type === 'thinking') {
+        if (last?.type === 'thinking') {
+          last.text += event.text
+        } else {
+          pendingEvents.push({ ...event })
+        }
+      } else if (event.type === 'bash_output') {
+        if (
+          last?.type === 'bash_output' &&
+          last.toolUseId === event.toolUseId &&
+          last.stream === event.stream &&
+          last.taskId === event.taskId
+        ) {
+          last.text += event.text
+        } else {
+          pendingEvents.push({ ...event })
+        }
+      }
+
+      if (!flushTimer) {
+        flushTimer = setTimeout(flushPending, FLUSH_INTERVAL_MS)
       }
     }
 
     this.chatService.onAgentEvent(event => {
-      // 高频事件累积，低频事件立即 flush 后直接发送
-      if (event.type === 'content_delta' && typeof event.text === 'string') {
-        pendingDeltas.push({ text: event.text })
-        if (!flushTimer) {
-          flushTimer = setTimeout(flushPending, 32)
-        }
+      if (
+        (event.type === 'content_delta' && typeof event.text === 'string' && !event.toolInput) ||
+        event.type === 'thinking' ||
+        event.type === 'bash_output'
+      ) {
+        enqueueHighFrequencyEvent(event)
         return
       }
 
-      if (event.type === 'thinking' && typeof event.text === 'string') {
-        pendingThinkingDeltas.push({ text: event.text })
-        if (!flushTimer) {
-          flushTimer = setTimeout(flushPending, 32)
-        }
-        return
-      }
-
-      // 其余事件：先 flush 累积的 delta 保证顺序，再发送当前事件
       flushPending()
       this.sendAgentEvent(event)
     })

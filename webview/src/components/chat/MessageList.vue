@@ -272,11 +272,8 @@ function sizeDependencies(item: UIMessage): unknown[] {
 }
 
 function estimateTokenCount(value: string) {
-  const cjkCount = (value.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length
-  const normalized = value.replace(/[\u3400-\u9fff\uf900-\ufaff]/g, ' ').trim()
-  const segmentCount = normalized ? normalized.split(/\s+/).filter(Boolean).length : 0
-
-  return Math.max(0, Math.ceil(cjkCount + segmentCount * 1.3))
+  // 底部状态只需要近似值，按长度估算可避免每个增量扫描完整回答。
+  return Math.max(0, Math.ceil(value.length / 3))
 }
 
 function bindScrollElement(el: HTMLElement) {

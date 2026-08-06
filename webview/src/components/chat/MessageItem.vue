@@ -35,8 +35,15 @@ function rejectPlan(reason: string) {
 }
 
 const content = computed(() => 'content' in props.message ? props.message.content : '')
+const isStreamingAssistant = computed(() =>
+  props.message.type === 'assistant_text' &&
+  props.message.id === 'streaming-assistant' &&
+  chatStore.chatState !== 'idle'
+)
 const documentLayout = computed(() =>
-  props.message.type === 'assistant_text' && shouldUseDocumentLayout(props.message.content)
+  props.message.type === 'assistant_text' &&
+  !isStreamingAssistant.value &&
+  shouldUseDocumentLayout(props.message.content)
 )
 const formattedTime = computed(() => new Date(props.message.timestamp).toLocaleTimeString())
 
@@ -82,7 +89,11 @@ async function copyMessage() {
     <div v-else-if="message.type === 'assistant_text'" class="assistant-message">
       <div class="assistant-message__shell" :class="{ 'assistant-message__shell--document': documentLayout }">
         <div class="assistant-message__bubble" :class="{ 'assistant-message__bubble--document': documentLayout }">
-          <MarkdownRenderer :content="message.content" :variant="documentLayout ? 'document' : 'default'" />
+          <MarkdownRenderer
+            :content="message.content"
+            :streaming="isStreamingAssistant"
+            :variant="documentLayout ? 'document' : 'default'"
+          />
         </div>
         <div class="message-action-bar message-action-bar--start">
           <button class="message-action-bar__button" type="button" title="复制" @click="copyMessage">复制</button>

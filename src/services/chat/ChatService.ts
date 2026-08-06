@@ -194,6 +194,11 @@ export class ChatService {
    * @returns 新创建的会话对象
    */
   async createNewSession(): Promise<Session> {
+    await this.settleActiveRequestBeforeSessionSwitch()
+    return this.createNewSessionNow()
+  }
+
+  private async createNewSessionNow(): Promise<Session> {
     // 获取工作目录（用于文件操作的相对路径基准）
     const workDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
 
@@ -219,6 +224,8 @@ export class ChatService {
     this.sessions.push(session)
 
     // 设置为当前活动会话
+    // QueryEngine 持有创建时会话的完整消息历史，切换会话时必须丢弃。
+    this.queryEngine = undefined
     this.currentSessionId = session.id
     this.saveSessions()
     await this.refreshCurrentSessionTasks()
@@ -249,6 +256,7 @@ export class ChatService {
     const session = this.sessions.find(s => s.id === sessionId) || null
     if (!session) return null
 
+    await this.settleActiveRequestBeforeSessionSwitch()
     this.currentSessionId = session.id
     this.queryEngine = undefined
     this.saveSessions()
@@ -316,6 +324,10 @@ export class ChatService {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    if (this.currentSessionId === sessionId) {
+      await this.settleActiveRequestBeforeSessionSwitch()
+    }
+
     this.sessions = this.sessions.filter(session => session.id !== sessionId)
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = this.sessions[0]?.id || null
@@ -428,6 +440,14 @@ export class ChatService {
     }
 
     return session
+  }
+
+  private async settleActiveRequestBeforeSessionSwitch(): Promise<void> {
+    const activeRequest = this.activeRequest
+    if (!activeRequest) return
+
+    this.queryEngine?.cancel('切换会话')
+    await activeRequest.catch(() => undefined)
   }
 
   notifyTaskList(): void {
@@ -772,7 +792,8 @@ export class ChatService {
     }
 
     if (result.metadata?.action === 'new') {
-      await this.createNewSession()
+      // 当前 /new 命令本身就在 activeRequest 中，不能等待自己结束。
+      await this.createNewSessionNow()
     }
 
     if (result.metadata?.action === 'compact') {

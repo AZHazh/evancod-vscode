@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer.vue'
 
 const props = withDefaults(
@@ -35,7 +35,23 @@ const elapsedSeconds = computed(() => {
   }
   return Math.max(0, Math.floor((now.value - props.timestamp) / 1000))
 })
-const tokenCount = computed(() => estimateTokenCount(props.content))
+const tokenCount = ref(0)
+let countedLength = 0
+
+watch(
+  () => props.content,
+  content => {
+    if (content.length < countedLength) {
+      tokenCount.value = estimateTokenCount(content)
+      countedLength = content.length
+      return
+    }
+
+    tokenCount.value += estimateTokenCount(content.slice(countedLength))
+    countedLength = content.length
+  },
+  { immediate: true },
+)
 
 function estimateTokenCount(value: string) {
   const cjkCount = (value.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length

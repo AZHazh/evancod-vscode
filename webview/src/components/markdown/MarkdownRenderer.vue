@@ -48,12 +48,16 @@ interface Props {
   showCopyButton?: boolean
 
   variant?: 'default' | 'document' | 'compact'
+
+  /** 流式阶段使用轻量纯文本，完成后再做完整 Markdown 解析。 */
+  streaming?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   enableHighlight: true,
   showCopyButton: true,
   variant: 'default',
+  streaming: false,
 })
 
 /**
@@ -62,10 +66,10 @@ const props = withDefaults(defineProps<Props>(), {
 const renderedHtml = ref('')
 
 /**
- * 性能优化：复用 Renderer 实例
+ * 性能优化：在组件生命周期内复用 Renderer 实例
  *
  * 原代码每次渲染都 new marked.Renderer() 并重新设置 code/link 方法。
- * 提取为模块级单例后只初始化一次，减少对象分配。
+ * 现在每个组件实例只初始化一次，后续渲染持续复用，减少对象分配。
  */
 const sharedRenderer = new marked.Renderer()
 
@@ -120,16 +124,33 @@ function scheduleRender() {
 }
 
 onMounted(() => {
-  // 首帧直接同步渲染，避免出现空白闪烁
-  renderMarkdown()
+  if (!props.streaming) {
+    renderMarkdown()
+  }
 })
 
 /**
- * 监听内容变化（滑动窗口合并）
+ * 非流式内容继续使用节流渲染；流式结束时立即生成最终 Markdown。
  */
-watch(() => props.content, () => {
-  scheduleRender()
-})
+watch(
+  () => [props.content, props.streaming] as const,
+  ([, streaming], [, previousStreaming]) => {
+    if (streaming) {
+      if (renderTimer) {
+        window.clearTimeout(renderTimer)
+        renderTimer = 0
+      }
+      return
+    }
+
+    if (previousStreaming) {
+      renderMarkdown()
+      return
+    }
+
+    scheduleRender()
+  },
+)
 
 onBeforeUnmount(() => {
   if (renderTimer) window.clearTimeout(renderTimer)
@@ -190,8 +211,12 @@ if (typeof window !== 'undefined') {
 
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
-    <!-- 渲染后的内容（流式期间保留旧内容，避免空白/加载态引发布局抖动） -->
     <div
+      v-if="streaming"
+      class="markdown-content markdown-content--streaming"
+    >{{ content }}</div>
+    <div
+      v-else
       class="markdown-content"
       v-html="renderedHtml"
     ></div>
@@ -359,6 +384,11 @@ if (typeof window !== 'undefined') {
     border-radius: var(--chat-radius-sm);
     margin: 0.75em 0;
   }
+}
+
+.markdown-content--streaming {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .markdown-renderer--compact .markdown-content {
