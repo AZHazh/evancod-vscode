@@ -20,7 +20,7 @@
 
 import * as vscode from 'vscode'
 import { ProviderService } from '../provider/ProviderService'
-import { createApiClient } from '../../core/services/api/AnthropicClient'
+import { createApiClient } from '../../core/services/api'
 import { handleNewApiMessage } from '../newapi/NewApiMessageHandler'
 import type { Provider } from '../../types'
 

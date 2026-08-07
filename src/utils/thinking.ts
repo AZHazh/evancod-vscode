@@ -122,3 +122,43 @@ export function resolveMaxTokens(model: string, thinking?: ThinkingParam): numbe
   }
   return limits.default
 }
+
+/**
+ * OpenAI API 的推理参数
+ * 用于 o1, o3 等推理模型
+ */
+export type OpenAIReasoningEffort = 'low' | 'medium' | 'high'
+
+/**
+ * 计算 OpenAI API 的 reasoning_effort 参数
+ *
+ * @returns reasoning_effort 值；返回 undefined 表示不附加该字段
+ */
+export function resolveOpenAIReasoningEffort(
+  options: ResolveThinkingOptions
+): OpenAIReasoningEffort | undefined {
+  const { provider, model, effortLevel = 'medium' } = options
+
+  const userEnabled = isThinkingEnabledByEffort(effortLevel)
+  const modelCanThink = modelSupportsThinking(provider, model)
+
+  // 用户关闭思考或模型不支持
+  if (!userEnabled || !modelCanThink) {
+    return undefined
+  }
+
+  // effortLevel → reasoning_effort 映射
+  // low: 不发送参数（已在上面过滤）
+  // medium: 'medium'
+  // high: 'high'
+  // max: 'high'（OpenAI 只有 low/medium/high 三档）
+  switch (effortLevel) {
+    case 'medium':
+      return 'medium'
+    case 'high':
+    case 'max':
+      return 'high'
+    default:
+      return undefined
+  }
+}

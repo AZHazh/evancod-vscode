@@ -94,7 +94,66 @@ export function modelSupportsThinking(provider: Provider, model: string): boolea
     return canonical.includes('sonnet-4') || canonical.includes('opus-4')
   }
 
-  // 5. custom / 兼容端点：保守起见默认不支持，需通过 modelCapabilities 显式开启
+  // 5. custom 兼容端点：根据 API 格式和模型名称判断
+  if (provider.type === 'custom') {
+    // 5.1 如果使用 Anthropic API 格式，采用宽松策略
+    if (provider.apiFormat === 'anthropic') {
+      // 已知支持的模型系列
+      const knownSupportedPatterns = [
+        /claude-[45]/,           // Claude 4.x, 5.x
+        /opus-[45]/,             // Opus 4.x, 5.x
+        /sonnet-[45]/,           // Sonnet 4.x, 5.x
+        /gpt-.*-o[13]/,          // GPT o1, o3
+        /^o[13]/,                // o1, o3
+        /deepseek.*reasoner/,    // DeepSeek reasoner
+        /deepseek.*-r[12]/,      // DeepSeek R2, R2
+        /qwen.*thinking/,        // Qwen thinking
+        /glm.*think/,            // GLM thinking 系列
+      ]
+
+      for (const pattern of knownSupportedPatterns) {
+        if (pattern.test(canonical)) {
+          return true
+        }
+      }
+
+      // 中转服务通常能正确处理 thinking 参数：
+      // - 支持的模型会传递给后端
+      // - 不支持的模型会忽略或返回友好错误
+      // 采用宽松策略：默认启用，让中转服务决定
+      return true
+    }
+
+    // 5.2 如果使用 OpenAI API 格式（openai_chat, openai_responses）
+    if (provider.apiFormat === 'openai_chat' || provider.apiFormat === 'openai_responses') {
+      // 已知支持推理的 OpenAI 模型系列
+      const openaiReasoningPatterns = [
+        /^o[13]/,                // o1, o3
+        /gpt-.*-o[13]/,          // gpt-4-o1, gpt-5-o3
+        /gpt-[56]/,              // gpt-5, gpt-6
+        /gpt.*pro/,              // gpt-pro, gpt-4-pro, gpt-5-pro
+        /gpt.*turbo/,            // gpt-4-turbo 等可能支持推理
+        /deepseek.*reasoner/,    // DeepSeek reasoner
+        /deepseek.*-r[12]/,      // DeepSeek R1, R2
+        /qwen.*think/,           // Qwen thinking
+        /glm.*think/,            // GLM thinking
+      ]
+
+      for (const pattern of openaiReasoningPatterns) {
+        if (pattern.test(canonical)) {
+          return true
+        }
+      }
+
+      // OpenAI 格式采用保守策略：未知模型默认不支持
+      return false
+    }
+
+    // 5.3 其他 API 格式：不支持
+    return false
+  }
+
+  // 6. 其他情况：保守起见默认不支持，需通过 modelCapabilities 显式开启
   return false
 }
 
@@ -102,19 +161,49 @@ export function modelSupportsThinking(provider: Provider, model: string): boolea
  * 判断模型是否支持自适应思考（adaptive thinking）
  *
  * 自适应思考由模型自主决定思考深度，不设固定 token 预算。
- * 仅第一方 Anthropic 的 Opus 4.6+ / Sonnet 4.6+ 支持。
+ * 第一方 Anthropic 的 Opus 5+ / Sonnet 5+ 以及使用 Anthropic API 格式的中转服务支持。
  */
 export function modelSupportsAdaptiveThinking(provider: Provider, model: string): boolean {
   const override = getModelCapabilityOverride(provider, model, 'adaptive_thinking')
   if (override !== undefined) return override
 
-  // 仅第一方支持自适应思考
-  if (!isFirstPartyAnthropic(provider)) return false
-
   const canonical = getCanonicalName(model)
 
-  // 白名单：Opus 4.6+ / Sonnet 4.6+
-  if (canonical.includes('opus-4-6') || canonical.includes('sonnet-4-6')) {
+  // custom 兼容端点：如果使用 Anthropic API 格式，根据模型特征判断
+  if (provider.type === 'custom' && provider.apiFormat === 'anthropic') {
+    // Claude 5+ 系列
+    if (canonical.includes('opus-5') || canonical.includes('sonnet-5')) {
+      return true
+    }
+
+    // GPT o 系列（o1, o3 通常支持自适应推理）
+    if (canonical.includes('gpt-') && (
+      canonical.includes('-o1') ||
+      canonical.includes('-o3') ||
+      canonical.includes('-o-') ||
+      canonical.match(/^o\d/)
+    )) {
+      return true
+    }
+
+    // DeepSeek R1/R2（推理模型通常支持自适应）
+    if (canonical.includes('deepseek') && (
+      canonical.includes('reasoner') ||
+      canonical.includes('-r1') ||
+      canonical.includes('-r2')
+    )) {
+      return true
+    }
+
+    // 其他模型：默认不支持自适应，使用 budget 模式
+    return false
+  }
+
+  // 第一方 Anthropic
+  if (!isFirstPartyAnthropic(provider)) return false
+
+  // 白名单：Opus 5+ / Sonnet 5+
+  if (canonical.includes('opus-5') || canonical.includes('sonnet-5')) {
     return true
   }
 

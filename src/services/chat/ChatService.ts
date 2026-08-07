@@ -29,7 +29,7 @@ import { buildOpenAIImageUrl, downloadAsBase64 } from '../../core/tools/image/im
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
-import { createApiClient } from '../../core/services/api/AnthropicClient'
+import { createApiClient } from '../../core/services/api'
 import { compactConversation } from '../compact/compact'
 
 /**
