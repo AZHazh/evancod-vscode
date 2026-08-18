@@ -21,6 +21,7 @@ import { AgentCoordinator } from './services/agent/AgentCoordinator'
 import { MCPConnectionManager } from './services/mcp/MCPConnectionManager'
 import { SkillManager } from './services/skill/SkillManager'
 import { MemoryManager } from './services/memory/MemoryManager'
+import { initializePerformanceLogger, performanceLog, performanceMeasure } from './utils/performanceLogger'
 
 // 使用模块级变量（而非全局变量）保存服务实例
 // 这样可以保证作用域隔离，且通过 ExtensionContext 管理生命周期
@@ -45,6 +46,8 @@ let memoryManager: MemoryManager
  */
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Evancod extension is now active!')
+  const logPath = initializePerformanceLogger(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath)
+  performanceLog('extension.activate.start', { logPath })
 
   /**
    * 先注册命令，再初始化服务。
@@ -113,11 +116,11 @@ export async function activate(context: vscode.ExtensionContext) {
   try {
     // 初始化 Provider 服务（从 ~/.claude/cc-evancod/providers.json 加载配置）
     providerService = new ProviderService(context)
-    await providerService.initialize()
+    await performanceMeasure('startup.provider.initialize', () => providerService.initialize())
 
     // 初始化 Task 管理服务
     taskManager = new TaskManager(context)
-    await taskManager.load()
+    await performanceMeasure('startup.task.load', () => taskManager.load())
 
     // 初始化 Plan Mode 管理服务
     planModeManager = new PlanModeManager(context)
@@ -127,15 +130,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // 初始化 MCP 连接管理器
     mcpManager = new MCPConnectionManager(context)
-    await mcpManager.initialize()
+    await performanceMeasure('startup.mcp.initialize', () => mcpManager.initialize())
 
     // 初始化 Skill 管理器
     skillManager = new SkillManager(context)
-    await skillManager.initialize()
+    await performanceMeasure('startup.skill.initialize', () => skillManager.initialize())
 
     // 初始化 Memory 管理器
     memoryManager = new MemoryManager(context)
-    await memoryManager.initialize()
+    await performanceMeasure('startup.memory.initialize', () => memoryManager.initialize())
 
     // 初始化聊天服务（传入所有服务）
     chatService = new ChatService(
@@ -148,7 +151,7 @@ export async function activate(context: vscode.ExtensionContext) {
       skillManager,
       memoryManager
     )
-    await chatService.initialize()
+    await performanceMeasure('startup.chat.initialize', () => chatService.initialize())
 
     // 初始化 Webview 管理器（传入所有需要的服务）
     webviewManager = new WebviewManager(
@@ -173,13 +176,14 @@ export async function activate(context: vscode.ExtensionContext) {
       onTaskListChange: () => taskManager.notifyTaskList(),
       permissionMode: chatService.getRuntimeState().permissionMode,
     })
-    await agentCoordinator.restorePersistedTasks()
+    await performanceMeasure('startup.agent.restorePersistedTasks', () => agentCoordinator.restorePersistedTasks())
 
     // 初始化状态栏服务
     statusBarService = new StatusBarService(context, providerService)
     statusBarService.show()
 
     console.log('Evancod services initialized')
+    performanceLog('extension.activate.complete')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error('Evancod initialization failed:', error)

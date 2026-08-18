@@ -2,6 +2,7 @@ import type { AgentServerEvent } from '../../../types/messages'
 import type { ToolCall } from '../../../types'
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { BashTool, type BashExecutionContext } from './BashTool'
+import { performanceLog, performanceSnapshot } from '../../../utils/performanceLogger'
 
 export interface ToolPermissionResult {
   approved: boolean
@@ -38,6 +39,8 @@ export class ToolExecutor {
 
   async runToolUse(toolCall: ToolCall): Promise<ToolExecutionResult> {
     const { id, name, input } = toolCall
+    const startedAt = performance.now()
+    performanceLog('tool.start', { toolName: name, toolUseId: id, inputBytes: JSON.stringify(input || {}).length })
     const tool = this.tools.find(candidate => candidate.name === name)
 
     if (!tool) {
@@ -80,9 +83,11 @@ export class ToolExecutor {
       const contentBlocks = this.buildVisionBlocks(toolResult, llmContent)
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success })
       this.callbacks.notifyTaskListChange(name)
+      performanceLog('tool.complete', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), resultBytes: llmContent.length, ...performanceSnapshot() })
       return { toolCallId: id, toolName: name, content: llmContent, contentBlocks }
     } catch (error) {
       const content = `Error: ${error instanceof Error ? error.message : '未知错误'}`
+      performanceLog('tool.error', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true })
       this.callbacks.notifyTaskListChange(name)
       return { toolCallId: id, toolName: name, content }

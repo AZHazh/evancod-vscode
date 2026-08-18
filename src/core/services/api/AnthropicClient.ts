@@ -129,22 +129,18 @@ export class AnthropicClient implements ApiClient {
 
       if (thinking) {
         requestParams.thinking = thinking
-        console.log('[AnthropicClient] Thinking enabled:', JSON.stringify(thinking))
       } else {
-        console.log('[AnthropicClient] Thinking NOT enabled - effortLevel:', this.config.effortLevel, 'model:', this.config.model)
+        console.log(
+          '[AnthropicClient] Thinking NOT enabled - effortLevel:',
+          this.config.effortLevel,
+          'model:',
+          this.config.model
+        )
       }
 
       if (tools && tools.length > 0) {
         requestParams.tools = tools
       }
-
-      console.log('[AnthropicClient] Request params:', {
-        model: requestParams.model,
-        max_tokens: requestParams.max_tokens,
-        temperature: requestParams.temperature,
-        thinking: requestParams.thinking,
-        messageCount: convertedMessages.length,
-      })
 
       const stream = this.client.messages.stream(requestParams)
       let fullContent = ''
@@ -173,7 +169,12 @@ export class AnthropicClient implements ApiClient {
             break
 
           case 'content_block_delta': {
-            const delta = event.delta as { type: string; text?: string; partial_json?: string; thinking?: string }
+            const delta = event.delta as {
+              type: string
+              text?: string
+              partial_json?: string
+              thinking?: string
+            }
             if (delta.type === 'text_delta') {
               fullContent += delta.text || ''
               trackedStream(delta.text || '', 'delta')
@@ -221,7 +222,10 @@ export class AnthropicClient implements ApiClient {
       }
     }
 
-    return withStreamRetry(attempt, { signal: options?.signal, hasStreamedContent: () => streamedContent })
+    return withStreamRetry(attempt, {
+      signal: options?.signal,
+      hasStreamedContent: () => streamedContent,
+    })
   }
 
   async testConnection(): Promise<boolean> {
@@ -281,7 +285,9 @@ function convertAnthropicMessages(rawMessages: Message[]): AnthropicMessage[] {
     if (message.role === 'user') {
       converted.push({
         role: 'user',
-        content: message.contentBlocks?.length ? message.contentBlocks as any[] : [{ type: 'text', text: message.content }],
+        content: message.contentBlocks?.length
+          ? (message.contentBlocks as any[])
+          : [{ type: 'text', text: message.content }],
       })
       continue
     }
@@ -339,10 +345,18 @@ function normalizeAnthropicUsage(usage: any): TokenUsage | undefined {
   }
 }
 
-function mergeClientUsage(current: TokenUsage | undefined, next: TokenUsage | undefined): TokenUsage | undefined {
+function mergeClientUsage(
+  current: TokenUsage | undefined,
+  next: TokenUsage | undefined
+): TokenUsage | undefined {
   if (!next) return current
   const merged: TokenUsage = { ...(current || {}) }
-  for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const) {
+  for (const key of [
+    'inputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+  ] as const) {
     const value = next[key]
     if (typeof value === 'number') {
       const previous = typeof merged[key] === 'number' ? (merged[key] as number) : 0

@@ -18,6 +18,7 @@
 import { randomBytes } from 'crypto'
 import * as http from 'http'
 import axios, { type AxiosInstance } from 'axios'
+import { performanceLog, performanceMeasure } from '../../utils/performanceLogger'
 
 /**
  * new-api Token 信息
@@ -297,9 +298,11 @@ export class NewApiSyncService {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
+        const pollStartedAt = performance.now()
         const response = await this.client.get(
           `/api/desktop-sync/sessions/${encodeURIComponent(state)}`
         )
+        performanceLog('newapi.authorization.poll', { attempt: attempt + 1, status: response.status, durationMs: Math.round(performance.now() - pollStartedAt) })
 
         if (!response.data.success) {
           throw new Error('查询授权状态失败')
@@ -347,9 +350,7 @@ export class NewApiSyncService {
    */
   async exchangeCode(code: string): Promise<ExchangeResponse> {
     try {
-      const response = await this.client.post('/api/desktop-sync/exchange', {
-        code,
-      })
+      const response = await performanceMeasure('newapi.exchange.request', () => this.client.post('/api/desktop-sync/exchange', { code }), { site: this.siteUrl })
 
       if (!response.data.success) {
         throw new Error(response.data.message || 'exchange 失败')
@@ -369,12 +370,14 @@ export class NewApiSyncService {
         }
       })
 
-      return {
+      const result = {
         tokens,
         availableModels,
         groupModels,
         siteName: data.site_name,
       }
+      performanceLog('newapi.exchange.complete', { tokenCount: tokens.length, modelCount: availableModels.length })
+      return result
     } catch (error) {
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 400) {

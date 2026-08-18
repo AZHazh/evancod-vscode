@@ -35,8 +35,15 @@ import { saveGeneratedImages, timestampedImagePath } from '../tools/image/imageS
 import { TaskManager } from '../../services/task/TaskManager'
 import { PlanModeManager } from '../../services/plan/PlanModeManager'
 import { AgentCoordinator } from '../../services/agent/AgentCoordinator'
-import { getContextWindowForModel, getEffectiveContextWindow } from '../../utils/model/modelContextWindows'
-import { microcompact, shouldMicrocompact, estimateMessagesTokens } from '../../services/compact/microcompact'
+import {
+  getContextWindowForModel,
+  getEffectiveContextWindow,
+} from '../../utils/model/modelContextWindows'
+import {
+  microcompact,
+  shouldMicrocompact,
+  estimateMessagesTokens,
+} from '../../services/compact/microcompact'
 import { closeDanglingToolCalls as repairDanglingToolCalls } from '../services/api/toolMessageSanitizer'
 import { compactConversation } from '../../services/compact/compact'
 import { shouldAutoCompact } from '../../services/compact/autoCompact'
@@ -75,6 +82,7 @@ import { SkillManager } from '../../services/skill/SkillManager'
 import { MemoryManager } from '../../services/memory/MemoryManager'
 import { ToolExecutor } from '../tools/execution/ToolExecutor'
 import { ToolOrchestrator, type RunToolsOutcome } from '../tools/execution/ToolOrchestrator'
+import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
 
 /**
  * QueryEngine 配置
@@ -206,7 +214,12 @@ function mergeUsage(current: TokenUsage | undefined, next: unknown): TokenUsage 
   const incoming = next as TokenUsage
   const merged: TokenUsage = { ...(current || {}) }
 
-  for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const) {
+  for (const key of [
+    'inputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+  ] as const) {
     const value = incoming[key]
     if (typeof value === 'number') {
       const previous = typeof merged[key] === 'number' ? (merged[key] as number) : 0
@@ -264,9 +277,19 @@ export class QueryEngine {
   private onAgentEventCallback?: OnAgentEventCallback
   private onCompleteCallback?: OnCompleteCallback
   private onErrorCallback?: OnErrorCallback
-  private permissionWaiters: Map<string, (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => void> = new Map()
+  private permissionWaiters: Map<
+    string,
+    (response: {
+      requestId: string
+      approved: boolean
+      reason?: string
+      updatedInput?: unknown
+      rule?: 'once' | 'always'
+    }) => void
+  > = new Map()
   private toolUseNames: Map<string, string> = new Map()
   private permissionRequestTools: Map<string, string> = new Map()
+  private permissionStartedAt: Map<string, number> = new Map()
   private sessionAllowedTools: Set<string> = new Set()
   private bashTool!: BashTool
   private toolExecutor?: ToolExecutor
@@ -435,12 +458,13 @@ export class QueryEngine {
       this.tools.push(new SkillTool(this.config.skillManager))
     }
 
-    if (this.config.verbose) {
-      console.log(`Initialized ${this.tools.length} tools:`, this.tools.map(t => t.name))
-    }
+    // if (this.config.verbose) {
+    //   console.log(`Initialized ${this.tools.length} tools:`, this.tools.map(t => t.name))
+    // }
 
     this.toolExecutor = new ToolExecutor(this.tools, this.bashTool, {
-      requestPermission: (toolName, toolUseId, input) => this.requestPermissionIfNeeded(toolName, toolUseId, input),
+      requestPermission: (toolName, toolUseId, input) =>
+        this.requestPermissionIfNeeded(toolName, toolUseId, input),
       emitEvent: event => this.onAgentEventCallback?.(event),
       notifyTaskListChange: toolName => this.notifyTaskListChange(toolName),
     })
@@ -452,6 +476,7 @@ export class QueryEngine {
 
 任务工具契约：
 - 对复杂多步骤工作、plan mode、用户明确要求 todo list、或用户一次给出多个任务的请求，主动调用 task_create 创建结构化任务。
+- 遇到不明确，或不确定的任务，主动调用 ask_user_question 工具主动询问用户，当用户也无法给出提供答案再去按想法执行。
 - 开始执行某个任务前，必须调用 task_update 将该任务标记为 in_progress。
 - 只有工作完全完成时才能将任务标记为 completed；测试失败、实现不完整、文件缺失或仍有阻塞时不能标记 completed。
 - 完成任务后，调用 task_list 查找下一项可执行任务或新解锁任务。
@@ -555,19 +580,33 @@ Skill 使用契约：
     this.onAgentEventCallback = callback
   }
 
-  handlePermissionResponse(response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) {
+  handlePermissionResponse(response: {
+    requestId: string
+    approved: boolean
+    reason?: string
+    updatedInput?: unknown
+    rule?: 'once' | 'always'
+  }) {
     const waiter = this.permissionWaiters.get(response.requestId)
     if (!waiter) return
     this.permissionWaiters.delete(response.requestId)
-    const toolName = this.permissionRequestTools.get(response.requestId) || this.toolUseNames.get(response.requestId)
+    const toolName =
+      this.permissionRequestTools.get(response.requestId) ||
+      this.toolUseNames.get(response.requestId)
     this.permissionRequestTools.delete(response.requestId)
+    const permissionStartedAt = this.permissionStartedAt.get(response.requestId)
+    this.permissionStartedAt.delete(response.requestId)
+    performanceLog('permission.response', { requestId: response.requestId, approved: response.approved, durationMs: permissionStartedAt ? Math.round(performance.now() - permissionStartedAt) : undefined })
     if (response.approved && response.rule === 'always' && toolName) {
       this.sessionAllowedTools.add(toolName)
     }
     if (toolName === 'exit_plan_mode' && this.config.planModeManager) {
       void (response.approved
         ? this.config.planModeManager.approvePlan(response.requestId)
-        : this.config.planModeManager.rejectPlan(response.requestId, response.reason || '用户拒绝了计划'))
+        : this.config.planModeManager.rejectPlan(
+            response.requestId,
+            response.reason || '用户拒绝了计划'
+          ))
     }
     waiter(response)
   }
@@ -596,6 +635,8 @@ Skill 使用契约：
    * @returns Promise<Message> 助手的响应消息
    */
   async query(content: string, contentBlocks?: ContentBlock[]): Promise<Message> {
+    const queryStartedAt = performance.now()
+    performanceLog('query.start', { messageLength: content.length, messageCount: this.config.messages.length, ...performanceSnapshot() })
     try {
       // 重置 abort 状态，允许新的 query
       this.cancelled = false
@@ -634,9 +675,10 @@ Skill 使用契约：
       let taskCompletionReviewRequested = false
       let taskWorkflowActive =
         isExplicitContinuationRequest(content) &&
-        (this.config.taskManager?.listTasks().some(
-          task => task.status === 'pending' || task.status === 'in_progress'
-        ) ?? false)
+        (this.config.taskManager
+          ?.listTasks()
+          .some(task => task.status === 'pending' || task.status === 'in_progress') ??
+          false)
 
       // 新一轮用户请求：清空上一轮的工具去重缓存
       this.toolOrchestrator?.resetDedup()
@@ -644,11 +686,15 @@ Skill 使用契约：
       while (iteration < MAX_ITERATIONS) {
         this.throwIfCancelled()
         iteration++
+        const iterationStartedAt = performance.now()
+        performanceLog('query.iteration.start', { iteration, messageCount: this.config.messages.length })
 
         // 检查是否需要自动压缩
         if (totalUsage?.lastPromptTokens) {
           const currentTokens = totalUsage.lastPromptTokens
-          if (shouldAutoCompact(currentTokens, this.config.model, this.consecutiveCompactFailures)) {
+          if (
+            shouldAutoCompact(currentTokens, this.config.model, this.consecutiveCompactFailures)
+          ) {
             try {
               this.onAgentEventCallback?.({
                 type: 'system_notification',
@@ -690,6 +736,7 @@ Skill 使用契约：
         const requestMessages = this.buildRequestMessages()
 
         const continuingOutput = continuationCount > 0 || taskContinuationCount > 0
+        const apiStartedAt = performance.now()
         const response = await this.apiClient.sendMessageStream(
           requestMessages,
           (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
@@ -725,6 +772,7 @@ Skill 使用契约：
             },
           }
         )
+        performanceLog('query.api.complete', { iteration, durationMs: Math.round(performance.now() - apiStartedAt), toolCallCount: response.toolCalls?.length || 0, contentLength: response.content?.length || 0 })
 
         // 等待原生生图的落盘 + complete 事件全部发出，避免 message_complete 抢先
         if (imageSavePromises.length > 0) {
@@ -752,9 +800,11 @@ Skill 使用契约：
           continuationCount++
           if (continuationCount > MAX_OUTPUT_CONTINUATIONS) {
             throw new Error(
-              '模型输出连续 ' + MAX_OUTPUT_CONTINUATIONS + ' 次被截断（' +
-              (response.stopReason || '流未完整结束') +
-              '），已保留现有进度，请再次发送“继续”恢复执行。'
+              '模型输出连续 ' +
+                MAX_OUTPUT_CONTINUATIONS +
+                ' 次被截断（' +
+                (response.stopReason || '流未完整结束') +
+                '），已保留现有进度，请再次发送“继续”恢复执行。'
             )
           }
 
@@ -804,7 +854,9 @@ Skill 使用契约：
           })
 
           this.throwIfCancelled()
+          const toolsStartedAt = performance.now()
           const { results: toolResults, noProgress } = await this.executeToolCalls(assistantToolCalls)
+          performanceLog('query.tools.complete', { iteration, toolCallCount: assistantToolCalls.length, toolNames: assistantToolCalls.map(call => call.name), durationMs: Math.round(performance.now() - toolsStartedAt), ...performanceSnapshot() })
           this.throwIfCancelled()
           for (const result of toolResults) {
             this.throwIfCancelled()
@@ -842,9 +894,10 @@ Skill 使用契约：
           continue
         }
 
-        const unfinishedTasks = this.config.taskManager
-          ?.listTasks()
-          .filter(task => task.status === 'pending' || task.status === 'in_progress') || []
+        const unfinishedTasks =
+          this.config.taskManager
+            ?.listTasks()
+            .filter(task => task.status === 'pending' || task.status === 'in_progress') || []
         if (
           taskWorkflowActive &&
           unfinishedTasks.length > 0 &&
@@ -864,7 +917,8 @@ Skill 使用契约：
             id: this.generateId(),
             role: 'user',
             content:
-              '[内部任务续跑指令] 当前任务列表仍有 ' + unfinishedTasks.length +
+              '[内部任务续跑指令] 当前任务列表仍有 ' +
+              unfinishedTasks.length +
               ' 项未完成。不要结束回答；检查任务状态，从当前 in_progress 或下一项可执行任务继续，' +
               '完成实现与验证并更新任务状态。只有全部任务完成或存在必须由用户处理的真实阻塞时才能停止。',
             timestamp: Date.now(),
@@ -884,11 +938,7 @@ Skill 使用契约：
         // 随后用一句“现在进行最终编译/验证”结束当前 turn；此时任务列表虽是 7/7，
         // 但承诺的收尾动作尚未执行。强制增加一次复核轮，让模型真正运行最终验证、
         // 检查 task_list 并给出完整总结。复核只触发一次，避免正常完成后循环。
-        if (
-          taskWorkflowActive &&
-          unfinishedTasks.length === 0 &&
-          !taskCompletionReviewRequested
-        ) {
+        if (taskWorkflowActive && unfinishedTasks.length === 0 && !taskCompletionReviewRequested) {
           if (assistantContent) {
             this.config.messages.push({
               id: this.generateId(),
@@ -915,13 +965,15 @@ Skill 使用契约：
         }
 
         finalContent = assistantContent
+        performanceLog('query.iteration.complete', { iteration, durationMs: Math.round(performance.now() - iterationStartedAt) })
         break
       }
 
       // 循环未正常闭环（触顶或被死循环断路器打断），且最后一轮以工具调用结尾：
       // 此时 finalContent 仍为空，直接落一条空 assistant 消息会导致闭环失败、
       // 任务面板停在半途。补一轮"无工具"的收尾请求，让模型基于已有结果给出总结。
-      const needsClosing = (iteration >= MAX_ITERATIONS || loopBroken) && lastTurnHadToolCalls && !finalContent
+      const needsClosing =
+        (iteration >= MAX_ITERATIONS || loopBroken) && lastTurnHadToolCalls && !finalContent
       if (needsClosing) {
         console.warn('Tool loop ended without a final answer, requesting closing summary')
         this.throwIfCancelled()
@@ -975,27 +1027,27 @@ Skill 使用契约：
         // 用最后一次 API 的 prompt tokens，而非累计的 inputTokens
         const currentTokens = totalUsage.lastPromptTokens || totalUsage.inputTokens || 0
         totalUsage.estimatedCurrentTokens = currentTokens
-        totalUsage.percentUsed = Math.min(
-          Math.round((currentTokens / effectiveWindow) * 100),
-          100
-        )
+        totalUsage.percentUsed = Math.min(Math.round((currentTokens / effectiveWindow) * 100), 100)
       }
 
       this.onAgentEventCallback?.({ type: 'message_complete', usage: totalUsage })
       this.onCompleteCallback?.(finalMessage)
+      performanceLog('query.complete', { iterations: iteration, durationMs: Math.round(performance.now() - queryStartedAt), ...performanceSnapshot() })
       return finalMessage
     } catch (error) {
+      performanceLog('query.error', { durationMs: Math.round(performance.now() - queryStartedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
       // 关键：本轮可能在 push 了带 toolCalls 的 assistant 消息之后、push 工具结果
       // 之前就中断（用户点停止 / 网络错误 / 429）。此时历史里留下没有配对结果的
       // tool_use，而 QueryEngine 跨请求复用同一份 messages，导致之后每次请求都被
       // API 以 400 拒绝——表现为「会话断掉后再也无法继续」。这里立即补齐。
       this.closeDanglingToolCalls()
 
-      const err = this.cancelled || this.abortController.signal.aborted
-        ? new QueryCancelledError(this.cancelReason)
-        : error instanceof Error
-          ? error
-          : new Error(String(error))
+      const err =
+        this.cancelled || this.abortController.signal.aborted
+          ? new QueryCancelledError(this.cancelReason)
+          : error instanceof Error
+            ? error
+            : new Error(String(error))
       this.onErrorCallback?.(err)
       throw err
     }
@@ -1039,7 +1091,11 @@ Skill 使用契约：
       let savedPath: string | undefined
       let name: string | undefined
       try {
-        const saved = await saveGeneratedImages(this.config.cwd, [{ base64, mime }], timestampedImagePath(mime))
+        const saved = await saveGeneratedImages(
+          this.config.cwd,
+          [{ base64, mime }],
+          timestampedImagePath(mime)
+        )
         if (saved.length > 0) {
           savedPath = saved[0].path
           name = saved[0].name
@@ -1147,10 +1203,17 @@ Skill 使用契约：
    *
    * @returns ID 字符串
    */
-  private requestPermissionIfNeeded(toolName: string, toolUseId: string, input: unknown): Promise<{ approved: boolean; reason?: string; updatedInput?: unknown }> {
+  private requestPermissionIfNeeded(
+    toolName: string,
+    toolUseId: string,
+    input: unknown
+  ): Promise<{ approved: boolean; reason?: string; updatedInput?: unknown }> {
     const permissionMode = this.config.permissionMode || 'default'
 
-    if (permissionMode === 'plan' && !this.config.planModeManager?.isToolAllowedInPlanMode(toolName)) {
+    if (
+      permissionMode === 'plan' &&
+      !this.config.planModeManager?.isToolAllowedInPlanMode(toolName)
+    ) {
       return Promise.resolve({ approved: false, reason: `Plan Mode 不允许使用工具: ${toolName}` })
     }
 
@@ -1176,6 +1239,8 @@ Skill 使用契约：
     }
 
     const requestId = this.generateId()
+    this.permissionStartedAt.set(requestId, performance.now())
+    performanceLog('permission.request', { requestId, toolName, toolUseId })
     this.permissionRequestTools.set(requestId, toolName)
     this.onAgentEventCallback?.({
       type: 'permission_request',
@@ -1187,20 +1252,35 @@ Skill 使用契约：
     })
 
     return new Promise(resolve => {
-      const responder = (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => {
+      const responder = (response: {
+        requestId: string
+        approved: boolean
+        reason?: string
+        updatedInput?: unknown
+        rule?: 'once' | 'always'
+      }) => {
         if (response.requestId !== requestId) return
         this.permissionWaiters.delete(requestId)
-        resolve({ approved: response.approved, reason: response.reason, updatedInput: response.updatedInput })
+        resolve({
+          approved: response.approved,
+          reason: response.reason,
+          updatedInput: response.updatedInput,
+        })
       }
 
       this.permissionWaiters.set(requestId, responder)
-      const timeoutId = setTimeout(() => {
-        if (this.permissionWaiters.has(requestId)) {
-          this.permissionWaiters.delete(requestId)
-          this.permissionRequestTools.delete(requestId)
-          resolve({ approved: false, reason: 'Permission request timed out' })
-        }
-      }, 5 * 60 * 1000)
+      const timeoutId = setTimeout(
+        () => {
+          if (this.permissionWaiters.has(requestId)) {
+            this.permissionWaiters.delete(requestId)
+            this.permissionRequestTools.delete(requestId)
+            this.permissionStartedAt.delete(requestId)
+            performanceLog('permission.timeout', { requestId, toolName })
+            resolve({ approved: false, reason: 'Permission request timed out' })
+          }
+        },
+        5 * 60 * 1000
+      )
 
       void timeoutId
     })
