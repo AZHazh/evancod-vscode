@@ -232,20 +232,33 @@ enabled: true
       const dirUri = vscode.Uri.file(dir)
       const entries = await vscode.workspace.fs.readDirectory(dirUri)
 
+      const loadTasks: Array<() => Promise<void>> = []
       for (const [name, fileType] of entries) {
         if (fileType === vscode.FileType.File && name.endsWith('.md')) {
           // 扁平技能：技能目录即当前目录
           const filePath = path.join(dir, name)
-          await this.loadSkill(filePath, dir, source)
+          loadTasks.push(() => this.loadSkill(filePath, dir, source))
         } else if (fileType === vscode.FileType.Directory) {
           // 目录式技能：查找子目录下的 SKILL.md
           const skillDir = path.join(dir, name)
           const skillFile = path.join(skillDir, 'SKILL.md')
           if (await this.fileExists(skillFile)) {
-            await this.loadSkill(skillFile, skillDir, source)
+            loadTasks.push(() => this.loadSkill(skillFile, skillDir, source))
           }
         }
       }
+      let nextTask = 0
+      const workerCount = Math.min(4, loadTasks.length)
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextTask < loadTasks.length) {
+          const task = loadTasks[nextTask++]
+          try {
+            await task()
+          } catch {
+            // 单个 Skill 加载失败不影响其他 Skill。
+          }
+        }
+      }))
     } catch (error) {
       // 目录不存在（如工作区未创建 skills 目录）时静默跳过
       console.log(`No skills loaded from ${source} dir: ${dir}`)

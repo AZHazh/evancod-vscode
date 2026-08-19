@@ -137,7 +137,7 @@ export class BashTool extends Tool {
 
       const child = spawn(args.command, {
         cwd: this.cwd,
-        shell: this.resolveShell(),
+        shell: await this.resolveShell(),
         env: {
           ...process.env,
           LANG: 'en_US.UTF-8',
@@ -280,7 +280,7 @@ export class BashTool extends Tool {
    *
    * 结果会缓存，避免每次执行都做文件系统探测
    */
-  private resolveShell(): string | boolean {
+  private async resolveShell(): Promise<string | boolean> {
     if (this.cachedShell !== undefined) {
       return this.cachedShell
     }
@@ -301,10 +301,9 @@ export class BashTool extends Tool {
 
     for (const candidate of candidates) {
       try {
-        if (fs.existsSync(candidate)) {
-          this.cachedShell = candidate
-          return this.cachedShell
-        }
+        await fs.promises.access(candidate)
+        this.cachedShell = candidate
+        return this.cachedShell
       } catch {
         // 忽略探测错误，继续尝试下一个候选
       }

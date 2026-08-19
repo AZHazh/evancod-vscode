@@ -636,6 +636,9 @@ Skill 使用契约：
    */
   async query(content: string, contentBlocks?: ContentBlock[]): Promise<Message> {
     const queryStartedAt = performance.now()
+    let lastIteration = 0
+    let progressSignalCount = 0
+    let noProgressTurnCount = 0
     performanceLog('query.start', { messageLength: content.length, messageCount: this.config.messages.length, ...performanceSnapshot() })
     try {
       // 重置 abort 状态，允许新的 query
@@ -686,6 +689,7 @@ Skill 使用契约：
       while (iteration < MAX_ITERATIONS) {
         this.throwIfCancelled()
         iteration++
+        lastIteration = iteration
         const iterationStartedAt = performance.now()
         performanceLog('query.iteration.start', { iteration, messageCount: this.config.messages.length })
 
@@ -733,7 +737,22 @@ Skill 使用契约：
         // 之前的实现从第 2 轮起无条件覆盖 this.config.messages，导致模型刚读过的
         // 文件正文被清空，于是反复重读同一批文件（探查死循环），且被清空的历史
         // 会经 ChatService 写回并持久化，无法恢复。
+        const requestBuildStartedAt = performance.now()
         const requestMessages = this.buildRequestMessages()
+        const serializedAt = performance.now()
+        const serializedRequest = JSON.stringify(requestMessages)
+        const requestStats = summarizeMessages(requestMessages)
+        performanceLog('query.iteration.request', {
+          iteration,
+          messageCount: requestStats.messageCount,
+          textBytes: requestStats.textBytes,
+          toolResultCount: requestStats.toolResultCount,
+          toolResultBytes: requestStats.toolResultBytes,
+          imageCount: requestStats.imageCount,
+          buildDurationMs: Math.round(serializedAt - requestBuildStartedAt),
+          serializationDurationMs: Math.round(performance.now() - serializedAt),
+          serializedBytes: Buffer.byteLength(serializedRequest, 'utf8'),
+        })
 
         const continuingOutput = continuationCount > 0 || taskContinuationCount > 0
         const apiStartedAt = performance.now()
@@ -772,7 +791,9 @@ Skill 使用契约：
             },
           }
         )
-        performanceLog('query.api.complete', { iteration, durationMs: Math.round(performance.now() - apiStartedAt), toolCallCount: response.toolCalls?.length || 0, contentLength: response.content?.length || 0 })
+        const responseBytes = Buffer.byteLength(response.content || '', 'utf8') +
+          Buffer.byteLength(JSON.stringify(response.toolCalls || []), 'utf8')
+        performanceLog('query.api.complete', { iteration, durationMs: Math.round(performance.now() - apiStartedAt), toolCallCount: response.toolCalls?.length || 0, contentLength: response.content?.length || 0, responseBytes })
 
         // 等待原生生图的落盘 + complete 事件全部发出，避免 message_complete 抢先
         if (imageSavePromises.length > 0) {
@@ -877,6 +898,7 @@ Skill 使用契约：
           // 此时不再继续工具循环，直接进入无工具的收尾请求让它给出结论。
           if (noProgress) {
             consecutiveNoProgressTurns++
+            noProgressTurnCount = consecutiveNoProgressTurns
             if (consecutiveNoProgressTurns >= 2) {
               console.warn('Detected tool-call loop with no progress, forcing final answer')
               this.onAgentEventCallback?.({
@@ -889,6 +911,7 @@ Skill 使用契约：
             }
           } else {
             consecutiveNoProgressTurns = 0
+            progressSignalCount++
           }
 
           continue
@@ -1033,6 +1056,13 @@ Skill 使用契约：
       this.onAgentEventCallback?.({ type: 'message_complete', usage: totalUsage })
       this.onCompleteCallback?.(finalMessage)
       performanceLog('query.complete', { iterations: iteration, durationMs: Math.round(performance.now() - queryStartedAt), ...performanceSnapshot() })
+      performanceLog('query.termination', {
+        terminationReason: 'completed',
+        iteration,
+        completed: true,
+        progressSignals: progressSignalCount,
+        noProgressTurns: noProgressTurnCount,
+      })
       return finalMessage
     } catch (error) {
       performanceLog('query.error', { durationMs: Math.round(performance.now() - queryStartedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
@@ -1048,6 +1078,16 @@ Skill 使用契约：
           : error instanceof Error
             ? error
             : new Error(String(error))
+      const terminationReason = this.cancelled || this.abortController.signal.aborted
+        ? 'user_cancelled'
+        : 'provider_error'
+      performanceLog('query.termination', {
+        terminationReason,
+        iteration: lastIteration,
+        completed: false,
+        progressSignals: progressSignalCount,
+        noProgressTurns: noProgressTurnCount,
+      })
       this.onErrorCallback?.(err)
       throw err
     }
@@ -1351,4 +1391,45 @@ Skill 使用契约：
     // 替换消息数组：摘要 + 最近消息
     this.config.messages = [summaryMessage, ...recentMessages]
   }
+}
+
+function summarizeMessages(messages: unknown[]): {
+  messageCount: number
+  textBytes: number
+  toolResultCount: number
+  toolResultBytes: number
+  imageCount: number
+} {
+  let textBytes = 0
+  let toolResultCount = 0
+  let toolResultBytes = 0
+  let imageCount = 0
+  for (const message of messages) {
+    const record = message as { role?: string; content?: unknown }
+    const content = record?.content
+    if (record.role === 'tool') {
+      toolResultCount++
+      toolResultBytes += typeof content === 'string'
+        ? Buffer.byteLength(content, 'utf8')
+        : Buffer.byteLength(JSON.stringify(content ?? ''), 'utf8')
+    }
+    if (typeof content === 'string') {
+      textBytes += Buffer.byteLength(content, 'utf8')
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      const item = block as { type?: string; text?: string; content?: unknown; source?: { data?: string } }
+      if (item.type === 'tool_result' && record.role !== 'tool') {
+        toolResultCount++
+        const serialized = typeof item.content === 'string' ? item.content : JSON.stringify(item.content ?? '')
+        toolResultBytes += Buffer.byteLength(serialized, 'utf8')
+      } else if (item.type === 'image' || item.source?.data) {
+        imageCount++
+      } else if (typeof item.text === 'string') {
+        textBytes += Buffer.byteLength(item.text, 'utf8')
+      }
+    }
+  }
+  return { messageCount: messages.length, textBytes, toolResultCount, toolResultBytes, imageCount }
 }

@@ -65,42 +65,49 @@ async function handleSyncStart(
   data: { siteUrl?: string },
   webview: vscode.Webview
 ) {
-  try {
-    const siteUrl = normalizeSiteUrl(
+  const siteUrl = normalizeSiteUrl(
       data.siteUrl || vscode.workspace.getConfiguration('evancod').get<string>('newApiSiteUrl') || 'https://www.tiandouai.com'
-    )
+  )
 
     // 创建同步服务
-    const syncService = new NewApiSyncService({
+  const syncService = new NewApiSyncService({
       siteUrl,
-    })
+  })
 
-    // 创建本地回调服务并生成授权 URL
-    const { session, code: callbackCode } = await syncService.createCallbackServer()
+  const session = syncService.startSync()
 
     // 打开系统浏览器
-    const opened = await vscode.env.openExternal(
+  const opened = await vscode.env.openExternal(
       vscode.Uri.parse(session.authorizeUrl)
-    )
+  )
 
-    if (!opened) {
+  if (!opened) {
       throw new Error('无法打开浏览器，请手动访问授权页面')
-    }
+  }
 
     // 显示进度通知 + 轮询授权状态
-    await vscode.window.withProgress(
+  await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: 'new-api 同步',
-        cancellable: false,
+        cancellable: true,
       },
-      async (progress) => {
+      async (progress, token) => {
         progress.report({
           message: '已打开浏览器，等待授权...',
         })
 
-        // 等待浏览器回调
-        const code = await callbackCode
+        const cancellationController = new AbortController()
+        const cancellation = token.onCancellationRequested(() => {
+          cancellationController.abort()
+          syncService.cancel()
+        })
+        let code: string
+        try {
+          code = await syncService.pollAuthorization(session.state, progressMessage => progress.report({ message: progressMessage }), cancellationController.signal)
+        } finally {
+          cancellation.dispose()
+        }
         progress.report({ message: '授权成功，正在获取数据...' })
 
         // 用 code 交换数据
@@ -122,11 +129,7 @@ async function handleSyncStart(
           message: `成功获取 ${result.tokens.length} 个 Token`,
         })
       }
-    )
-  } catch (error) {
-    // 发送错误到 Webview
-    throw error
-  }
+  )
 }
 
 /**

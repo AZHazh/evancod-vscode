@@ -20,7 +20,7 @@
  */
 
 import * as vscode from 'vscode'
-import * as fs from 'fs'
+import * as fs from 'fs/promises'
 import * as path from 'path'
 
 /**
@@ -124,12 +124,13 @@ export class ImageUploadService {
    */
   async uploadFromPath(filePath: string): Promise<ImageInfo> {
     // 1. 检查文件是否存在
-    if (!fs.existsSync(filePath)) {
+    // 2. 获取文件信息
+    let stats
+    try {
+      stats = await fs.stat(filePath)
+    } catch {
       throw new Error('文件不存在')
     }
-
-    // 2. 获取文件信息
-    const stats = fs.statSync(filePath)
     const fileName = path.basename(filePath)
     const ext = path.extname(filePath).toLowerCase().substring(1)
 
@@ -148,7 +149,7 @@ export class ImageUploadService {
     }
 
     // 5. 读取文件
-    const buffer = fs.readFileSync(filePath)
+    const buffer = await fs.readFile(filePath)
 
     // 6. 转换为 Base64
     const base64 = buffer.toString('base64')

@@ -43,6 +43,8 @@ export type AgentEventCallback = (event: AgentServerEvent) => void
 const TEXT_ATTACHMENT_LIMIT = 120_000
 
 export class ChatService {
+  private transcriptDeltaBuffers = new Map<string, string>()
+  private transcriptDeltaFlushAt = new Map<string, number>()
   /**
    * 会话列表（存储在内存中）
    * 优势：
@@ -67,6 +69,7 @@ export class ChatService {
    * 用于防止重复发送、显示加载状态等
    */
   private isStreaming = false
+  private persistenceDirtyWhileStreaming = false
   private activeRequest?: Promise<void>
   private requestQueue: Promise<void> = Promise.resolve()
 
@@ -145,6 +148,11 @@ export class ChatService {
   }
 
   private saveSessions(immediate = false): void {
+    if (this.isStreaming) {
+      this.persistenceDirtyWhileStreaming = true
+      return
+    }
+
     const sessions: Record<string, Session> = {}
     for (const session of this.sessions) {
       sessions[session.id] = session
@@ -647,6 +655,10 @@ export class ChatService {
     } finally {
       // 标记为非流式接收
       this.isStreaming = false
+      if (this.persistenceDirtyWhileStreaming) {
+        this.persistenceDirtyWhileStreaming = false
+        this.saveSessions()
+      }
     }
   }
 
@@ -1117,13 +1129,7 @@ export class ChatService {
           if (!existing) {
             this.finalizeCurrentThinkingSegment(session)
           }
-          this.appendOrUpdateTranscript(session, {
-            id: 'streaming-assistant',
-            type: 'assistant_text',
-            content: `${existing?.content || ''}${event.text}`,
-            timestamp: existing?.timestamp || now,
-            model: this.getCurrentModel(),
-          })
+          this.bufferTranscriptDelta(session, 'streaming-assistant', event.text, now, existing)
         }
         break
 
@@ -1150,7 +1156,9 @@ export class ChatService {
           id: `${event.toolUseId}:result`,
           type: 'tool_result',
           toolUseId: event.toolUseId,
-          content: event.content,
+          // Webview 实时消息仍携带完整结果；持久化 transcript 只保留摘要，
+          // 避免同一份工具输出同时存在于 runtime messages 和会话展示状态中。
+          content: summarizeToolResult(event.content),
           isError: event.isError,
           timestamp: now,
           parentToolUseId: event.parentToolUseId,
@@ -1176,12 +1184,7 @@ export class ChatService {
           (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
             block.type === 'thinking' && block.id === 'streaming-thinking'
         )
-        this.appendOrUpdateTranscript(session, {
-          id: 'streaming-thinking',
-          type: 'thinking',
-          content: `${existing?.content || ''}${event.text}`,
-          timestamp: existing?.timestamp || now,
-        })
+        this.bufferTranscriptDelta(session, 'streaming-thinking', event.text, now, existing)
         break
       }
 
@@ -1271,6 +1274,42 @@ export class ChatService {
     session.transcript.splice(index, 1, block)
   }
 
+  private bufferTranscriptDelta(
+    session: Session,
+    id: string,
+    delta: string,
+    timestamp: number,
+    existing?: Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }>
+  ): void {
+    const pending = `${this.transcriptDeltaBuffers.get(id) || ''}${delta}`
+    const lastFlush = this.transcriptDeltaFlushAt.get(id) || 0
+    const shouldFlush = !existing || pending.length >= 4096 || timestamp - lastFlush >= 100
+    if (!shouldFlush) {
+      this.transcriptDeltaBuffers.set(id, pending)
+      return
+    }
+
+    this.transcriptDeltaBuffers.delete(id)
+    this.transcriptDeltaFlushAt.set(id, timestamp)
+    this.appendOrUpdateTranscript(session, {
+      id,
+      type: id === 'streaming-thinking' ? 'thinking' : 'assistant_text',
+      content: `${existing?.content || ''}${pending}`,
+      timestamp: existing?.timestamp || timestamp,
+      ...(id === 'streaming-assistant' ? { model: this.getCurrentModel() } : {}),
+    } as AgentTranscriptBlock)
+  }
+
+  private flushTranscriptDelta(session: Session, id: string): void {
+    const pending = this.transcriptDeltaBuffers.get(id)
+    if (!pending) return
+    const block = session.transcript?.find(
+      item => item.id === id && (item.type === 'assistant_text' || item.type === 'thinking')
+    ) as Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }> | undefined
+    if (block) block.content += pending
+    this.transcriptDeltaBuffers.delete(id)
+  }
+
   private markToolTranscriptComplete(session: Session, toolUseId: string, isError: boolean): void {
     const block = session.transcript?.find(
       (item): item is Extract<AgentTranscriptBlock, { type: 'tool_use' }> => item.type === 'tool_use' && item.toolUseId === toolUseId
@@ -1301,6 +1340,7 @@ export class ChatService {
   }
 
   private finalizeCurrentThinkingSegment(session: Session): void {
+    this.flushTranscriptDelta(session, 'streaming-thinking')
     const streamingThinking = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> => block.type === 'thinking' && block.id === 'streaming-thinking'
     )
@@ -1310,6 +1350,7 @@ export class ChatService {
   }
 
   private finalizeCurrentStreamingAssistant(session: Session): void {
+    this.flushTranscriptDelta(session, 'streaming-assistant')
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
     )
@@ -1322,6 +1363,8 @@ export class ChatService {
   }
 
   private finalizeStreamingTranscript(session: Session): void {
+    this.flushTranscriptDelta(session, 'streaming-assistant')
+    this.flushTranscriptDelta(session, 'streaming-thinking')
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
     )
@@ -1456,4 +1499,42 @@ export class ChatService {
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
   }
+}
+
+const MAX_PERSISTED_TOOL_RESULT_CHARS = 2000
+
+function summarizeToolResult(content: unknown): unknown {
+  if (typeof content !== 'string') return content
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (content.length <= MAX_PERSISTED_TOOL_RESULT_CHARS) return content
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    parsed = undefined
+  }
+
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>
+    const text = typeof record.content === 'string' ? record.content : content
+    return {
+      success: record.success,
+      error: record.error,
+      content: `${text.slice(0, MAX_PERSISTED_TOOL_RESULT_CHARS)}\n[工具结果已摘要，原始大小 ${bytes} 字节]`,
+      metadata: summarizeMetadata(record.metadata),
+    }
+  }
+
+  return `${content.slice(0, MAX_PERSISTED_TOOL_RESULT_CHARS)}\n[工具结果已摘要，原始大小 ${bytes} 字节]`
+}
+
+function summarizeMetadata(metadata: unknown): unknown {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return metadata
+  const record = metadata as Record<string, unknown>
+  const result: Record<string, unknown> = {}
+  for (const key of ['path', 'absolutePath', 'size', 'totalBytes', 'returnedOffset', 'returnedBytes', 'truncated', 'nextRead']) {
+    if (key in record) result[key] = record[key]
+  }
+  return result
 }

@@ -2,6 +2,7 @@ import type { ToolCall } from '../../../types'
 import { Tool } from '../base/Tool'
 import { ToolExecutor, type ToolExecutionResult } from './ToolExecutor'
 import { ToolCallDeduplicator, type DedupDecision } from './ToolCallDeduplicator'
+import { performanceLog } from '../../../utils/performanceLogger'
 
 export interface RunToolsOutcome {
   results: ToolExecutionResult[]
@@ -14,6 +15,9 @@ export interface RunToolsOutcome {
 
 export class ToolOrchestrator {
   private deduplicator = new ToolCallDeduplicator()
+  private readonly concurrencyLimit = 4
+  private runningSafeTools = 0
+  private safeToolQueue: Array<() => void> = []
 
   constructor(
     private tools: Tool[],
@@ -37,7 +41,19 @@ export class ToolOrchestrator {
         return { toolCallId: toolCall.id, toolName: toolCall.name, content, contentBlocks }
       }
 
-      const result = await this.executor.runToolUse(toolCall)
+      const isSafe = this.isConcurrencySafe(toolCall.name)
+      const queuedAt = performance.now()
+      if (isSafe) await this.acquireSafeSlot()
+      const queueMs = isSafe ? Math.round(performance.now() - queuedAt) : 0
+      if (queueMs > 0) performanceLog('tool.queue', { toolName: toolCall.name, toolUseId: toolCall.id, queueMs })
+      let result: ToolExecutionResult
+      const executionStartedAt = performance.now()
+      try {
+        result = await this.executor.runToolUse(toolCall)
+      } finally {
+        if (isSafe) this.releaseSafeSlot()
+      }
+      performanceLog('tool.execution', { toolName: toolCall.name, toolUseId: toolCall.id, queueMs, durationMs: Math.round(performance.now() - executionStartedAt) })
       this.deduplicator.record(toolCall, result.content, result.contentBlocks)
       return result
     }
@@ -78,5 +94,24 @@ export class ToolOrchestrator {
     }
 
     return ['read_file', 'glob', 'grep', 'list_directory', 'find', 'task_list', 'task_get'].includes(toolName)
+  }
+
+  private acquireSafeSlot(): Promise<void> {
+    if (this.runningSafeTools < this.concurrencyLimit) {
+      this.runningSafeTools++
+      return Promise.resolve()
+    }
+    return new Promise(resolve => {
+      this.safeToolQueue.push(() => {
+        this.runningSafeTools++
+        resolve()
+      })
+    })
+  }
+
+  private releaseSafeSlot(): void {
+    this.runningSafeTools = Math.max(0, this.runningSafeTools - 1)
+    const next = this.safeToolQueue.shift()
+    if (next) next()
   }
 }

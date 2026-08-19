@@ -23,7 +23,10 @@
  */
 
 import * as vscode from 'vscode'
+import * as fs from 'fs/promises'
+import * as path from 'path'
 import type { Session, Message } from '../../types'
+import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
 
 /**
  * 持久化配置
@@ -63,6 +66,12 @@ export interface SessionData {
   currentSessionId: string | null
 }
 
+interface SessionIndex {
+  version: 2
+  currentSessionId: string | null
+  sessionIds: string[]
+}
+
 /**
  * 会话持久化服务
  */
@@ -91,6 +100,10 @@ export class SessionPersistenceService {
    * 性能优化：缓存上次保存的会话数据快照，用于增量比对
    */
   private lastSavedSnapshot?: Map<string, string>
+  private lastSavedCurrentSessionId?: string | null
+  private saveInFlight?: Promise<void>
+  private queuedSaveData?: SessionData
+  private readonly fileStorageDir?: string
 
   /**
    * 构造函数
@@ -102,6 +115,9 @@ export class SessionPersistenceService {
     private context: vscode.ExtensionContext,
     config?: PersistenceConfig
   ) {
+    this.fileStorageDir = context.globalStorageUri?.fsPath
+      ? path.join(context.globalStorageUri.fsPath, 'sessions')
+      : undefined
     this.config = {
       autoSaveDelay: config?.autoSaveDelay || 1000,
       maxSessions: config?.maxSessions || 50,
@@ -116,8 +132,29 @@ export class SessionPersistenceService {
    */
   async load(): Promise<SessionData> {
     try {
+      if (this.fileStorageDir) {
+        const fileData = await this.loadFromFiles()
+        if (fileData) return fileData
+      }
+
       // 从 globalState 读取
-      const data = this.context.globalState.get<SessionData>(this.STORAGE_KEY)
+      const stored = this.context.globalState.get<SessionData | SessionIndex>(this.STORAGE_KEY)
+
+      if (isSessionIndex(stored)) {
+        const entries = await Promise.all(
+          stored.sessionIds.map(async id => [id, this.context.globalState.get<Session>(this.sessionStorageKey(id))] as const)
+        )
+        const sessions: Record<string, Session> = {}
+        for (const [id, session] of entries) {
+          if (session) sessions[id] = session
+        }
+        const cleaned = this.cleanExpiredSessions({ sessions, currentSessionId: stored.currentSessionId })
+        this.lastSavedSnapshot = new Map(Object.entries(cleaned.sessions).map(([id, session]) => [id, this.createSessionSnapshot(session)]))
+        this.lastSavedCurrentSessionId = cleaned.currentSessionId
+        return cleaned
+      }
+
+      const data = stored as SessionData | undefined
 
       if (!data) {
         // 首次使用，返回空数据
@@ -160,6 +197,23 @@ export class SessionPersistenceService {
    * 立即保存（增量优化版本）
    */
   private async saveImmediate(data: SessionData): Promise<void> {
+    this.queuedSaveData = data
+    if (this.saveInFlight) return this.saveInFlight
+
+    this.saveInFlight = (async () => {
+      while (this.queuedSaveData) {
+        const next = this.queuedSaveData
+        this.queuedSaveData = undefined
+        await this.writeSnapshot(next)
+      }
+    })().finally(() => {
+      this.saveInFlight = undefined
+    })
+    return this.saveInFlight
+  }
+
+  private async writeSnapshot(data: SessionData): Promise<void> {
+    const startedAt = performance.now()
     try {
       // 限制会话数量
       const limited = this.limitSessions(data)
@@ -193,18 +247,120 @@ export class SessionPersistenceService {
 
       // 如果没有变更且 currentSessionId 也没变，跳过保存
       if (!hasChanges && this.lastSavedSnapshot &&
-          limited.currentSessionId === (await this.context.globalState.get<SessionData>(this.STORAGE_KEY))?.currentSessionId) {
+          limited.currentSessionId === this.lastSavedCurrentSessionId) {
+      performanceLog('persistence.skip', {
+          backend: this.fileStorageDir ? 'filesystem' : 'globalState',
+          sessionCount: Object.keys(limited.sessions).length,
+          durationMs: Math.round(performance.now() - startedAt),
+          ...performanceSnapshot(),
+        })
         return
       }
 
-      // 保存到 globalState
-      await this.context.globalState.update(this.STORAGE_KEY, limited)
+      const previousIds = this.lastSavedSnapshot ? Array.from(this.lastSavedSnapshot.keys()) : []
+      const removedIds = previousIds.filter(id => !currentSnapshot.has(id))
+      const index: SessionIndex = {
+        version: 2,
+        currentSessionId: limited.currentSessionId,
+        sessionIds: Object.keys(limited.sessions),
+      }
+      if (this.fileStorageDir) {
+        await this.writeFileSnapshot(changedSessions, removedIds, index)
+      } else {
+        // 兼容没有 globalStorageUri 的测试宿主和旧环境。
+        await Promise.all([
+          ...Object.entries(changedSessions).map(([id, session]) =>
+            this.context.globalState.update(this.sessionStorageKey(id), session)
+          ),
+          ...removedIds.map(id => this.context.globalState.update(this.sessionStorageKey(id), undefined)),
+        ])
+        await this.context.globalState.update(this.STORAGE_KEY, index)
+      }
 
       // 更新快照
       this.lastSavedSnapshot = currentSnapshot
+      this.lastSavedCurrentSessionId = limited.currentSessionId
+      performanceLog('persistence.save', {
+        backend: this.fileStorageDir ? 'filesystem' : 'globalState',
+        sessionCount: Object.keys(limited.sessions).length,
+        changedSessionCount: Object.keys(changedSessions).length,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...performanceSnapshot(),
+      })
     } catch (error) {
+      performanceLog('persistence.error', {
+        backend: this.fileStorageDir ? 'filesystem' : 'globalState',
+        durationMs: Math.round(performance.now() - startedAt),
+        error: error instanceof Error ? error.message : String(error),
+        ...performanceSnapshot(),
+      })
       console.error('保存会话失败:', error)
     }
+  }
+
+  private sessionStorageKey(id: string): string {
+    return `${this.STORAGE_KEY}.${id}`
+  }
+
+  private sessionFilePath(id: string): string {
+    return path.join(this.fileStorageDir!, `session-${encodeURIComponent(id)}.json`)
+  }
+
+  private indexFilePath(): string {
+    return path.join(this.fileStorageDir!, 'index.json')
+  }
+
+  private async loadFromFiles(): Promise<SessionData | undefined> {
+    try {
+      const index = JSON.parse(await fs.readFile(this.indexFilePath(), 'utf8')) as SessionIndex
+      if (!isSessionIndex(index)) return undefined
+      const entries = await Promise.all(
+        index.sessionIds.map(async id => {
+          try {
+            return [id, JSON.parse(await fs.readFile(this.sessionFilePath(id), 'utf8')) as Session] as const
+          } catch {
+            return [id, undefined] as const
+          }
+        })
+      )
+      const sessions: Record<string, Session> = {}
+      for (const [id, session] of entries) {
+        if (session) sessions[id] = session
+      }
+      const cleaned = this.cleanExpiredSessions({ sessions, currentSessionId: index.currentSessionId })
+      this.lastSavedSnapshot = new Map(Object.entries(cleaned.sessions).map(([id, session]) => [id, this.createSessionSnapshot(session)]))
+      this.lastSavedCurrentSessionId = cleaned.currentSessionId
+      return cleaned
+    } catch {
+      return undefined
+    }
+  }
+
+  private async writeFileSnapshot(
+    changedSessions: Record<string, Session>,
+    removedIds: string[],
+    index: SessionIndex
+  ): Promise<void> {
+    await fs.mkdir(this.fileStorageDir!, { recursive: true })
+    await Promise.all(
+      Object.entries(changedSessions).map(async ([id, session]) => {
+        const target = this.sessionFilePath(id)
+        const temporary = `${target}.${process.pid}.tmp`
+        await fs.writeFile(temporary, JSON.stringify(session), 'utf8')
+        await fs.rename(temporary, target)
+      })
+    )
+    await Promise.all(removedIds.map(async id => {
+      try {
+        await fs.unlink(this.sessionFilePath(id))
+      } catch {
+        // 文件已不存在时视为删除完成。
+      }
+    }))
+    const indexPath = this.indexFilePath()
+    const temporaryIndex = `${indexPath}.${process.pid}.tmp`
+    await fs.writeFile(temporaryIndex, JSON.stringify(index), 'utf8')
+    await fs.rename(temporaryIndex, indexPath)
   }
 
   /**
@@ -349,7 +505,24 @@ export class SessionPersistenceService {
    * 清空所有会话
    */
   async clear(): Promise<void> {
+    if (this.fileStorageDir) {
+      try {
+        const index = JSON.parse(await fs.readFile(this.indexFilePath(), 'utf8')) as SessionIndex
+        if (isSessionIndex(index)) {
+          await Promise.all(index.sessionIds.map(id => fs.unlink(this.sessionFilePath(id)).catch(() => undefined)))
+        }
+        await fs.unlink(this.indexFilePath()).catch(() => undefined)
+      } catch {
+        // 存储目录尚未创建时无需清理。
+      }
+    }
+    const stored = this.context.globalState.get<SessionIndex>(this.STORAGE_KEY)
+    if (isSessionIndex(stored)) {
+      await Promise.all(stored.sessionIds.map(id => this.context.globalState.update(this.sessionStorageKey(id), undefined)))
+    }
     await this.context.globalState.update(this.STORAGE_KEY, undefined)
+    this.lastSavedSnapshot = undefined
+    this.lastSavedCurrentSessionId = undefined
   }
 
   async flush(): Promise<void> {
@@ -371,4 +544,10 @@ export class SessionPersistenceService {
   dispose(): void {
     void this.flush()
   }
+}
+
+function isSessionIndex(value: unknown): value is SessionIndex {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Partial<SessionIndex>
+  return record.version === 2 && Array.isArray(record.sessionIds)
 }

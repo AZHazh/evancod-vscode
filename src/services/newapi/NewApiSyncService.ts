@@ -154,6 +154,7 @@ export class NewApiSyncService {
    * 站点 URL
    */
   private siteUrl: string
+  private pollController?: AbortController
 
   /**
    * 构造函数
@@ -178,6 +179,7 @@ export class NewApiSyncService {
    * @returns SyncSession 同步会话
    */
   startSync(): SyncSession {
+    this.cancel()
     const state = this.generateState()
     const authorizeUrl = new URL('/desktop-sync', this.siteUrl)
     authorizeUrl.searchParams.set('state', state)
@@ -291,8 +293,13 @@ export class NewApiSyncService {
    */
   async pollAuthorization(
     state: string,
-    onProgress?: (message: string) => void
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
   ): Promise<string> {
+    this.pollController = new AbortController()
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, this.pollController.signal])
+      : this.pollController.signal
     const maxAttempts = 150 // 5 分钟（2 秒 * 150）
     const pollInterval = 2000 // 2 秒
 
@@ -300,7 +307,8 @@ export class NewApiSyncService {
       try {
         const pollStartedAt = performance.now()
         const response = await this.client.get(
-          `/api/desktop-sync/sessions/${encodeURIComponent(state)}`
+          `/api/desktop-sync/sessions/${encodeURIComponent(state)}`,
+          { signal: combinedSignal }
         )
         performanceLog('newapi.authorization.poll', { attempt: attempt + 1, status: response.status, durationMs: Math.round(performance.now() - pollStartedAt) })
 
@@ -321,6 +329,9 @@ export class NewApiSyncService {
 
         await this.sleep(pollInterval)
       } catch (error) {
+        if (combinedSignal.aborted) {
+          throw new Error('授权已取消')
+        }
         if (axios.isAxiosError(error)) {
           if (error.code === 'ECONNREFUSED') {
             throw new Error('无法连接到 new-api 服务器，请检查 URL')
@@ -341,6 +352,11 @@ export class NewApiSyncService {
     throw new Error('授权超时（5分钟），请重试')
   }
 
+  cancel(): void {
+    this.pollController?.abort()
+    this.pollController = undefined
+  }
+
   /**
    * 用 code 交换 Token 列表
    * 调用 new-api 的 /api/desktop-sync/exchange 端点
@@ -350,7 +366,7 @@ export class NewApiSyncService {
    */
   async exchangeCode(code: string): Promise<ExchangeResponse> {
     try {
-      const response = await performanceMeasure('newapi.exchange.request', () => this.client.post('/api/desktop-sync/exchange', { code }), { site: this.siteUrl })
+    const response = await performanceMeasure('newapi.exchange.request', () => this.client.post('/api/desktop-sync/exchange', { code }, { signal: this.pollController?.signal }), { site: this.siteUrl })
 
       if (!response.data.success) {
         throw new Error(response.data.message || 'exchange 失败')

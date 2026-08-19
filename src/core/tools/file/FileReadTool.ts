@@ -30,6 +30,10 @@ interface FileReadArgs {
    * 文件路径（相对于工作目录）
    */
   path: string
+  /** 起始字节偏移，默认 0。 */
+  offset?: number
+  /** 请求读取的字节数，单次最多 32KB。 */
+  limit?: number
 }
 
 /**
@@ -49,6 +53,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
  * 约 3.75MB 原始字节，base64 后约 5MB。
  */
 const MAX_INLINE_IMAGE_BYTES = 3.75 * 1024 * 1024
+const MAX_READ_BYTES = 32 * 1024
 
 /**
  * FileReadTool 实现
@@ -92,6 +97,14 @@ export class FileReadTool extends Tool {
             type: 'string',
             description: '要读取的文件路径（相对于项目根目录）',
           },
+          offset: {
+            type: 'number',
+            description: '起始字节偏移，默认 0；配合 limit 分段读取',
+          },
+          limit: {
+            type: 'number',
+            description: '读取字节数，默认 32KB，单次最多 32KB',
+          },
         },
         required: ['path'],
       },
@@ -132,10 +145,20 @@ export class FileReadTool extends Tool {
       const ext = path.extname(args.path).toLowerCase()
       const imageMime = IMAGE_MIME_BY_EXT[ext]
 
-      // 4a. 图片：读原始字节 → base64。
+      const requestedOffset = Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset!)) : 0
+      const requestedLimit = Number.isFinite(args.limit) ? Math.max(0, Math.floor(args.limit!)) : MAX_READ_BYTES
+
+      // 4a. 图片：先检查大小，再读原始字节 → base64。
       // base64 仅通过 metadata._webviewOnly 传给前端预览 + 由 ToolExecutor 转成
       // vision block 送模型，绝不作为文本 content 回灌（否则乱码 + 撑爆上下文）。
       if (imageMime) {
+        const imageStat = await this.fs.stat(absolutePath)
+        if (imageStat.size > MAX_INLINE_IMAGE_BYTES) {
+          return this.createSuccessResult(
+            `[图片文件 ${args.path}，${formatBytes(imageStat.size)}，超过内联上限，未加载。如需查看请压缩后重试]`,
+            { path: args.path, absolutePath, size: imageStat.size }
+          )
+        }
         const bytes = await this.fs.readFileRaw(absolutePath)
         if (bytes.byteLength > MAX_INLINE_IMAGE_BYTES) {
           return this.createSuccessResult(
@@ -161,24 +184,36 @@ export class FileReadTool extends Tool {
         )
       }
 
-      // 4b. 读文本内容
-      const content = await this.fs.readFile(absolutePath)
+      // 4b. 按范围读取文本，避免大文件一次性进入扩展宿主内存。
+      const stat = await this.fs.stat(absolutePath)
+      const offset = Math.min(requestedOffset, stat.size)
+      const length = Math.min(requestedLimit, MAX_READ_BYTES, Math.max(0, stat.size - offset))
+      const content = await this.fs.readFileRange(absolutePath, offset, length)
 
       // 4c. 二进制探测：文本解码后含 NUL 字符或大量替换字符（U+FFFD），说明是二进制。
       // 不返回内容，仅回占位符，避免乱码污染上下文。
       if (looksBinary(content)) {
-        const bytes = await this.fs.readFileRaw(absolutePath)
         return this.createSuccessResult(
-          `[二进制文件 ${args.path}，${formatBytes(bytes.byteLength)}，无法以文本显示]`,
-          { path: args.path, absolutePath, size: bytes.byteLength }
+          `[二进制文件 ${args.path}，${formatBytes(stat.size)}，无法以文本显示]`,
+          { path: args.path, absolutePath, size: stat.size }
         )
       }
 
       // 5. 返回文本结果
+      const returnedBytes = Buffer.byteLength(content, 'utf8')
+      const nextOffset = offset + returnedBytes
+      const truncated = nextOffset < stat.size
       return this.createSuccessResult(content, {
         path: args.path,
         absolutePath,
-        size: content.length,
+        size: stat.size,
+        totalBytes: stat.size,
+        returnedOffset: offset,
+        returnedBytes,
+        truncated,
+        ...(truncated
+          ? { nextRead: { path: args.path, offset: nextOffset, limit: MAX_READ_BYTES } }
+          : {}),
       })
     } catch (error) {
       // 文件不存在时给出友好提示（原先靠先行 exists 检查，现在合并为一次读 + 捕获）

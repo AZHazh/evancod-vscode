@@ -114,31 +114,17 @@ export async function activate(context: vscode.ExtensionContext) {
   )
 
   try {
-    // 初始化 Provider 服务（从 ~/.claude/cc-evancod/providers.json 加载配置）
+    // 只在激活关键路径加载 Provider 和 Task；其余重量级服务在扩展可用后后台初始化，
+    // 避免多个文件扫描/解析任务同时争用 Extension Host 的事件循环。
     providerService = new ProviderService(context)
-    await performanceMeasure('startup.provider.initialize', () => providerService.initialize())
-
-    // 初始化 Task 管理服务
     taskManager = new TaskManager(context)
-    await performanceMeasure('startup.task.load', () => taskManager.load())
-
-    // 初始化 Plan Mode 管理服务
     planModeManager = new PlanModeManager(context)
-
-    // 初始化 Agent 协调器
     agentCoordinator = new AgentCoordinator(context)
-
-    // 初始化 MCP 连接管理器
     mcpManager = new MCPConnectionManager(context)
-    await performanceMeasure('startup.mcp.initialize', () => mcpManager.initialize())
-
-    // 初始化 Skill 管理器
     skillManager = new SkillManager(context)
-    await performanceMeasure('startup.skill.initialize', () => skillManager.initialize())
-
-    // 初始化 Memory 管理器
     memoryManager = new MemoryManager(context)
-    await performanceMeasure('startup.memory.initialize', () => memoryManager.initialize())
+    await performanceMeasure('startup.provider.initialize', () => providerService.initialize())
+    await performanceMeasure('startup.task.load', () => taskManager.load())
 
     // 初始化聊天服务（传入所有服务）
     chatService = new ChatService(
@@ -184,6 +170,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
     console.log('Evancod services initialized')
     performanceLog('extension.activate.complete')
+
+    // 后台初始化不阻塞激活完成；各服务内部已有错误隔离，单项失败不影响扩展可用。
+    void Promise.resolve()
+      .then(() => performanceMeasure('startup.mcp.initialize', () => mcpManager.initialize()))
+      .then(() => performanceMeasure('startup.skill.initialize', () => skillManager.initialize()))
+      .then(() => performanceMeasure('startup.memory.initialize', () => memoryManager.initialize()))
+      .catch(error => {
+        performanceLog('startup.background.error', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error('Evancod initialization failed:', error)

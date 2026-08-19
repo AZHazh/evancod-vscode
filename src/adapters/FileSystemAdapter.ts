@@ -75,6 +75,9 @@ export interface IFileSystemAdapter {
    */
   readFileRaw(path: string): Promise<Uint8Array>
 
+  /** 按字节范围读取 UTF-8 文本，避免为分段读取加载完整文件。 */
+  readFileRange(path: string, offset: number, length: number): Promise<string>
+
   /**
    * 读取文件原始字节
    *
@@ -204,6 +207,17 @@ export class VSCodeFileSystemAdapter implements IFileSystemAdapter {
       return await fsp.readFile(filePath)
     } catch (error) {
       throw new Error(`Failed to read file ${filePath}: ${error}`)
+    }
+  }
+
+  async readFileRange(filePath: string, offset: number, length: number): Promise<string> {
+    const handle = await fsp.open(filePath, 'r')
+    try {
+      const buffer = Buffer.alloc(Math.max(0, length))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, Math.max(0, offset))
+      return buffer.subarray(0, bytesRead).toString('utf-8')
+    } finally {
+      await handle.close()
     }
   }
 
@@ -356,6 +370,11 @@ export class MockFileSystemAdapter implements IFileSystemAdapter {
       throw new Error(`File not found: ${path}`)
     }
     return Buffer.from(content, 'utf-8')
+  }
+
+  async readFileRange(path: string, offset: number, length: number): Promise<string> {
+    const content = await this.readFile(path)
+    return Buffer.from(content, 'utf-8').subarray(Math.max(0, offset), Math.max(0, offset) + Math.max(0, length)).toString('utf-8')
   }
 
   async writeFile(path: string, content: string): Promise<void> {
