@@ -14,7 +14,14 @@
  */
 
 import * as vscode from 'vscode'
-import type { Session, Message, AttachmentContext, AgentTranscriptBlock, TokenUsage, Provider } from '../../types'
+import type {
+  Session,
+  Message,
+  AttachmentContext,
+  AgentTranscriptBlock,
+  TokenUsage,
+  Provider,
+} from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { ProviderService } from '../provider/ProviderService'
 import { TaskManager } from '../task/TaskManager'
@@ -24,7 +31,11 @@ import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
 import { QueryCancelledError, QueryEngine } from '../../core/engine/QueryEngine'
-import { readImageAsBase64, saveGeneratedImages, timestampedImagePath } from '../../core/tools/image/imageStorage'
+import {
+  readImageAsBase64,
+  saveGeneratedImages,
+  timestampedImagePath,
+} from '../../core/tools/image/imageStorage'
 import { buildOpenAIImageUrl, downloadAsBase64 } from '../../core/tools/image/imageUtils'
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
@@ -54,7 +65,7 @@ export class ChatService {
    * 劣势：
    * - 插件重启后丢失（需要持久化）
    *
-   * TODO Phase 2 Week 3: 实现持久化到 ~/.claude/projects/<workspace>/sessions/
+   * 会话持久化由 SessionPersistenceService 写入 Evancod 专属存储目录。
    */
   private sessions: Session[] = []
 
@@ -121,9 +132,10 @@ export class ChatService {
   async initialize(): Promise<void> {
     const data = await this.persistence.load()
     this.sessions = Object.values(data.sessions).sort((a, b) => b.updatedAt - a.updatedAt)
-    this.currentSessionId = data.currentSessionId && data.sessions[data.currentSessionId]
-      ? data.currentSessionId
-      : this.sessions[0]?.id || null
+    this.currentSessionId =
+      data.currentSessionId && data.sessions[data.currentSessionId]
+        ? data.currentSessionId
+        : this.sessions[0]?.id || null
     this.taskManager.setCurrentSession(this.currentSessionId)
     if (this.currentSessionId) {
       await this.taskManager.load()
@@ -322,7 +334,8 @@ export class ChatService {
     )
 
     const transcript = session.transcript.map(block => {
-      if (block.type !== 'image_generation' || !block.image?.path || block.image.base64) return block
+      if (block.type !== 'image_generation' || !block.image?.path || block.image.base64)
+        return block
       const base64 = base64ByPath.get(block.image.path)
       if (!base64) return block
       return { ...block, image: { ...block.image, base64 } }
@@ -423,9 +436,28 @@ export class ChatService {
     }))
   }
 
-  handlePermissionResponse(response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) {
+  handlePermissionResponse(response: {
+    requestId: string
+    approved: boolean
+    reason?: string
+    updatedInput?: unknown
+    rule?: 'once' | 'always'
+  }) {
     this.recordPermissionResponse(response)
     this.queryEngine?.handlePermissionResponse(response)
+  }
+
+  handleInteractionResponse(response: {
+    requestId: string
+    answered: boolean
+    answers?: unknown
+    reason?: string
+  }): boolean {
+    const handled = this.queryEngine?.handleInteractionResponse(response) ?? false
+    if (handled) {
+      this.recordInteractionResponse(response)
+    }
+    return handled
   }
 
   cancelBash(toolUseId: string, taskId?: string): boolean {
@@ -435,11 +467,10 @@ export class ChatService {
   async stopGeneration(): Promise<Session | null> {
     const session = this.getCurrentSession()
     this.queryEngine?.cancel('用户停止生成')
+    const cancelSubAgents = this.agentCoordinator.cancelAllAgents('用户停止生成')
 
     const activeRequest = this.activeRequest
-    if (activeRequest) {
-      await activeRequest.catch(() => undefined)
-    }
+    await Promise.all([activeRequest?.catch(() => undefined), cancelSubAgents])
 
     if (session) {
       this.expirePendingTranscript(session)
@@ -493,7 +524,10 @@ export class ChatService {
    * Phase 2 Week 2: 实现真实的 API 调用
    * Phase 2 Week 3: 实现图片上传
    */
-  async sendMessage(content: string, attachments: (string | AttachmentContext)[] = []): Promise<void> {
+  async sendMessage(
+    content: string,
+    attachments: (string | AttachmentContext)[] = []
+  ): Promise<void> {
     const previousRequest = this.activeRequest
     const request = this.requestQueue
       .catch(() => undefined)
@@ -514,12 +548,19 @@ export class ChatService {
     }
   }
 
-  private async runMessage(content: string, attachments: (string | AttachmentContext)[] = []): Promise<void> {
+  private async runMessage(
+    content: string,
+    attachments: (string | AttachmentContext)[] = []
+  ): Promise<void> {
     // 1. 验证会话
     const session = this.getCurrentSession()
     if (!session) {
       throw new Error('No active session')
     }
+
+    // Memory 虽在扩展启动后后台加载，但首个 Query 必须等待它就绪，
+    // 避免用户刚启动就提问时漏掉项目记忆。
+    await this.memoryManager.initialize()
 
     const commandResult = await this.resolveSlashCommand(content, session)
     if (commandResult.handled) {
@@ -544,10 +585,11 @@ export class ChatService {
     const isFirstUserMessage = session.messages.length === 0
 
     // 2. 创建用户消息，先更新 UI；最终以 QueryEngine 的完整消息历史为准
+    const displayContent = commandResult.displayContent || commandResult.content
     const userMessage: Message = {
       id: this.generateId(),
       role: 'user',
-      content: messageContent,
+      content: displayContent,
       timestamp: Date.now(),
       contentBlocks: userContentBlocks,
       attachments: attachmentContexts,
@@ -556,7 +598,7 @@ export class ChatService {
 
     // 首条消息：用对话内容作为会话标题（替换默认的创建时间标题）
     if (isFirstUserMessage) {
-      const title = commandResult.content.trim().replace(/\s+/g, ' ')
+      const title = displayContent.trim().replace(/\s+/g, ' ')
       if (title) {
         session.name = title.length > 100 ? title.slice(0, 100) : title
       }
@@ -565,7 +607,7 @@ export class ChatService {
     this.appendOrUpdateTranscript(session, {
       id: userMessage.id,
       type: 'user_text',
-      content: commandResult.content,
+      content: displayContent,
       timestamp: userMessage.timestamp,
       attachments: attachmentContexts,
     })
@@ -593,6 +635,7 @@ export class ChatService {
 
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
       session.messages = this.queryEngine!.getMessages()
+      this.restoreDisplayedCommand(session.messages, commandResult.content, displayContent)
       session.updatedAt = Date.now()
       session.messageCount = session.messages.length
 
@@ -611,6 +654,7 @@ export class ChatService {
       if (this.queryEngine) {
         this.queryEngine.closeDanglingToolCalls()
         session.messages = this.queryEngine.getMessages()
+        this.restoreDisplayedCommand(session.messages, commandResult.content, displayContent)
       }
 
       if (error instanceof QueryCancelledError) {
@@ -677,7 +721,12 @@ export class ChatService {
     const now = Date.now()
 
     // 1. 发送骨架屏事件
-    const startEvent = { type: 'image_generation' as const, imageId, phase: 'start' as const, prompt }
+    const startEvent = {
+      type: 'image_generation' as const,
+      imageId,
+      phase: 'start' as const,
+      prompt,
+    }
     this.recordAgentEvent(startEvent)
     this.agentEventCallback?.(startEvent)
 
@@ -725,7 +774,7 @@ export class ChatService {
 
       // 解析图片：优先 url 下载转 base64，其次 b64_json
       let base64: string | undefined
-      let mime = 'image/png'
+      const mime = 'image/png'
       for (const item of items) {
         const b64 = typeof item?.b64_json === 'string' && item.b64_json ? item.b64_json : undefined
         const remoteUrl = typeof item?.url === 'string' && item.url ? item.url : undefined
@@ -738,7 +787,11 @@ export class ChatService {
       }
 
       // 保存到磁盘
-      const saved = await saveGeneratedImages(session.workDir, [{ base64, mime }], timestampedImagePath(mime))
+      const saved = await saveGeneratedImages(
+        session.workDir,
+        [{ base64, mime }],
+        timestampedImagePath(mime)
+      )
       const savedPath = saved.length > 0 ? saved[0].path : undefined
       const name = saved.length > 0 ? saved[0].name : undefined
 
@@ -752,7 +805,6 @@ export class ChatService {
       }
       this.recordAgentEvent(completeEvent)
       this.agentEventCallback?.(completeEvent)
-
     } catch (error) {
       console.error('[ChatService] handleDirectImageGeneration error:', error)
       // 生成失败：发送一条 assistant 错误消息
@@ -782,15 +834,36 @@ export class ChatService {
     }
   }
 
-  private async resolveSlashCommand(content: string, session: Session): Promise<{ handled: boolean; content: string }> {
+  private async resolveSlashCommand(
+    content: string,
+    session: Session
+  ): Promise<{ handled: boolean; content: string; displayContent?: string }> {
     const parsedCommand = commandManager.parse(content.trim())
     if (!parsedCommand) {
       return { handled: false, content }
     }
 
     const result = await commandManager.execute(parsedCommand)
+
+    if (result.success && result.metadata?.action === 'init') {
+      try {
+        const initialized = await this.memoryManager.initializeProjectMemories()
+        const created = initialized.created.length
+          ? initialized.created.join('、')
+          : '无（基础文件已存在）'
+        const sources = initialized.sources.length ? initialized.sources.join('、') : '项目目录结构'
+        result.message += `\n\n扩展已完成本地基础初始化。新建文件：${created}。基础信息来源：${sources}。请在这些文件上继续补充，不要重新创建 MEMORY.md。`
+      } catch (error) {
+        result.message += `\n\n本地基础初始化失败：${error instanceof Error ? error.message : '未知错误'}。请继续使用工具完成初始化，并向用户说明失败原因。`
+      }
+    }
+
     if (!result.success || result.sendToAI) {
-      return { handled: false, content: result.message }
+      return {
+        handled: false,
+        content: result.message,
+        ...(result.sendToAI ? { displayContent: content.trim() } : {}),
+      }
     }
 
     if (result.metadata?.action === 'clear') {
@@ -884,6 +957,22 @@ export class ChatService {
     return { handled: true, content }
   }
 
+  private restoreDisplayedCommand(
+    messages: Message[],
+    internalContent: string,
+    displayContent: string
+  ): void {
+    if (internalContent === displayContent) return
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role === 'user' && message.content === internalContent) {
+        message.content = displayContent
+        return
+      }
+    }
+  }
+
   private buildMessageContent(content: string, attachments: AttachmentContext[]): string {
     const parts = [content]
 
@@ -901,14 +990,24 @@ export class ChatService {
 
     const nonTextAttachments = attachments.filter(attachment => attachment.kind !== 'text')
     if (nonTextAttachments.length) {
-      parts.push(`已附加非文本上下文：\n${nonTextAttachments.map(file => `- ${file.path} (${file.kind})`).join('\n')}`)
+      parts.push(
+        `已附加非文本上下文：\n${nonTextAttachments.map(file => `- ${file.path} (${file.kind})`).join('\n')}`
+      )
     }
 
     return parts.join('\n\n')
   }
 
   private buildUserContentBlocks(content: string, attachments: AttachmentContext[]) {
-    const blocks: NonNullable<Message['contentBlocks']> = [{ type: 'text', text: this.buildMessageContent(content, attachments.filter(attachment => attachment.kind === 'text')) }]
+    const blocks: NonNullable<Message['contentBlocks']> = [
+      {
+        type: 'text',
+        text: this.buildMessageContent(
+          content,
+          attachments.filter(attachment => attachment.kind === 'text')
+        ),
+      },
+    ]
 
     for (const attachment of attachments) {
       if (attachment.kind === 'image' && attachment.base64 && attachment.mime) {
@@ -926,7 +1025,9 @@ export class ChatService {
     return blocks
   }
 
-  private async resolveAttachments(attachments: (string | AttachmentContext)[]): Promise<AttachmentContext[]> {
+  private async resolveAttachments(
+    attachments: (string | AttachmentContext)[]
+  ): Promise<AttachmentContext[]> {
     const results: AttachmentContext[] = []
 
     for (const attachment of attachments) {
@@ -1113,6 +1214,24 @@ export class ChatService {
     this.saveSessions(true)
   }
 
+  private recordInteractionResponse(response: {
+    requestId: string
+    answered: boolean
+  }): void {
+    const session = this.getCurrentSession()
+    if (!session?.transcript) return
+
+    const block = session.transcript.find(
+      (item): item is Extract<AgentTranscriptBlock, { type: 'interaction_request' }> =>
+        item.type === 'interaction_request' && item.requestId === response.requestId,
+    )
+    if (!block) return
+
+    block.responseState = response.answered ? 'answered' : 'cancelled'
+    session.updatedAt = Date.now()
+    this.saveSessions(true)
+  }
+
   private recordAgentEvent(event: AgentServerEvent): void {
     const session = this.getCurrentSession()
     if (!session) return
@@ -1124,7 +1243,8 @@ export class ChatService {
         if (typeof event.text === 'string') {
           // 首次收到最终回答文本时，finalize 当前 thinking 段（如果有）
           const existing = session.transcript?.find(
-            (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
+            (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
+              block.type === 'assistant_text' && block.id === 'streaming-assistant'
           )
           if (!existing) {
             this.finalizeCurrentThinkingSegment(session)
@@ -1169,6 +1289,20 @@ export class ChatService {
         this.appendOrUpdateTranscript(session, {
           id: event.requestId,
           type: 'permission_request',
+          requestId: event.requestId,
+          toolName: event.toolName,
+          toolUseId: event.toolUseId,
+          input: event.input,
+          description: event.description,
+          timestamp: now,
+          responseState: 'pending',
+        })
+        break
+
+      case 'interaction_request':
+        this.appendOrUpdateTranscript(session, {
+          id: event.requestId,
+          type: 'interaction_request',
           requestId: event.requestId,
           toolName: event.toolName,
           toolUseId: event.toolUseId,
@@ -1258,7 +1392,11 @@ export class ChatService {
     // 只在关键节点（tool_use_complete / tool_result / message_complete / permission_request 等）保存。
     // content_delta 和 thinking 的 transcript 更新已在上面写入内存，延迟保存不影响数据正确性
     // （SessionPersistenceService 的延迟保存会在 1s 后统一写盘）。
-    if (event.type !== 'content_delta' && event.type !== 'thinking' && event.type !== 'bash_output') {
+    if (
+      event.type !== 'content_delta' &&
+      event.type !== 'thinking' &&
+      event.type !== 'bash_output'
+    ) {
       this.saveSessions()
     }
   }
@@ -1312,7 +1450,8 @@ export class ChatService {
 
   private markToolTranscriptComplete(session: Session, toolUseId: string, isError: boolean): void {
     const block = session.transcript?.find(
-      (item): item is Extract<AgentTranscriptBlock, { type: 'tool_use' }> => item.type === 'tool_use' && item.toolUseId === toolUseId
+      (item): item is Extract<AgentTranscriptBlock, { type: 'tool_use' }> =>
+        item.type === 'tool_use' && item.toolUseId === toolUseId
     )
     if (!block) return
     block.isPending = false
@@ -1329,10 +1468,13 @@ export class ChatService {
   private updateBashTranscript(
     session: Session,
     toolUseId: string,
-    updater: (bash: NonNullable<Extract<AgentTranscriptBlock, { type: 'tool_use' }>['bash']>) => NonNullable<Extract<AgentTranscriptBlock, { type: 'tool_use' }>['bash']>
+    updater: (
+      bash: NonNullable<Extract<AgentTranscriptBlock, { type: 'tool_use' }>['bash']>
+    ) => NonNullable<Extract<AgentTranscriptBlock, { type: 'tool_use' }>['bash']>
   ): void {
     const block = session.transcript?.find(
-      (item): item is Extract<AgentTranscriptBlock, { type: 'tool_use' }> => item.type === 'tool_use' && item.toolUseId === toolUseId
+      (item): item is Extract<AgentTranscriptBlock, { type: 'tool_use' }> =>
+        item.type === 'tool_use' && item.toolUseId === toolUseId
     )
     if (!block) return
     block.bash = updater(block.bash || { stdout: '', stderr: '' })
@@ -1342,7 +1484,8 @@ export class ChatService {
   private finalizeCurrentThinkingSegment(session: Session): void {
     this.flushTranscriptDelta(session, 'streaming-thinking')
     const streamingThinking = session.transcript?.find(
-      (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> => block.type === 'thinking' && block.id === 'streaming-thinking'
+      (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
+        block.type === 'thinking' && block.id === 'streaming-thinking'
     )
     if (streamingThinking && streamingThinking.content.trim()) {
       streamingThinking.id = this.generateId()
@@ -1352,7 +1495,8 @@ export class ChatService {
   private finalizeCurrentStreamingAssistant(session: Session): void {
     this.flushTranscriptDelta(session, 'streaming-assistant')
     const streaming = session.transcript?.find(
-      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
+      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
+        block.type === 'assistant_text' && block.id === 'streaming-assistant'
     )
     // 给当前文字段分配永久 id，下一段文字将开启新块并追加在工具之后，
     // 使后端 transcript 保持「文字↔工具」的原始交错顺序（否则文字会全部
@@ -1366,7 +1510,8 @@ export class ChatService {
     this.flushTranscriptDelta(session, 'streaming-assistant')
     this.flushTranscriptDelta(session, 'streaming-thinking')
     const streaming = session.transcript?.find(
-      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> => block.type === 'assistant_text' && block.id === 'streaming-assistant'
+      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
+        block.type === 'assistant_text' && block.id === 'streaming-assistant'
     )
     if (streaming) {
       streaming.id = this.generateId()
@@ -1390,8 +1535,11 @@ export class ChatService {
           block.bash.status = 'cancelled'
         }
       }
-      if (block.type === 'permission_request' && !block.responseState) {
+      if (block.type === 'permission_request' && block.responseState === 'pending') {
         block.expired = true
+      }
+      if (block.type === 'interaction_request' && block.responseState === 'pending') {
+        block.responseState = 'cancelled'
       }
     }
   }
@@ -1431,7 +1579,7 @@ export class ChatService {
     if (contextParts.length > 0) {
       messages.unshift({
         id: 'runtime-context',
-        role: 'user',  // 改为 user，确保不会被 API 客户端过滤
+        role: 'user', // 改为 user，确保不会被 API 客户端过滤
         content: `以下是会话的上下文信息，请参考：\n\n${contextParts.join('\n\n')}`,
         timestamp: Date.now(),
       })
@@ -1475,7 +1623,10 @@ export class ChatService {
   }
 
   private isTextLike(filePath: string, mime: string, bytes: Uint8Array): boolean {
-    if (mime.startsWith('text/') || ['application/json', 'application/xml', 'application/yaml'].includes(mime)) {
+    if (
+      mime.startsWith('text/') ||
+      ['application/json', 'application/xml', 'application/yaml'].includes(mime)
+    ) {
       return true
     }
 
@@ -1533,7 +1684,16 @@ function summarizeMetadata(metadata: unknown): unknown {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return metadata
   const record = metadata as Record<string, unknown>
   const result: Record<string, unknown> = {}
-  for (const key of ['path', 'absolutePath', 'size', 'totalBytes', 'returnedOffset', 'returnedBytes', 'truncated', 'nextRead']) {
+  for (const key of [
+    'path',
+    'absolutePath',
+    'size',
+    'totalBytes',
+    'returnedOffset',
+    'returnedBytes',
+    'truncated',
+    'nextRead',
+  ]) {
     if (key in record) result[key] = record[key]
   }
   return result

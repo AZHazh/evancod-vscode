@@ -19,7 +19,7 @@
  * ```
  *
  * Skill 目录结构（双目录）：
- * - 全局：~/.claude/cc-evancod/skills/      （所有项目共享）
+ * - 全局：~/.evancod/skills/                （所有项目共享）
  *   - commit.md
  *   - review.md
  * - 工作区：<workspace>/.evancod/skills/     （随项目走，可进版本库）
@@ -68,7 +68,7 @@ export interface SkillMetadata {
 
 /**
  * Skill 来源
- * - global：全局目录 ~/.claude/cc-evancod/skills/
+ * - global：全局目录 ~/.evancod/skills/
  * - workspace：工作区目录 <workspace>/.evancod/skills/
  */
 export type SkillSource = 'global' | 'workspace'
@@ -104,6 +104,7 @@ export class SkillManager {
 
   /** 全局 Skills 目录路径 */
   private globalSkillsDir: string
+  private legacyGlobalSkillsDir: string
 
   /** 工作区 Skills 目录路径（无工作区时为 undefined） */
   private workspaceSkillsDir?: string
@@ -117,9 +118,10 @@ export class SkillManager {
    * @param context - VSCode Extension Context
    */
   constructor(private context: vscode.ExtensionContext) {
-    // 全局 Skills 目录：~/.claude/cc-evancod/skills/
+    // Evancod 使用自己的用户目录；旧 Claude 路径只用于兼容读取。
     const homeDir = os.homedir()
-    this.globalSkillsDir = path.join(homeDir, '.claude', 'cc-evancod', 'skills')
+    this.globalSkillsDir = path.join(homeDir, '.evancod', 'skills')
+    this.legacyGlobalSkillsDir = path.join(homeDir, '.claude', 'cc-evancod', 'skills')
 
     // 工作区 Skills 目录：<workspace>/.evancod/skills/
     const workspaceFolders = vscode.workspace.workspaceFolders
@@ -209,7 +211,8 @@ enabled: true
    */
   private async loadAllSkills(): Promise<void> {
     this.skills.clear()
-    // 全局优先加载，工作区随后加载以覆盖同名项
+    // 旧全局目录优先，新的 Evancod 全局目录和工作区目录依次覆盖同名项。
+    await this.loadSkillsFromDir(this.legacyGlobalSkillsDir, 'global')
     await this.loadSkillsFromDir(this.globalSkillsDir, 'global')
     if (this.workspaceSkillsDir) {
       await this.loadSkillsFromDir(this.workspaceSkillsDir, 'workspace')
@@ -391,7 +394,7 @@ enabled: true
    * 因此任何变化都触发一次全量重载，保证 Map 状态始终正确。
    */
   private setupFileWatcher(): void {
-    const dirs = [this.globalSkillsDir]
+    const dirs = [this.legacyGlobalSkillsDir, this.globalSkillsDir]
     if (this.workspaceSkillsDir) {
       dirs.push(this.workspaceSkillsDir)
     }
@@ -498,7 +501,15 @@ enabled: true
 
       const content = `---\n${frontmatter}\n---\n\n${skill.content}`
 
-      const fileUri = vscode.Uri.file(skill.filePath)
+      const targetPath = skill.filePath.startsWith(this.legacyGlobalSkillsDir)
+        ? path.join(this.globalSkillsDir, `${skill.metadata.name}.md`)
+        : skill.filePath
+      if (targetPath !== skill.filePath) {
+        await vscode.workspace.fs.createDirectory(vscode.Uri.file(this.globalSkillsDir))
+        skill.filePath = targetPath
+        skill.skillDir = this.globalSkillsDir
+      }
+      const fileUri = vscode.Uri.file(targetPath)
       await vscode.workspace.fs.writeFile(fileUri, Buffer.from(content, 'utf-8'))
     } catch (error) {
       console.error(`Failed to save skill ${skill.metadata.name}:`, error)

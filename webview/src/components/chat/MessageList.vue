@@ -125,6 +125,7 @@ const showThinkingIndicator = computed(() => {
 })
 const streamingVerb = computed(() => {
   if (chatStore.chatState === 'waiting_permission') return '等待授权'
+  if (chatStore.chatState === 'waiting_interaction') return '等待回答'
   return '思考中...'
 })
 const thinkingElapsedSeconds = computed(() =>

@@ -13,7 +13,7 @@
  * 支持的问题类型：
  * - 单选：从多个选项中选择一个
  * - 多选：从多个选项中选择多个
- * - 自定义输入：用户自己输入文本
+ * - 自定义输入：每个问题都允许用户输入选项之外的答案
  *
  * 示例：
  * 用户："添加用户认证"
@@ -25,14 +25,12 @@
  *     { label: "Session", description: "使用服务器端会话，需要 Redis 或内存存储" },
  *     { label: "OAuth2", description: "使用第三方 OAuth2 提供商" }
  *   ],
- *   allowCustomInput: false
  * })
  *
  * 参数：
  * - question: 问题文本（必需）
  * - options: 选项列表（必需）
  * - allowMultiple: 是否允许多选（可选，默认 false）
- * - allowCustomInput: 是否允许自定义输入（可选，默认 false）
  */
 
 import { Tool, ToolDefinition, ToolResult } from '../base/Tool'
@@ -52,9 +50,6 @@ export interface QuestionOption {
   preview?: string
 }
 
-/**
- * 用户回答
- */
 export interface UserAnswer {
   /** 选中的选项标签列表 */
   selectedOptions: string[]
@@ -63,66 +58,10 @@ export interface UserAnswer {
   customInput?: string
 }
 
-/**
- * 问题回调管理器
- * 用于存储等待回答的问题和回调
- */
-class QuestionCallbackManager {
-  private static instance: QuestionCallbackManager
-  private callbacks: Map<string, (answer: UserAnswer) => void> = new Map()
-
-  private constructor() {}
-
-  static getInstance(): QuestionCallbackManager {
-    if (!QuestionCallbackManager.instance) {
-      QuestionCallbackManager.instance = new QuestionCallbackManager()
-    }
-    return QuestionCallbackManager.instance
-  }
-
-  /**
-   * 注册回调
-   *
-   * @param questionId - 问题 ID
-   * @param callback - 回调函数
-   */
-  registerCallback(questionId: string, callback: (answer: UserAnswer) => void): void {
-    this.callbacks.set(questionId, callback)
-  }
-
-  /**
-   * 触发回调
-   *
-   * @param questionId - 问题 ID
-   * @param answer - 用户回答
-   * @returns 是否找到并触发回调
-   */
-  triggerCallback(questionId: string, answer: UserAnswer): boolean {
-    const callback = this.callbacks.get(questionId)
-    if (callback) {
-      callback(answer)
-      this.callbacks.delete(questionId)
-      return true
-    }
-    return false
-  }
-
-  /**
-   * 取消回调
-   *
-   * @param questionId - 问题 ID
-   */
-  cancelCallback(questionId: string): void {
-    this.callbacks.delete(questionId)
-  }
-}
-
 export class AskUserQuestionTool extends Tool {
   readonly name = 'ask_user_question'
   readonly description =
-    '向用户提问以获取选择或输入。用于需求不明确、多个方案选择、需要用户决策的场景。支持单选、多选和自定义输入。'
-
-  private callbackManager = QuestionCallbackManager.getInstance()
+    '暂停当前任务并向用户收集继续执行所需的信息。仅在无法从工作区确认关键需求，或多个合理方案会显著改变架构、技术选型、公开 API、数据、安全性、兼容性、用户体验或操作范围时使用。不要用于可通过搜索代码解决的问题，也不要询问局部、可逆的实现细节。支持一次询问 1-4 个单选或多选问题；用户始终可以输入自定义答案。'
 
   /**
    * 获取工具定义
@@ -139,6 +78,8 @@ export class AskUserQuestionTool extends Tool {
           questions: {
             type: 'array',
             description: '要问用户的问题列表（1-4 个问题）。每个问题包含问题文本、选项列表等。',
+            minItems: 1,
+            maxItems: 4,
             items: {
               type: 'object',
               properties: {
@@ -155,6 +96,8 @@ export class AskUserQuestionTool extends Tool {
                   type: 'array',
                   description:
                     '选项列表。每个选项包含标签和描述。应该提供 2-4 个选项，让用户容易选择。',
+                  minItems: 2,
+                  maxItems: 4,
                   items: {
                     type: 'object',
                     description: '选项对象，包含标签、描述和可选预览内容。',
@@ -172,7 +115,8 @@ export class AskUserQuestionTool extends Tool {
                         type: 'string',
                         description: '选项预览内容（可选），例如代码片段、配置示例等'
                       }
-                    }
+                    },
+                    required: ['label', 'description']
                   } as any
                 },
                 multiSelect: {
@@ -180,7 +124,8 @@ export class AskUserQuestionTool extends Tool {
                   description:
                     '是否允许用户选择多个选项。默认 false（单选）。如果选项不互斥，可以设置为 true。'
                 }
-              }
+              },
+              required: ['question', 'header', 'options']
             } as any
           }
         },
@@ -223,8 +168,8 @@ export class AskUserQuestionTool extends Tool {
         if (!q.header || q.header.trim().length === 0) {
           return this.createErrorResult(`问题 ${i + 1} 的 header 不能为空`)
         }
-        if (!q.options || q.options.length === 0) {
-          return this.createErrorResult(`问题 ${i + 1} 的 options 不能为空，至少需要一个选项`)
+        if (!q.options || q.options.length < 2) {
+          return this.createErrorResult(`问题 ${i + 1} 的 options 至少需要两个选项`)
         }
         if (q.options.length > 4) {
           return this.createErrorResult(`问题 ${i + 1} 的 options 最多支持 4 个选项`)
@@ -277,45 +222,4 @@ export class AskUserQuestionTool extends Tool {
     }
   }
 
-  /**
-   * 等待用户回答
-   *
-   * 此方法会阻塞，直到用户回答问题
-   *
-   * @param questionId - 问题 ID
-   * @returns Promise<UserAnswer> - 用户回答
-   */
-  private async waitForUserAnswer(questionId: string): Promise<UserAnswer> {
-    return new Promise((resolve) => {
-      this.callbackManager.registerCallback(questionId, (answer) => {
-        resolve(answer)
-      })
-
-      // TODO: 发送消息到 Webview，展示问题
-      // 当用户回答后，Webview 会发送消息触发回调
-    })
-  }
-
-  /**
-   * 处理用户回答（由外部调用）
-   *
-   * @param questionId - 问题 ID
-   * @param answer - 用户回答
-   * @returns 是否成功处理
-   */
-  static handleUserAnswer(questionId: string, answer: UserAnswer): boolean {
-    const manager = QuestionCallbackManager.getInstance()
-    return manager.triggerCallback(questionId, answer)
-  }
-
-  /**
-   * 生成问题 ID
-   *
-   * @returns 问题 ID
-   */
-  private generateQuestionId(): string {
-    const timestamp = Date.now().toString(36)
-    const random = Math.random().toString(36).substring(2, 9)
-    return `question-${timestamp}-${random}`
-  }
 }

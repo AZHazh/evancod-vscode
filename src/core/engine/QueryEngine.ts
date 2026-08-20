@@ -287,6 +287,15 @@ export class QueryEngine {
       rule?: 'once' | 'always'
     }) => void
   > = new Map()
+  private interactionWaiters: Map<
+    string,
+    (response: {
+      requestId: string
+      answered: boolean
+      answers?: unknown
+      reason?: string
+    }) => void
+  > = new Map()
   private toolUseNames: Map<string, string> = new Map()
   private permissionRequestTools: Map<string, string> = new Map()
   private permissionStartedAt: Map<string, number> = new Map()
@@ -465,6 +474,8 @@ export class QueryEngine {
     this.toolExecutor = new ToolExecutor(this.tools, this.bashTool, {
       requestPermission: (toolName, toolUseId, input) =>
         this.requestPermissionIfNeeded(toolName, toolUseId, input),
+      requestInteraction: (toolName, toolUseId, input) =>
+        this.requestInteraction(toolName, toolUseId, input),
       emitEvent: event => this.onAgentEventCallback?.(event),
       notifyTaskListChange: toolName => this.notifyTaskListChange(toolName),
     })
@@ -476,7 +487,13 @@ export class QueryEngine {
 
 任务工具契约：
 - 对复杂多步骤工作、plan mode、用户明确要求 todo list、或用户一次给出多个任务的请求，主动调用 task_create 创建结构化任务。
-- 遇到不明确，或不确定的任务，主动调用 ask_user_question 工具主动询问用户，当用户也无法给出提供答案再去按想法执行。
+- 编码前先使用读取、搜索和分析工具调查工作区；能从代码、配置、文档、测试或既有模式确认的信息，不要询问用户。
+- 在第一次修改文件前，先检查是否存在高影响未决选择；若存在，先调用 ask_user_question 获取用户决策，再开始编辑。
+- 当继续执行所需的信息无法从工作区获得，或存在多种合理实现/技术选择且选择会实质影响公开 API、数据结构、依赖、兼容性、安全性、性能、用户体验、破坏性操作范围或验收标准时，必须调用 ask_user_question，不得自行假设。
+- 用户要求互相冲突、需求边界不清且不同理解会产生显著不同结果、需要用户提供外部业务规则/环境信息/凭证，或即将进行不可逆操作但范围不明确时，也必须调用 ask_user_question。
+- 对局部、可逆、低风险的实现细节，优先遵循项目既有模式自行决定；用户已明确授权自行选择时不要重复询问。
+- 需要澄清时直接调用 ask_user_question，不要先用普通文本提问。一次集中询问 1-4 个真正阻塞的问题；收到回答后立即结合答案继续原任务。
+- 判断示例：仓库中没有既有约定而 Cookie 与 JWT 会改变认证架构时必须询问；“用什么命名/放哪个相邻目录”可遵循现有代码自行决定；删除或迁移数据但用户未给出范围时必须询问；API 地址可以从配置或环境文件安全确认时先读取，不要询问。
 - 开始执行某个任务前，必须调用 task_update 将该任务标记为 in_progress。
 - 只有工作完全完成时才能将任务标记为 completed；测试失败、实现不完整、文件缺失或仍有阻塞时不能标记 completed。
 - 完成任务后，调用 task_list 查找下一项可执行任务或新解锁任务。
@@ -534,7 +551,6 @@ Skill 使用契约：
     if (provider.runtimeKind === 'openai_oauth') {
       throw new Error('OpenAI 官方 OAuth provider 暂不支持 VSCode 插件直连')
     }
-
     this.apiClient = createApiClient({
       provider,
       model: this.config.model,
@@ -596,7 +612,13 @@ Skill 使用契约：
     this.permissionRequestTools.delete(response.requestId)
     const permissionStartedAt = this.permissionStartedAt.get(response.requestId)
     this.permissionStartedAt.delete(response.requestId)
-    performanceLog('permission.response', { requestId: response.requestId, approved: response.approved, durationMs: permissionStartedAt ? Math.round(performance.now() - permissionStartedAt) : undefined })
+    performanceLog('permission.response', {
+      requestId: response.requestId,
+      approved: response.approved,
+      durationMs: permissionStartedAt
+        ? Math.round(performance.now() - permissionStartedAt)
+        : undefined,
+    })
     if (response.approved && response.rule === 'always' && toolName) {
       this.sessionAllowedTools.add(toolName)
     }
@@ -609,6 +631,19 @@ Skill 使用契约：
           ))
     }
     waiter(response)
+  }
+
+  handleInteractionResponse(response: {
+    requestId: string
+    answered: boolean
+    answers?: unknown
+    reason?: string
+  }): boolean {
+    const waiter = this.interactionWaiters.get(response.requestId)
+    if (!waiter) return false
+    this.interactionWaiters.delete(response.requestId)
+    waiter(response)
+    return true
   }
 
   /**
@@ -639,7 +674,11 @@ Skill 使用契约：
     let lastIteration = 0
     let progressSignalCount = 0
     let noProgressTurnCount = 0
-    performanceLog('query.start', { messageLength: content.length, messageCount: this.config.messages.length, ...performanceSnapshot() })
+    performanceLog('query.start', {
+      messageLength: content.length,
+      messageCount: this.config.messages.length,
+      ...performanceSnapshot(),
+    })
     try {
       // 重置 abort 状态，允许新的 query
       this.cancelled = false
@@ -691,7 +730,10 @@ Skill 使用契约：
         iteration++
         lastIteration = iteration
         const iterationStartedAt = performance.now()
-        performanceLog('query.iteration.start', { iteration, messageCount: this.config.messages.length })
+        performanceLog('query.iteration.start', {
+          iteration,
+          messageCount: this.config.messages.length,
+        })
 
         // 检查是否需要自动压缩
         if (totalUsage?.lastPromptTokens) {
@@ -791,9 +833,16 @@ Skill 使用契约：
             },
           }
         )
-        const responseBytes = Buffer.byteLength(response.content || '', 'utf8') +
+        const responseBytes =
+          Buffer.byteLength(response.content || '', 'utf8') +
           Buffer.byteLength(JSON.stringify(response.toolCalls || []), 'utf8')
-        performanceLog('query.api.complete', { iteration, durationMs: Math.round(performance.now() - apiStartedAt), toolCallCount: response.toolCalls?.length || 0, contentLength: response.content?.length || 0, responseBytes })
+        performanceLog('query.api.complete', {
+          iteration,
+          durationMs: Math.round(performance.now() - apiStartedAt),
+          toolCallCount: response.toolCalls?.length || 0,
+          contentLength: response.content?.length || 0,
+          responseBytes,
+        })
 
         // 等待原生生图的落盘 + complete 事件全部发出，避免 message_complete 抢先
         if (imageSavePromises.length > 0) {
@@ -876,8 +925,15 @@ Skill 使用契约：
 
           this.throwIfCancelled()
           const toolsStartedAt = performance.now()
-          const { results: toolResults, noProgress } = await this.executeToolCalls(assistantToolCalls)
-          performanceLog('query.tools.complete', { iteration, toolCallCount: assistantToolCalls.length, toolNames: assistantToolCalls.map(call => call.name), durationMs: Math.round(performance.now() - toolsStartedAt), ...performanceSnapshot() })
+          const { results: toolResults, noProgress } =
+            await this.executeToolCalls(assistantToolCalls)
+          performanceLog('query.tools.complete', {
+            iteration,
+            toolCallCount: assistantToolCalls.length,
+            toolNames: assistantToolCalls.map(call => call.name),
+            durationMs: Math.round(performance.now() - toolsStartedAt),
+            ...performanceSnapshot(),
+          })
           this.throwIfCancelled()
           for (const result of toolResults) {
             this.throwIfCancelled()
@@ -988,7 +1044,10 @@ Skill 使用契约：
         }
 
         finalContent = assistantContent
-        performanceLog('query.iteration.complete', { iteration, durationMs: Math.round(performance.now() - iterationStartedAt) })
+        performanceLog('query.iteration.complete', {
+          iteration,
+          durationMs: Math.round(performance.now() - iterationStartedAt),
+        })
         break
       }
 
@@ -1055,7 +1114,11 @@ Skill 使用契约：
 
       this.onAgentEventCallback?.({ type: 'message_complete', usage: totalUsage })
       this.onCompleteCallback?.(finalMessage)
-      performanceLog('query.complete', { iterations: iteration, durationMs: Math.round(performance.now() - queryStartedAt), ...performanceSnapshot() })
+      performanceLog('query.complete', {
+        iterations: iteration,
+        durationMs: Math.round(performance.now() - queryStartedAt),
+        ...performanceSnapshot(),
+      })
       performanceLog('query.termination', {
         terminationReason: 'completed',
         iteration,
@@ -1065,7 +1128,11 @@ Skill 使用契约：
       })
       return finalMessage
     } catch (error) {
-      performanceLog('query.error', { durationMs: Math.round(performance.now() - queryStartedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
+      performanceLog('query.error', {
+        durationMs: Math.round(performance.now() - queryStartedAt),
+        error: error instanceof Error ? error.message : String(error),
+        ...performanceSnapshot(),
+      })
       // 关键：本轮可能在 push 了带 toolCalls 的 assistant 消息之后、push 工具结果
       // 之前就中断（用户点停止 / 网络错误 / 429）。此时历史里留下没有配对结果的
       // tool_use，而 QueryEngine 跨请求复用同一份 messages，导致之后每次请求都被
@@ -1078,9 +1145,8 @@ Skill 使用契约：
           : error instanceof Error
             ? error
             : new Error(String(error))
-      const terminationReason = this.cancelled || this.abortController.signal.aborted
-        ? 'user_cancelled'
-        : 'provider_error'
+      const terminationReason =
+        this.cancelled || this.abortController.signal.aborted ? 'user_cancelled' : 'provider_error'
       performanceLog('query.termination', {
         terminationReason,
         iteration: lastIteration,
@@ -1171,6 +1237,10 @@ Skill 使用契约：
     }
     this.permissionWaiters.clear()
     this.permissionRequestTools.clear()
+    for (const [requestId, waiter] of this.interactionWaiters.entries()) {
+      waiter({ requestId, answered: false, reason })
+    }
+    this.interactionWaiters.clear()
     this.onAgentEventCallback?.({ type: 'status', state: 'stopped', verb: 'cancelled' })
   }
 
@@ -1263,15 +1333,13 @@ Skill 使用契约：
 
     const isEditTool = ['edit_file', 'write_file'].includes(toolName)
     const isDangerousTool = ['bash', 'delete_file', 'move_file', 'copy_file'].includes(toolName)
-    const isInteractiveTool = toolName === 'ask_user_question'
-
     let requiresApproval = false
     if (permissionMode === 'plan') {
-      requiresApproval = isInteractiveTool
+      requiresApproval = false
     } else if (permissionMode === 'acceptEdits') {
-      requiresApproval = isDangerousTool || isInteractiveTool
+      requiresApproval = isDangerousTool
     } else {
-      requiresApproval = isEditTool || isDangerousTool || isInteractiveTool
+      requiresApproval = isEditTool || isDangerousTool
     }
 
     if (!requiresApproval) {
@@ -1326,6 +1394,36 @@ Skill 使用契约：
     })
   }
 
+  private requestInteraction(
+    toolName: string,
+    toolUseId: string,
+    input: unknown
+  ): Promise<{ approved: boolean; reason?: string; updatedInput?: unknown }> {
+    if (toolName !== 'ask_user_question') {
+      return Promise.resolve({ approved: true })
+    }
+
+    const requestId = this.generateId()
+    this.onAgentEventCallback?.({
+      type: 'interaction_request',
+      requestId,
+      toolName,
+      toolUseId,
+      input,
+      description: '需要用户提供信息后才能继续',
+    })
+
+    return new Promise(resolve => {
+      this.interactionWaiters.set(requestId, response => {
+        if (!response.answered) {
+          resolve({ approved: false, reason: response.reason || '用户取消了问题' })
+          return
+        }
+        resolve({ approved: true, updatedInput: { answers: response.answers } })
+      })
+    })
+  }
+
   private notifyTaskListChange(toolName: string) {
     if (toolName.startsWith('task_')) {
       this.config.onTaskListChange?.()
@@ -1350,7 +1448,6 @@ Skill 使用契约：
   }
 
   private getPermissionDescription(toolName: string): string | undefined {
-    if (toolName === 'ask_user_question') return '请求用户回答一个问题'
     if (toolName === 'exit_plan_mode') return '提交计划并等待审批'
     if (toolName === 'write_file' || toolName === 'edit_file') return '修改工作区文件'
     if (toolName === 'mcp') return '调用外部 MCP Server 工具或资源'
@@ -1409,9 +1506,10 @@ function summarizeMessages(messages: unknown[]): {
     const content = record?.content
     if (record.role === 'tool') {
       toolResultCount++
-      toolResultBytes += typeof content === 'string'
-        ? Buffer.byteLength(content, 'utf8')
-        : Buffer.byteLength(JSON.stringify(content ?? ''), 'utf8')
+      toolResultBytes +=
+        typeof content === 'string'
+          ? Buffer.byteLength(content, 'utf8')
+          : Buffer.byteLength(JSON.stringify(content ?? ''), 'utf8')
     }
     if (typeof content === 'string') {
       textBytes += Buffer.byteLength(content, 'utf8')
@@ -1419,10 +1517,16 @@ function summarizeMessages(messages: unknown[]): {
     }
     if (!Array.isArray(content)) continue
     for (const block of content) {
-      const item = block as { type?: string; text?: string; content?: unknown; source?: { data?: string } }
+      const item = block as {
+        type?: string
+        text?: string
+        content?: unknown
+        source?: { data?: string }
+      }
       if (item.type === 'tool_result' && record.role !== 'tool') {
         toolResultCount++
-        const serialized = typeof item.content === 'string' ? item.content : JSON.stringify(item.content ?? '')
+        const serialized =
+          typeof item.content === 'string' ? item.content : JSON.stringify(item.content ?? '')
         toolResultBytes += Buffer.byteLength(serialized, 'utf8')
       } else if (item.type === 'image' || item.source?.data) {
         imageCount++

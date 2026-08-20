@@ -3,7 +3,7 @@
  *
  * 将 transcript 中的消息按「轮次」（以用户消息为界）分组，
  * 组内保持**原始时间顺序**交错渲染：
- *   thinking → assistant_text → tool_use(+tool_result) → thinking → assistant_text → tool_use …
+ *   thinking → assistant_text → tool_use(+tool_result) → interaction_request → thinking …
  *
  * 这样模型的文字回答与工具调用交叉出现，和主流 AI 编辑器一致，
  * 避免所有文字堆在上方、工具堆在下方产生的割裂感。
@@ -62,7 +62,7 @@ export function groupMessages(transcript: UIMessage[]): MessageGroup[] {
       return
     }
 
-    // thinking / assistant_text / tool_use / image_generation / permission_request
+    // thinking / assistant_text / tool_use / image_generation / permission_request / interaction_request
     currentGroup.items.push({ order: index, block })
   })
 

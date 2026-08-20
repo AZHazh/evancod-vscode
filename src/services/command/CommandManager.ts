@@ -242,7 +242,7 @@ export class CommandManager {
       name: 'new',
       description: '创建新会话',
       usage: '/new [会话名称]',
-      execute: async (args) => {
+      execute: async args => {
         const name = args.args.join(' ') || '新会话'
 
         return {
@@ -272,12 +272,45 @@ export class CommandManager {
       }),
     })
 
+    // /init 命令
+    this.register({
+      name: 'init',
+      description: '分析当前项目并初始化 Evancod 项目记忆',
+      usage: '/init',
+      execute: async () => ({
+        success: true,
+        sendToAI: true,
+        metadata: {
+          action: 'init',
+        },
+        message: `请初始化当前项目的 Evancod 记忆。严格按以下流程执行：
+
+1. 使用只读工具检查项目根目录、README、包管理/构建配置、主要源码目录、测试配置，以及现有 AGENTS.md、CLAUDE.md、.evancod/memory 和 .claude/memory。忽略 node_modules、构建产物、缓存、密钥和大型生成文件；不要为了初始化遍历整个仓库。
+2. 总结项目架构、模块边界、技术栈、常用开发/构建/测试命令和明确的工程约束。只记录从文件中有依据的信息，不要猜测。
+3. 总结用户偏好时，只能使用本会话中用户明确表达的偏好和现有项目说明。若没有足够信息，使用 ask_user_question 询问用户；不得从代码风格臆测个人偏好。
+4. 扩展会先创建基础快照。读取并补充以下项目级文件，目录必须使用 .evancod/memory，不得写入 .claude：
+   - project_architecture.md
+   - development_commands.md
+   - project_conventions.md
+   - user_preferences.md（只有存在已确认偏好时才创建）
+   MEMORY.md 由扩展自动维护，不要直接编辑。
+5. 每个记忆条目必须使用以下 frontmatter：
+   ---
+   name: 唯一名称
+   description: 一句话说明
+   type: user | feedback | project | reference
+   ---
+6. 先读取目标文件并合并仍然有效的内容，不得直接丢弃基础快照或用户已有记录。AI 发起的写文件必须走正常权限审批。
+7. 完成后列出已创建或更新的文件、信息来源以及仍需用户确认的事项。`,
+      }),
+    })
+
     // /commit 命令
     this.register({
       name: 'commit',
       description: '快速创建 Git 提交',
       usage: '/commit <提交消息>',
-      execute: async (args) => {
+      execute: async args => {
         if (args.args.length === 0) {
           return {
             success: false,
@@ -307,7 +340,7 @@ export class CommandManager {
       name: 'history',
       description: '查看 Git 提交历史',
       usage: '/history [数量]',
-      execute: async (args) => {
+      execute: async args => {
         const limit = args.args[0] ? parseInt(args.args[0]) : 10
 
         if (isNaN(limit) || limit < 1) {

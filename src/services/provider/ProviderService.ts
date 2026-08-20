@@ -26,9 +26,11 @@ export class ProviderService {
   private activeProviderId: string | null = null
   private providerOrder: string[] = []
   private configPath: string
+  private legacyConfigPath: string
 
   constructor(private context: vscode.ExtensionContext) {
-    this.configPath = path.join(os.homedir(), '.claude', 'cc-evancod', 'providers.json')
+    this.configPath = path.join(os.homedir(), '.evancod', 'providers.json')
+    this.legacyConfigPath = path.join(os.homedir(), '.claude', 'cc-evancod', 'providers.json')
   }
 
   async initialize() {
@@ -47,7 +49,14 @@ export class ProviderService {
 
   async loadProviders() {
     try {
-      const content = await fs.readFile(this.configPath, 'utf-8')
+      let content: string
+      let loadedLegacy = false
+      try {
+        content = await fs.readFile(this.configPath, 'utf-8')
+      } catch {
+        content = await fs.readFile(this.legacyConfigPath, 'utf-8')
+        loadedLegacy = true
+      }
       const data = JSON.parse(content)
       const normalized = this.normalizeProvidersIndex(data)
 
@@ -56,6 +65,14 @@ export class ProviderService {
       this.providerOrder = normalized.providerOrder
 
       console.log(`[ProviderService] Loaded ${this.providers.length} providers, active: ${this.activeProviderId}`)
+      if (loadedLegacy) {
+        try {
+          await this.saveProviders()
+          console.log(`[ProviderService] Migrated legacy provider config to ${this.configPath}`)
+        } catch (error) {
+          console.error('Failed to migrate legacy provider config:', error)
+        }
+      }
     } catch (err) {
       console.log('No existing providers config, starting fresh')
       this.providers = []

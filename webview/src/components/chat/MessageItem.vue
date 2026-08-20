@@ -7,6 +7,7 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ToolResultBlock from './ToolResultBlock.vue'
 import PermissionRequestBlock from './PermissionRequestBlock.vue'
+import UserQuestionBlock from './UserQuestionBlock.vue'
 import PlanApproval from '@/components/plan/PlanApproval.vue'
 import InlineImageGallery from './InlineImageGallery.vue'
 import GeneratedImageBlock from './GeneratedImageBlock.vue'
@@ -144,6 +145,13 @@ async function copyMessage() {
       :tool-name="message.toolName"
       :input="message.input"
       :description="message.description"
+      :response-state="message.responseState"
+    />
+
+    <UserQuestionBlock
+      v-else-if="message.type === 'interaction_request'"
+      :request-id="message.requestId"
+      :input="message.input"
       :response-state="message.responseState"
     />
 

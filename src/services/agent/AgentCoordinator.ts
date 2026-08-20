@@ -29,8 +29,7 @@ import { QueryCancelledError, QueryEngine, QueryEngineConfig } from '../../core/
 import { LocalAgentTaskStore } from '../../tasks/LocalAgentTask'
 import { TaskNotificationQueue } from './TaskNotificationQueue'
 import { AgentWorktreeManager, type WorktreeLease } from './AgentWorktreeManager'
-import type { Message, AgentTaskNotification } from '../../types'
-import type { Provider } from '../../types'
+import type { PermissionMode, Provider } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import type { TaskManager } from '../task/TaskManager'
 import type { PlanModeManager } from '../plan/PlanModeManager'
@@ -153,6 +152,14 @@ export class AgentCoordinator {
   private readonly taskStore: LocalAgentTaskStore
   private readonly taskNotificationQueue = new TaskNotificationQueue()
   private readonly worktreeManager = new AgentWorktreeManager()
+  private readonly permissionRequests = new Map<
+    string,
+    { agentId: string; engine: QueryEngine }
+  >()
+  private readonly interactionRequests = new Map<
+    string,
+    { agentId: string; engine: QueryEngine }
+  >()
   private sharedServices?: {
     taskManager?: TaskManager
     planModeManager?: PlanModeManager
@@ -160,7 +167,7 @@ export class AgentCoordinator {
     skillManager?: SkillManager
     memoryManager?: MemoryManager
     onTaskListChange?: () => void
-    permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+    getPermissionMode?: () => PermissionMode
   }
 
   /**
@@ -189,7 +196,7 @@ export class AgentCoordinator {
     skillManager?: SkillManager
     memoryManager?: MemoryManager
     onTaskListChange?: () => void
-    permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+    getPermissionMode?: () => PermissionMode
   }): void {
     this.sharedServices = services
   }
@@ -246,7 +253,7 @@ export class AgentCoordinator {
       skillManager: this.sharedServices?.skillManager,
       memoryManager: this.sharedServices?.memoryManager,
       onTaskListChange: this.sharedServices?.onTaskListChange,
-      permissionMode: this.sharedServices?.permissionMode,
+      permissionMode: this.sharedServices?.getPermissionMode?.() || 'default',
     }
 
     const engine = new QueryEngine(engineConfig)
@@ -276,6 +283,21 @@ export class AgentCoordinator {
     }
     engine.onAgentEvent(event => {
       void emitSubAgentEvent(event)
+      if (event.type === 'permission_request') {
+        this.permissionRequests.set(event.requestId, { agentId: config.id, engine })
+        this.webviewManager?.sendAgentEvent({
+          ...event,
+          description: event.description
+            ? `子 Agent「${config.description}」：${event.description}`
+            : `子 Agent「${config.description}」请求执行 ${event.toolName}`,
+        })
+      } else if (event.type === 'interaction_request') {
+        this.interactionRequests.set(event.requestId, { agentId: config.id, engine })
+        this.webviewManager?.sendAgentEvent({
+          ...event,
+          description: `子 Agent「${config.description}」需要用户输入`,
+        })
+      }
     })
 
     // 创建执行 Promise
@@ -420,6 +442,8 @@ export class AgentCoordinator {
     }
 
     this.runningAgents.delete(config.id)
+    this.clearPermissionRequests(config.id)
+    this.clearInteractionRequests(config.id)
 
     if (!this.webviewManager) return
 
@@ -501,16 +525,85 @@ export class AgentCoordinator {
   }
 
   /**
+   * 将权限响应路由到发起请求的子 Agent。
+   *
+   * @returns 是否命中了子 Agent 的待处理权限请求
+   */
+  handlePermissionResponse(response: {
+    requestId: string
+    approved: boolean
+    reason?: string
+    updatedInput?: unknown
+    rule?: 'once' | 'always'
+  }): boolean {
+    const request = this.permissionRequests.get(response.requestId)
+    if (!request) return false
+
+    this.permissionRequests.delete(response.requestId)
+    request.engine.handlePermissionResponse(response)
+    return true
+  }
+
+  handleInteractionResponse(response: {
+    requestId: string
+    answered: boolean
+    answers?: unknown
+    reason?: string
+  }): boolean {
+    const request = this.interactionRequests.get(response.requestId)
+    if (!request) return false
+
+    this.interactionRequests.delete(response.requestId)
+    request.engine.handleInteractionResponse(response)
+    return true
+  }
+
+  /**
    * 取消子 Agent
    *
    * @param agentId - Agent ID
    */
-  cancelAgent(agentId: string): void {
+  cancelAgent(agentId: string, reason = 'Agent cancelled by user'): void {
     const running = this.runningAgents.get(agentId)
     if (!running || running.cancelRequested) return
 
     running.cancelRequested = true
-    running.engine.cancel('Agent cancelled by user')
+    running.engine.cancel(reason)
+    this.clearPermissionRequests(agentId)
+    this.clearInteractionRequests(agentId)
+  }
+
+  /**
+   * 取消并等待当前所有子 Agent 完成清理。
+   */
+  async cancelAllAgents(reason = 'Agent cancelled by user'): Promise<void> {
+    const runningAgents = Array.from(this.runningAgents.values())
+    for (const running of runningAgents) {
+      this.cancelAgent(running.id, reason)
+    }
+
+    await Promise.allSettled(
+      runningAgents.map(async running => {
+        const result = await running.promise
+        await this.finalizeAgent(running.config, result)
+      })
+    )
+  }
+
+  private clearPermissionRequests(agentId: string): void {
+    for (const [requestId, request] of this.permissionRequests) {
+      if (request.agentId === agentId) {
+        this.permissionRequests.delete(requestId)
+      }
+    }
+  }
+
+  private clearInteractionRequests(agentId: string): void {
+    for (const [requestId, request] of this.interactionRequests) {
+      if (request.agentId === agentId) {
+        this.interactionRequests.delete(requestId)
+      }
+    }
   }
 
   /**
@@ -589,5 +682,7 @@ export class AgentCoordinator {
 
     this.runningAgents.clear()
     this.completedResults.clear()
+    this.permissionRequests.clear()
+    this.interactionRequests.clear()
   }
 }

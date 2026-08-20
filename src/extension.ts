@@ -160,7 +160,7 @@ export async function activate(context: vscode.ExtensionContext) {
       skillManager,
       memoryManager,
       onTaskListChange: () => taskManager.notifyTaskList(),
-      permissionMode: chatService.getRuntimeState().permissionMode,
+      getPermissionMode: () => chatService.getRuntimeState().permissionMode,
     })
     await performanceMeasure('startup.agent.restorePersistedTasks', () => agentCoordinator.restorePersistedTasks())
 

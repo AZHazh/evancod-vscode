@@ -5,6 +5,7 @@ export const FALLBACK_SLASH_COMMANDS: SlashCommand[] = [
   { name: 'clear', description: '清空当前会话' },
   { name: 'new', description: '创建新会话' },
   { name: 'compact', description: '压缩当前会话上下文' },
+  { name: 'init', description: '分析项目并初始化 Evancod 记忆' },
   { name: 'commit', description: '快速创建 Git 提交', argumentHint: '<提交消息>' },
   { name: 'history', description: '查看 Git 提交历史', argumentHint: '[数量]' },
   { name: 'context', description: '查看上下文使用情况' },

@@ -199,6 +199,17 @@ export type UIMessage =
     }
   | {
       id: string
+      type: 'interaction_request'
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: unknown
+      description?: string
+      timestamp: number
+      responseState?: 'pending' | 'answered' | 'cancelled'
+    }
+  | {
+      id: string
       type: 'plan_approval'
       plan: Plan
       timestamp: number
@@ -275,6 +286,14 @@ export type AgentServerEvent =
     }
   | {
       type: 'permission_request'
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: unknown
+      description?: string
+    }
+  | {
+      type: 'interaction_request'
       requestId: string
       toolName: string
       toolUseId?: string

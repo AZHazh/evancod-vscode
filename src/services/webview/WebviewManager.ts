@@ -55,7 +55,7 @@ export class WebviewManager {
   private disposables: vscode.Disposable[] = []
 
   /**
-   * 性能优化：权限回调和问题回调的内存缓存
+   * 性能优化：权限回调使用内存缓存
    *
    * 原代码把这些回调存在 context.globalState 中，每次点击授权按钮都要：
    *   globalState.get → 查找 → delete → await globalState.update
@@ -63,7 +63,6 @@ export class WebviewManager {
    * 改为纯内存 Map 后，查找和执行都是同步的，去除所有 async/await 和序列化。
    */
   private permissionCallbacks = new Map<string, (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => void>()
-  private questionCallbacks = new Map<string, (answer: any) => void>()
 
   /**
    * 构造函数 - 依赖注入
@@ -392,15 +391,13 @@ export class WebviewManager {
             await this.handlePlanReject(message.data)
             break
 
-          // ============ Question 相关消息 ============
-          case 'question.answer':
-            // 回答问题
-            await this.handleQuestionAnswer(message.data)
-            break
-
           // ============ Agent 相关消息 ============
           case 'permission_response':
             await this.handlePermissionResponse(message.data)
+            break
+
+          case 'interaction_response':
+            this.handleInteractionResponse(message.data)
             break
 
           case 'task.list.refresh':
@@ -851,22 +848,6 @@ export class WebviewManager {
   }
 
   /**
-   * 处理问题回答
-   */
-  private handleQuestionAnswer(data: { questionId: string; answer: any }): void {
-    try {
-      // 性能优化：从内存 Map 同步查找回调，不再经过 globalState 异步读写
-      const callback = this.questionCallbacks.get(data.questionId)
-      if (callback) {
-        this.questionCallbacks.delete(data.questionId)
-        callback(data.answer)
-      }
-    } catch (error) {
-      console.error('Failed to handle question answer:', error)
-    }
-  }
-
-  /**
    * 处理 Agent 取消
    */
   private handlePermissionResponse(data: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }): void {
@@ -878,10 +859,29 @@ export class WebviewManager {
         callback(data)
       }
 
-      // 同步转给 QueryEngine，确保工具执行闭环
-      this.chatService.handlePermissionResponse(data)
+      // 子 Agent 有独立的 QueryEngine，先按 requestId 尝试路由；未命中再交给主会话。
+      const handledBySubAgent = this.agentCoordinator?.handlePermissionResponse(data) ?? false
+      if (!handledBySubAgent) {
+        this.chatService.handlePermissionResponse(data)
+      }
     } catch (error) {
       console.error('Failed to handle permission response:', error)
+    }
+  }
+
+  private handleInteractionResponse(data: {
+    requestId: string
+    answered: boolean
+    answers?: unknown
+    reason?: string
+  }): void {
+    try {
+      const handledBySubAgent = this.agentCoordinator?.handleInteractionResponse(data) ?? false
+      if (!handledBySubAgent) {
+        this.chatService.handleInteractionResponse(data)
+      }
+    } catch (error) {
+      console.error('Failed to handle interaction response:', error)
     }
   }
 

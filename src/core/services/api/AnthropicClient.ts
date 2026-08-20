@@ -141,7 +141,6 @@ export class AnthropicClient implements ApiClient {
       if (tools && tools.length > 0) {
         requestParams.tools = tools
       }
-
       const stream = this.client.messages.stream(requestParams)
       let fullContent = ''
       const toolCalls: any[] = []

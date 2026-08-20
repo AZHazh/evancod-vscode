@@ -12,6 +12,7 @@ export interface ToolPermissionResult {
 
 export interface ToolExecutorCallbacks {
   requestPermission: (toolName: string, toolUseId: string, input: unknown) => Promise<ToolPermissionResult>
+  requestInteraction: (toolName: string, toolUseId: string, input: unknown) => Promise<ToolPermissionResult>
   emitEvent: (event: AgentServerEvent) => void
   notifyTaskListChange: (toolName: string) => void
 }
@@ -52,7 +53,9 @@ export class ToolExecutor {
       return this.emitErrorResult(id, name, schemaError)
     }
 
-    const permission = await this.callbacks.requestPermission(name, id, input)
+    const permission = name === 'ask_user_question'
+      ? await this.callbacks.requestInteraction(name, id, input)
+      : await this.callbacks.requestPermission(name, id, input)
     if (!permission.approved) {
       return this.emitErrorResult(id, name, permission.reason || 'Permission denied')
     }

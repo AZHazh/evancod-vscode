@@ -122,6 +122,17 @@ export type AgentTranscriptBlock =
       expired?: boolean
       responseState?: 'pending' | 'approved' | 'denied'
     }
+  | {
+      id: string
+      type: 'interaction_request'
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: unknown
+      description?: string
+      timestamp: number
+      responseState?: 'pending' | 'answered' | 'cancelled'
+    }
 
 export interface Message {
   id: string

@@ -53,7 +53,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
   const isStreaming = ref(false)
   const providerStore = useProviderStore()
-  const chatState = ref<'idle' | 'thinking' | 'waiting_permission' | 'stopped'>('idle')
+  const chatState = ref<'idle' | 'thinking' | 'waiting_permission' | 'waiting_interaction' | 'stopped'>('idle')
   const streamingText = ref('')
   const streamingToolInput = ref('')
   const activeToolUseId = ref<string | null>(null)
@@ -284,7 +284,10 @@ export const useChatStore = defineStore('chat', () => {
 
     if (currentSession.value.transcript?.length) {
       // 流式过程中，保留前端流式构建的临时消息，不要用后端 transcript 完全重建
-      const isStreaming = chatState.value === 'thinking' || chatState.value === 'waiting_permission'
+      const isStreaming =
+        chatState.value === 'thinking' ||
+        chatState.value === 'waiting_permission' ||
+        chatState.value === 'waiting_interaction'
 
       // 保留内存中已有的图片 base64，避免 transcript 重建（读盘可能缺失）时闪掉刚展示的图片
       const existingImageBase64 = new Map<string, string>()
@@ -570,6 +573,21 @@ export const useChatStore = defineStore('chat', () => {
         uiMessages.value.push({
           id: event.requestId,
           type: 'permission_request',
+          requestId: event.requestId,
+          toolName: event.toolName,
+          toolUseId: event.toolUseId,
+          input: event.input,
+          description: event.description,
+          timestamp: Date.now(),
+          responseState: 'pending',
+        })
+        break
+
+      case 'interaction_request':
+        chatState.value = 'waiting_interaction'
+        uiMessages.value.push({
+          id: event.requestId,
+          type: 'interaction_request',
           requestId: event.requestId,
           toolName: event.toolName,
           toolUseId: event.toolUseId,
@@ -971,6 +989,21 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  function updateInteractionResponseState(
+    requestId: string,
+    responseState: 'answered' | 'cancelled',
+  ) {
+    const index = uiMessages.value.findIndex(
+      message => message.type === 'interaction_request' && message.requestId === requestId,
+    )
+    if (index === -1 || uiMessages.value[index].type !== 'interaction_request') return
+
+    uiMessages.value.splice(index, 1, {
+      ...uiMessages.value[index],
+      responseState,
+    })
+  }
+
   function sendMessage(content: string, files: (string | AttachmentContext)[] = []) {
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
@@ -1052,6 +1085,23 @@ export const useChatStore = defineStore('chat', () => {
     chatState.value = response.approved ? 'thinking' : 'idle'
   }
 
+  function sendInteractionResponse(response: {
+    requestId: string
+    answered: boolean
+    answers?: unknown
+    reason?: string
+  }) {
+    updateInteractionResponseState(
+      response.requestId,
+      response.answered ? 'answered' : 'cancelled',
+    )
+    vscode.postMessage({
+      type: 'interaction_response',
+      data: toPlainJsonSafe(response),
+    })
+    chatState.value = response.answered ? 'thinking' : 'idle'
+  }
+
   return {
     currentSession,
     sessions,
@@ -1076,6 +1126,7 @@ export const useChatStore = defineStore('chat', () => {
     fetchSessions,
     cancelBash,
     sendPermissionResponse,
+    sendInteractionResponse,
     upsertPlanApprovalMessage,
     updatePlanApprovalMessage,
     isTaskToolUse,

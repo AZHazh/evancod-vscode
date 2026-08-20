@@ -181,7 +181,7 @@ MCP 是一个标准协议，允许 AI 连接到外部服务并使用它们提供
       // 检查 Server 是否已连接
       const connectedServers = this.mcpManager.getConnectedServers()
       if (!connectedServers.includes(params.server)) {
-        return this.createErrorResult(`MCP Server "${params.server}" 未连接或不存在。\n\n可用的 MCP Server：${connectedServers.length > 0 ? connectedServers.join(', ') : '无'}\n\n请检查：\n1. MCP Server 配置文件是否存在：~/.claude/cc-evancod/mcp-servers.json\n2. Server 名称是否正确\n3. Server 是否启动成功`)
+        return this.createErrorResult(`MCP Server "${params.server}" 未连接或不存在。\n\n可用的 MCP Server：${connectedServers.length > 0 ? connectedServers.join(', ') : '无'}\n\n请检查：\n1. MCP Server 配置文件是否存在：~/.evancod/mcp-servers.json（旧路径仍兼容读取）\n2. Server 名称是否正确\n3. Server 是否启动成功`)
       }
 
       // 根据操作类型执行

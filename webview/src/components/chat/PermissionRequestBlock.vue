@@ -1,26 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch, reactive } from 'vue'
-import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, FileX2, Folder, ShieldCheck, X, CircleHelp, Play, Terminal } from 'lucide-vue-next'
+import { computed, ref, watch } from 'vue'
+import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, FileX2, Folder, ShieldCheck, X, Terminal } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
-import OptionSelector from '@/components/agent/OptionSelector.vue'
-import CustomInput from '@/components/agent/CustomInput.vue'
 import DiffViewer from '@/components/diff/DiffViewer.vue'
 import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
-
-interface QuestionOption {
-  label: string
-  description: string
-  preview?: string
-}
-
-interface Question {
-  id: string
-  question: string
-  header?: string
-  options: QuestionOption[]
-  allowMultiple?: boolean
-  allowCustomInput?: boolean
-}
 
 const props = defineProps<{
   requestId: string
@@ -74,7 +57,6 @@ const toolNameDisplay = computed(() => {
     write_file: 'Write',
     delete_file: 'Delete',
     bash: 'Bash',
-    ask_user_question: 'Ask',
   }
   return labels[props.toolName] || props.toolName
 })
@@ -94,71 +76,6 @@ const statusText = computed(() => {
   return isEditLike.value ? '等待审批' : 'awaiting approval'
 })
 const statusClass = computed(() => responseState.value)
-interface QuestionWithId extends Question {
-  index: number
-}
-
-const questions = computed<QuestionWithId[]>(() => {
-  if (props.toolName !== 'ask_user_question' || !inputRecord.value) {
-    return []
-  }
-
-  const input = inputRecord.value as { questions?: Array<any> }
-  if (!input.questions || !Array.isArray(input.questions)) {
-    return []
-  }
-
-  return input.questions
-    .map((q, index) => {
-      if (!q.question || !Array.isArray(q.options)) {
-        return null
-      }
-      return {
-        id: `${props.requestId}_${index}`,
-        index,
-        question: q.question,
-        header: q.header,
-        options: q.options,
-        allowMultiple: q.multiSelect || false,
-        allowCustomInput: q.allowCustomInput,
-      } as QuestionWithId
-    })
-    .filter((q): q is QuestionWithId => q !== null)
-})
-
-const questionAnswers = ref<Record<string, { selectedOptions: string[]; customInput?: string }>>({})
-const activeTabIndex = ref(0)
-const tabAnswers = reactive<Array<{ selectedOptions: string[]; customInput: string }>>(
-  Array.from({ length: 10 }, () => ({ selectedOptions: [], customInput: '' }))
-)
-
-const allQuestionsAnswered = computed(() => {
-  return questions.value.every((_, index) => {
-    const answer = tabAnswers[index]
-    return answer.selectedOptions.length > 0 || answer.customInput.trim().length > 0
-  })
-})
-
-function formatSuccessMessage(): string {
-  const answers: string[] = []
-  questions.value.forEach((q, index) => {
-    const answer = questionAnswers.value[`question_${index}`]
-    if (answer) {
-      const parts: string[] = []
-      if (answer.selectedOptions.length > 0) {
-        parts.push(`"${q.question}" = "${answer.selectedOptions.join(', ')}"`)
-      }
-      if (answer.customInput) {
-        parts.push(`"${answer.customInput}"`)
-      }
-      if (parts.length > 0) {
-        answers.push(parts.join(', '))
-      }
-    }
-  })
-  return `结果: User has answered your questions: ${answers.join('; ')}. You can now continue with the user's answers in mind.`
-}
-
 function approvePermission() {
   responseState.value = 'approved'
   sendPermissionResponse({ requestId: props.requestId, approved: true })
@@ -178,95 +95,10 @@ function denyPermission() {
   })
 }
 
-function submitAllQuestions() {
-  if (!allQuestionsAnswered.value) return
-
-  const answers: Record<string, { selectedOptions: string[]; customInput?: string }> = {}
-
-  questions.value.forEach((_, index) => {
-    const tabAnswer = tabAnswers[index]
-    const answer = {
-      selectedOptions: [...tabAnswer.selectedOptions],
-      customInput: tabAnswer.customInput.trim() || undefined
-    }
-
-    answers[`question_${index}`] = answer
-    questionAnswers.value[`question_${index}`] = answer
-  })
-
-  responseState.value = 'approved'
-  sendPermissionResponse({
-    requestId: props.requestId,
-    approved: true,
-    updatedInput: { answers }
-  })
-}
 </script>
 
 <template>
-  <div class="permission-card" :class="[`permission-card--${responseState}`, { 'permission-card--ask': questions.length > 0 }]">
-    <div v-if="questions.length > 0" class="questions-wrapper">
-      <!-- 顶部标题栏 -->
-      <div class="questions-header">
-        <div class="questions-icon">
-          <CircleHelp :size="20" />
-        </div>
-        <h3 class="questions-main-title">Evancod 需要你的输入</h3>
-        <span v-if="responseState !== 'pending'" class="questions-status-badge" :class="`questions-status-badge--${responseState}`">
-          {{ responseState === 'approved' ? '已结果' : '已取消' }}
-        </span>
-      </div>
-
-      <!-- 标签页导航 -->
-      <div class="questions-tabs">
-        <button
-          v-for="(q, index) in questions"
-          :key="q.id"
-          class="tab-button"
-          :class="{ 'tab-button--active': activeTabIndex === index, 'tab-button--answered': questionAnswers[`question_${index}`] }"
-          @click="activeTabIndex = index"
-        >
-          {{ q.header || `问题 ${index + 1}` }}
-        </button>
-      </div>
-
-      <!-- 当前问题内容 -->
-      <div class="questions-content">
-        <div v-for="(q, index) in questions" :key="q.id" v-show="activeTabIndex === index" class="question-panel">
-          <h4 class="question-text">{{ q.question }}</h4>
-
-          <OptionSelector
-            :options="q.options"
-            :allow-multiple="q.allowMultiple"
-            v-model:selected="tabAnswers[index].selectedOptions"
-          />
-
-          <div class="custom-input-section">
-            <label class="custom-input-label">或输入自定义回复：</label>
-            <CustomInput
-              v-model="tabAnswers[index].customInput"
-              placeholder="输入你你的回答..."
-            />
-          </div>
-        </div>
-      </div>
-
-      <!-- 底部提交区域 -->
-      <div v-if="responseState === 'pending'" class="questions-footer">
-        <button class="submit-button" @click="submitAllQuestions" :disabled="!allQuestionsAnswered">
-          <Play :size="16" class="submit-icon" />
-          提交
-        </button>
-      </div>
-
-      <!-- 成功提示 -->
-      <div v-if="responseState === 'approved'" class="success-message">
-        <CircleCheck :size="18" class="success-icon" />
-        <span class="success-text">{{ formatSuccessMessage() }}</span>
-      </div>
-    </div>
-
-    <template v-else>
+  <div class="permission-card" :class="`permission-card--${responseState}`">
       <div class="permission-card__header">
         <component
           :is="isWriteLike ? FilePlus2 : isDeleteLike ? FileX2 : FilePenLine"
@@ -335,7 +167,6 @@ function submitAllQuestions() {
           <X class="chat-button__icon" />拒绝
         </button>
       </div>
-    </template>
   </div>
 </template>
 

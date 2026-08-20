@@ -8,7 +8,7 @@
  * 4. 管理连接生命周期（连接、断开、重连）
  *
  * 配置文件位置：
- * - ~/.claude/cc-evancod/mcp-servers.json
+ * - ~/.evancod/mcp-servers.json（兼容读取旧路径）
  *
  * 配置文件格式：
  * ```json
@@ -84,6 +84,7 @@ export class MCPConnectionManager {
 
   /** 配置文件路径 */
   private configPath: string
+  private legacyConfigPath: string
 
   /** 已发现的工具 */
   private discoveredTools: Map<string, { serverName: string; tool: any }> = new Map()
@@ -97,9 +98,10 @@ export class MCPConnectionManager {
    * @param context - VSCode Extension Context
    */
   constructor(private context: vscode.ExtensionContext) {
-    // 配置文件路径：~/.claude/cc-evancod/mcp-servers.json
+    // Evancod 使用自己的用户目录；旧 Claude 路径只用于兼容读取。
     const homeDir = os.homedir()
-    this.configPath = path.join(homeDir, '.claude', 'cc-evancod', 'mcp-servers.json')
+    this.configPath = path.join(homeDir, '.evancod', 'mcp-servers.json')
+    this.legacyConfigPath = path.join(homeDir, '.claude', 'cc-evancod', 'mcp-servers.json')
   }
 
   /**
@@ -139,10 +141,22 @@ export class MCPConnectionManager {
    */
   private async loadConfig(): Promise<void> {
     try {
-      const configUri = vscode.Uri.file(this.configPath)
-      const configData = await vscode.workspace.fs.readFile(configUri)
+      let configData: Uint8Array
+      let loadedLegacy = false
+      try {
+        configData = await vscode.workspace.fs.readFile(vscode.Uri.file(this.configPath))
+      } catch {
+        configData = await vscode.workspace.fs.readFile(vscode.Uri.file(this.legacyConfigPath))
+        loadedLegacy = true
+      }
       const configContent = Buffer.from(configData).toString('utf-8')
       const config: MCPServersConfig = JSON.parse(configContent)
+
+      if (loadedLegacy) {
+        await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(this.configPath)))
+        await vscode.workspace.fs.writeFile(vscode.Uri.file(this.configPath), configData)
+        console.log(`Migrated legacy MCP config to ${this.configPath}`)
+      }
 
       // 解析配置
       for (const [name, serverConfig] of Object.entries(config.mcpServers)) {

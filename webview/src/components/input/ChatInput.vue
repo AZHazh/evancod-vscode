@@ -135,7 +135,7 @@ const providerGroups = computed(() =>
 const modelLabel = computed(() => selectedModelOption.value?.model || providerStore.currentModel)
 const providerLabel = computed(() => providerStore.activeProvider?.name || '未配置')
 const isRunning = computed(() =>
-  ['thinking', 'running', 'waiting_permission'].includes(chatStore.chatState)
+  ['thinking', 'running', 'waiting_permission', 'waiting_interaction'].includes(chatStore.chatState)
 )
 const canSend = computed(
   () =>

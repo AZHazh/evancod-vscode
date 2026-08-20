@@ -48,7 +48,13 @@ export interface ToolParameter {
   /**
    * 是否必需
    */
-  required?: boolean
+  required?: boolean | string[]
+
+  /** 数组最少元素数（JSON Schema） */
+  minItems?: number
+
+  /** 数组最多元素数（JSON Schema） */
+  maxItems?: number
 
   /**
    * 枚举值（可选）

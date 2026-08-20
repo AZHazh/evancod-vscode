@@ -32,7 +32,7 @@ function toggleHistory() {
 }
 
 function selectSession(sessionId: string) {
-  if (['thinking', 'running', 'waiting_permission'].includes(chatStore.chatState)) {
+  if (['thinking', 'running', 'waiting_permission', 'waiting_interaction'].includes(chatStore.chatState)) {
     chatStore.stopGeneration()
   }
   chatStore.openSession(sessionId)

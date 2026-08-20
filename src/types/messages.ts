@@ -51,6 +51,14 @@ export type AgentServerEvent =
       description?: string
     }
   | {
+      type: 'interaction_request'
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: unknown
+      description?: string
+    }
+  | {
       type: 'permission_response'
       requestId: string
       approved: boolean
@@ -252,6 +260,15 @@ export type WebviewToExtensionMessage =
       data: {
         toolUseId: string
         taskId?: string
+      }
+    }
+  | {
+      type: 'interaction_response'
+      data: {
+        requestId: string
+        answered: boolean
+        answers?: unknown
+        reason?: string
       }
     }
   // === Provider 操作 ===
