@@ -132,6 +132,7 @@ export type AgentTranscriptBlock =
       description?: string
       timestamp: number
       responseState?: 'pending' | 'answered' | 'cancelled'
+      responseAnswers?: unknown
     }
 
 export interface Message {

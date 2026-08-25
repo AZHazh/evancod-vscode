@@ -312,8 +312,11 @@ export class QueryEngine {
   // 高频事件在微任务队列中累积，每 ~32ms 发送一次合并后的事件，
   // 减少 onAgentEventCallback 的调用次数（链路上接了 recordAgentEvent + postMessage）。
   // 关键事件（message_complete / tool_use_complete / permission_request 等）不合并。
-  private pendingContentDeltas = ''
-  private pendingThinkingDeltas = ''
+  /**
+   * 按上游到达顺序保存增量。正文和思考不能拆成两个独立缓冲区，
+   * 否则 flush 时固定的发送顺序会把同一轮的 thinking/text 重新排序。
+   */
+  private pendingDeltas: Array<{ type: 'content_delta' | 'thinking'; text: string }> = []
   private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined
 
   /**
@@ -324,15 +327,14 @@ export class QueryEngine {
       clearTimeout(this.deltaFlushTimer)
       this.deltaFlushTimer = undefined
     }
-    if (this.pendingContentDeltas) {
-      const text = this.pendingContentDeltas
-      this.pendingContentDeltas = ''
-      this.onAgentEventCallback?.({ type: 'content_delta', text })
-    }
-    if (this.pendingThinkingDeltas) {
-      const text = this.pendingThinkingDeltas
-      this.pendingThinkingDeltas = ''
-      this.onAgentEventCallback?.({ type: 'thinking', text })
+    const pending = this.pendingDeltas
+    this.pendingDeltas = []
+    for (const delta of pending) {
+      if (delta.type === 'content_delta') {
+        this.onAgentEventCallback?.({ type: 'content_delta', text: delta.text })
+      } else {
+        this.onAgentEventCallback?.({ type: 'thinking', text: delta.text })
+      }
     }
   }
 
@@ -340,21 +342,27 @@ export class QueryEngine {
    * 累积 content_delta，32ms 后批量发送。
    */
   private emitContentDelta(text: string): void {
-    this.pendingContentDeltas += text
+    this.enqueueDelta('content_delta', text)
     this.onMessageCallback?.(text, false)
-    if (!this.deltaFlushTimer) {
-      this.deltaFlushTimer = setTimeout(() => {
-        this.deltaFlushTimer = undefined
-        this.flushPendingDeltas()
-      }, 32)
-    }
   }
 
   /**
    * 累积 thinking delta，32ms 后批量发送。
    */
   private emitThinkingDelta(text: string): void {
-    this.pendingThinkingDeltas += text
+    this.enqueueDelta('thinking', text)
+  }
+
+  private enqueueDelta(type: 'content_delta' | 'thinking', text: string): void {
+    if (!text) return
+
+    const last = this.pendingDeltas[this.pendingDeltas.length - 1]
+    if (last?.type === type) {
+      last.text += text
+    } else {
+      this.pendingDeltas.push({ type, text })
+    }
+
     if (!this.deltaFlushTimer) {
       this.deltaFlushTimer = setTimeout(() => {
         this.deltaFlushTimer = undefined
@@ -924,6 +932,10 @@ Skill 使用契约：
           })
 
           this.throwIfCancelled()
+          // 工具执行器会同步发出 permission/tool_use 事件。先冲刷当前 API
+          // 响应的正文和思考增量，避免 32ms 缓冲在工具事件之后才到达，
+          // 从而把本应位于回答前的 thinking 渲染到会话末尾。
+          this.flushPendingDeltas()
           const toolsStartedAt = performance.now()
           const { results: toolResults, noProgress } =
             await this.executeToolCalls(assistantToolCalls)

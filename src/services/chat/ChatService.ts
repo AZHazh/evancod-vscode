@@ -1217,6 +1217,7 @@ export class ChatService {
   private recordInteractionResponse(response: {
     requestId: string
     answered: boolean
+    answers?: unknown
   }): void {
     const session = this.getCurrentSession()
     if (!session?.transcript) return
@@ -1228,6 +1229,7 @@ export class ChatService {
     if (!block) return
 
     block.responseState = response.answered ? 'answered' : 'cancelled'
+    block.responseAnswers = response.answered ? response.answers : undefined
     session.updatedAt = Date.now()
     this.saveSessions(true)
   }

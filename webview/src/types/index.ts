@@ -207,6 +207,7 @@ export type UIMessage =
       description?: string
       timestamp: number
       responseState?: 'pending' | 'answered' | 'cancelled'
+      responseAnswers?: unknown
     }
   | {
       id: string

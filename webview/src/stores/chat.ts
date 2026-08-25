@@ -992,6 +992,7 @@ export const useChatStore = defineStore('chat', () => {
   function updateInteractionResponseState(
     requestId: string,
     responseState: 'answered' | 'cancelled',
+    responseAnswers?: unknown,
   ) {
     const index = uiMessages.value.findIndex(
       message => message.type === 'interaction_request' && message.requestId === requestId,
@@ -1001,6 +1002,7 @@ export const useChatStore = defineStore('chat', () => {
     uiMessages.value.splice(index, 1, {
       ...uiMessages.value[index],
       responseState,
+      responseAnswers,
     })
   }
 
@@ -1094,6 +1096,7 @@ export const useChatStore = defineStore('chat', () => {
     updateInteractionResponseState(
       response.requestId,
       response.answered ? 'answered' : 'cancelled',
+      response.answered ? response.answers : undefined,
     )
     vscode.postMessage({
       type: 'interaction_response',

@@ -4,7 +4,7 @@
       v-for="option in options"
       :key="option.label"
       class="option-item"
-      :class="{ selected: isSelected(option.label), 'has-preview': option.preview }"
+      :class="{ selected: isSelected(option.label), disabled, 'has-preview': option.preview }"
       @click="handleSelect(option.label)"
     >
       <div class="option-main">
@@ -39,10 +39,12 @@ interface Props {
   options: QuestionOption[]
   allowMultiple?: boolean
   selected: string[]
+  disabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  allowMultiple: false
+  allowMultiple: false,
+  disabled: false
 })
 
 const emit = defineEmits<{
@@ -54,6 +56,8 @@ const isSelected = computed(() => {
 })
 
 function handleSelect(label: string) {
+  if (props.disabled) return
+
   let newSelected: string[]
 
   if (props.allowMultiple) {
@@ -64,8 +68,8 @@ function handleSelect(label: string) {
       newSelected = [...props.selected, label]
     }
   } else {
-    // 单选模式
-    newSelected = [label]
+    // 单选模式：再次点击已选项可以取消选择
+    newSelected = props.selected.includes(label) ? [] : [label]
   }
 
   emit('update:selected', newSelected)
@@ -91,6 +95,21 @@ function handleSelect(label: string) {
 .option-item:hover {
   border-color: var(--vscode-focusBorder);
   background: var(--vscode-list-hoverBackground);
+}
+
+.option-item.disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.option-item.disabled:hover {
+  border-color: var(--vscode-panel-border);
+  background: var(--vscode-input-background);
+}
+
+.option-item.selected.disabled:hover {
+  border-color: var(--vscode-button-background);
+  background: var(--vscode-list-activeSelectionBackground);
 }
 
 .option-item.selected {

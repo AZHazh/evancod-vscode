@@ -153,6 +153,7 @@ async function copyMessage() {
       :request-id="message.requestId"
       :input="message.input"
       :response-state="message.responseState"
+      :response-answers="message.responseAnswers"
     />
 
     <div v-else-if="message.type === 'plan_approval'" class="plan-message">

@@ -18,10 +18,16 @@ interface Question {
   multiSelect?: boolean
 }
 
+interface UserAnswer {
+  selectedOptions: string[]
+  customInput?: string
+}
+
 const props = defineProps<{
   requestId: string
   input: unknown
   responseState?: 'pending' | 'answered' | 'cancelled'
+  responseAnswers?: unknown
 }>()
 
 const chatStore = useChatStore()
@@ -51,6 +57,39 @@ const questions = computed<Question[]>(() => {
   )
 })
 
+function normalizeAnswers(value: unknown) {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+
+  return questions.value.map((_, index) => {
+    const answer = record[`question_${index}`]
+    if (!answer || typeof answer !== 'object' || Array.isArray(answer)) {
+      return { selectedOptions: [], customInput: '' }
+    }
+
+    const item = answer as Partial<UserAnswer>
+    return {
+      selectedOptions: Array.isArray(item.selectedOptions)
+        ? item.selectedOptions.filter((option): option is string => typeof option === 'string')
+        : [],
+      customInput: typeof item.customInput === 'string' ? item.customInput : '',
+    }
+  })
+}
+
+watch(
+  [questions, () => props.responseAnswers],
+  ([, responseAnswers]) => {
+    if (responseAnswers === undefined) return
+    normalizeAnswers(responseAnswers).forEach((answer, index) => {
+      answers[index].selectedOptions = answer.selectedOptions
+      answers[index].customInput = answer.customInput
+    })
+  },
+  { immediate: true },
+)
+
 const allAnswered = computed(() =>
   questions.value.every((_, index) => {
     const answer = answers[index]
@@ -59,7 +98,7 @@ const allAnswered = computed(() =>
 )
 
 function submit() {
-  if (!allAnswered.value) return
+  if (state.value !== 'pending' || !allAnswered.value) return
   const result: Record<string, { selectedOptions: string[]; customInput?: string }> = {}
   questions.value.forEach((_, index) => {
     result[`question_${index}`] = {
@@ -76,6 +115,8 @@ function submit() {
 }
 
 function cancel() {
+  if (state.value !== 'pending') return
+
   state.value = 'cancelled'
   chatStore.sendInteractionResponse({
     requestId: props.requestId,
@@ -118,8 +159,14 @@ function cancel() {
         v-model:selected="answers[index].selectedOptions"
         :options="question.options"
         :allow-multiple="question.multiSelect || false"
+        :disabled="state !== 'pending'"
       />
-      <CustomInput v-model="answers[index].customInput" placeholder="输入其他答案..." />
+      <CustomInput
+        v-model="answers[index].customInput"
+        placeholder="输入其他答案..."
+        :disabled="state !== 'pending'"
+      />
+
     </div>
 
     <footer v-if="state === 'pending'" class="question-card__footer">
