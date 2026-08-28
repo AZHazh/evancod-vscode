@@ -241,7 +241,11 @@ export class WebviewManager {
           case 'chat.send': {
             // 处理用户发送消息
             try {
-              await this.chatService.sendMessage(message.data.content, message.data.files || message.data.images || [])
+              await this.chatService.sendMessage(
+                message.data.content,
+                message.data.files || message.data.images || [],
+                message.data.inlineSegments || []
+              )
               this.postMessage({
                 type: 'chat.messages.update',
                 data: {
@@ -290,6 +294,10 @@ export class WebviewManager {
 
           case 'file.pick':
             await this.handleFilePick()
+            break
+
+          case 'file.open':
+            await this.handleFileOpen(message.data?.path)
             break
 
           case 'workspace.pick':
@@ -866,6 +874,21 @@ export class WebviewManager {
       }
     } catch (error) {
       console.error('Failed to handle permission response:', error)
+    }
+  }
+
+  private async handleFileOpen(filePath?: string): Promise<void> {
+    if (!filePath) return
+    try {
+      const workDir = this.chatService.getCurrentSession()?.workDir
+      const resolvedPath = path.isAbsolute(filePath)
+        ? filePath
+        : path.resolve(workDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd(), filePath)
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolvedPath))
+      await vscode.window.showTextDocument(document, { preview: false })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '无法打开文件'
+      vscode.window.showWarningMessage(`打开文件失败: ${message}`)
     }
   }
 

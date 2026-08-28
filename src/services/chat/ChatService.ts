@@ -526,7 +526,8 @@ export class ChatService {
    */
   async sendMessage(
     content: string,
-    attachments: (string | AttachmentContext)[] = []
+    attachments: (string | AttachmentContext)[] = [],
+    inlineSegments: import('../../types').InlineMessageSegment[] = []
   ): Promise<void> {
     const previousRequest = this.activeRequest
     const request = this.requestQueue
@@ -535,7 +536,7 @@ export class ChatService {
         if (previousRequest) {
           await previousRequest.catch(() => undefined)
         }
-        await this.runMessage(content, attachments)
+        await this.runMessage(content, attachments, inlineSegments)
       })
     this.requestQueue = request
     this.activeRequest = request
@@ -550,7 +551,8 @@ export class ChatService {
 
   private async runMessage(
     content: string,
-    attachments: (string | AttachmentContext)[] = []
+    attachments: (string | AttachmentContext)[] = [],
+    inlineSegments: import('../../types').InlineMessageSegment[] = []
   ): Promise<void> {
     // 1. 验证会话
     const session = this.getCurrentSession()
@@ -593,6 +595,7 @@ export class ChatService {
       timestamp: Date.now(),
       contentBlocks: userContentBlocks,
       attachments: attachmentContexts,
+      inlineSegments,
     }
     session.messages.push(userMessage)
 
@@ -610,6 +613,7 @@ export class ChatService {
       content: displayContent,
       timestamp: userMessage.timestamp,
       attachments: attachmentContexts,
+      inlineSegments,
     })
     session.updatedAt = Date.now()
     session.messageCount = session.messages.length
@@ -636,6 +640,11 @@ export class ChatService {
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
       session.messages = this.queryEngine!.getMessages()
       this.restoreDisplayedCommand(session.messages, commandResult.content, displayContent)
+      const persistedUser = [...session.messages].reverse().find(message => message.role === 'user')
+      if (persistedUser) {
+        persistedUser.attachments = attachmentContexts
+        persistedUser.inlineSegments = inlineSegments
+      }
       session.updatedAt = Date.now()
       session.messageCount = session.messages.length
 

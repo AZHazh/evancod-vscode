@@ -241,6 +241,7 @@ export type WebviewToExtensionMessage =
         content: string
         images?: string[]
         files?: string[]
+        inlineSegments?: import('./index').InlineMessageSegment[]
       }
     }
   | {
@@ -261,6 +262,10 @@ export type WebviewToExtensionMessage =
         toolUseId: string
         taskId?: string
       }
+    }
+  | {
+      type: 'file.open'
+      data: { path: string }
     }
   | {
       type: 'interaction_response'

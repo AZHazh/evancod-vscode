@@ -16,24 +16,22 @@ const emit = defineEmits<{
 
 <template>
   <div v-if="props.attachments.length || props.references.length" class="attachment-gallery">
-    <span v-for="reference in props.references" :key="reference.id" class="attachment-chip reference-chip">
-      @ {{ reference.relativePath }}
-      <button @click="emit('removeReference', reference.id)"><X /></button>
-    </span>
-    <span v-for="attachment in props.attachments" :key="attachment.id" class="attachment-chip">
-      <button
-        v-if="attachment.type === 'image' && attachment.previewUrl"
-        type="button"
-        class="attachment-thumb"
-        title="点击放大"
-        @click="emit('previewImage', attachment.id)"
-      >
-        <img :src="attachment.previewUrl" alt="" />
-      </button>
-      <Paperclip v-else />
-      {{ attachment.name }}
-      <button @click="emit('removeAttachment', attachment.id)"><X /></button>
-    </span>
+    <template v-for="attachment in props.attachments" :key="attachment.id">
+      <span v-if="attachment.type === 'image'" class="attachment-chip">
+        <button
+          v-if="attachment.type === 'image' && attachment.previewUrl"
+          type="button"
+          class="attachment-thumb"
+          title="点击放大"
+          @click="emit('previewImage', attachment.id)"
+        >
+          <img :src="attachment.previewUrl" alt="" />
+        </button>
+        <Paperclip v-else />
+        {{ attachment.name }}
+        <button @click="emit('removeAttachment', attachment.id)"><X /></button>
+      </span>
+    </template>
   </div>
 </template>
 
@@ -41,6 +39,7 @@ const emit = defineEmits<{
 .attachment-gallery {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   padding: 10px 12px 0;
 }
@@ -54,6 +53,7 @@ const emit = defineEmits<{
   background: var(--color-surface-hover);
   color: var(--color-text-primary);
   font-size: 12px;
+  vertical-align: middle;
 
   img {
     width: 20px;

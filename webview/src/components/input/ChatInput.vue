@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, ref, render, watch } from 'vue'
 import {
   ArrowRight,
   AtSign,
   Bot,
   Check,
   ChevronDown,
+  File as FileIcon,
+  Box,
   Gauge,
   Hammer,
   Paperclip,
@@ -27,7 +29,15 @@ import ComposerDropOverlay from './ComposerDropOverlay.vue'
 import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { useVSCode } from '@/composables/useVSCode'
 import type { EffortLevel, PermissionMode } from '@/stores/provider'
-import type { ComposerAttachment, FileSearchEntry, SkillEntry, SlashCommand, WorkspaceReference } from '@/types'
+import type {
+  ComposerAttachment,
+  FileSearchEntry,
+  SkillEntry,
+  SlashCommand,
+  WorkspaceReference,
+  MessageSkill,
+  InlineMessageSegment,
+} from '@/types'
 import {
   filterSkills,
   filterSlashCommands,
@@ -35,7 +45,6 @@ import {
   findSkillListTrigger,
   findSlashTrigger,
   formatSkillPrompt,
-  formatWorkspaceReferencePrompt,
   mergeSlashCommands,
   normalizeSlashCommand,
 } from '@/lib/composerUtils'
@@ -51,11 +60,17 @@ const chatStore = useChatStore()
 const providerStore = useProviderStore()
 const vscode = useVSCode()
 const input = ref('')
-const textarea = ref<HTMLTextAreaElement>()
+const textarea = ref<HTMLElement>()
 const chatInputEl = ref<HTMLElement>()
-const openPanel = ref<'add' | 'permission' | 'model' | 'context' | 'slash' | 'at' | 'skill' | null>(null)
+const openPanel = ref<'add' | 'permission' | 'model' | 'context' | 'slash' | 'at' | 'skill' | null>(
+  null
+)
 const attachments = ref<ComposerAttachment[]>([])
 const workspaceReferences = ref<WorkspaceReference[]>([])
+const selectedSkills = ref<MessageSkill[]>([])
+const attachmentRegistry = new Map<string, ComposerAttachment>()
+const referenceRegistry = new Map<string, WorkspaceReference>()
+const skillRegistry = new Map<string, MessageSkill>()
 const slashCommands = ref<SlashCommand[]>(mergeSlashCommands([]))
 const slashFilter = ref('')
 const slashSelectedIndex = ref(0)
@@ -104,11 +119,12 @@ const usedTokens = computed(
   () => usage.value?.estimatedCurrentTokens || usage.value?.lastPromptTokens || inputTokens.value
 )
 const remainingTokens = computed(() => Math.max(contextWindow.value - usedTokens.value, 0))
-const contextPercent = computed(() =>
-  usage.value?.percentUsed ??
-  (contextWindow.value
-    ? Math.min(Math.round((usedTokens.value / contextWindow.value) * 100), 100)
-    : 0)
+const contextPercent = computed(
+  () =>
+    usage.value?.percentUsed ??
+    (contextWindow.value
+      ? Math.min(Math.round((usedTokens.value / contextWindow.value) * 100), 100)
+      : 0)
 )
 const currentPermission = computed(
   () =>
@@ -140,7 +156,12 @@ const isRunning = computed(() =>
 const canSend = computed(
   () =>
     isRunning.value ||
-    Boolean(input.value.trim() || attachments.value.length || workspaceReferences.value.length)
+    Boolean(
+      input.value.trim() ||
+      attachments.value.length ||
+      workspaceReferences.value.length ||
+      selectedSkills.value.length
+    )
 )
 const filteredSlashCommands = computed(() =>
   filterSlashCommands(slashCommands.value, slashFilter.value)
@@ -161,9 +182,172 @@ const adjustHeight = () => {
   textarea.value.style.height = `${Math.min(textarea.value.scrollHeight, 300)}px`
 }
 
+function editorText() {
+  if (!textarea.value) return ''
+  const clone = textarea.value.cloneNode(true) as HTMLElement
+  clone.querySelectorAll('[data-token-kind]').forEach(token => token.remove())
+  return (clone.innerText || '').replace(/\u00a0/g, ' ')
+}
+
+function syncEditorInput() {
+  syncTokensFromEditor()
+  input.value = editorText()
+  handleInput()
+}
+
+function syncTokensFromEditor() {
+  const editor = textarea.value
+  if (!editor) return
+  const fileIds = new Set(
+    Array.from(editor.querySelectorAll<HTMLElement>('[data-token-kind="file"]')).map(
+      token => token.dataset.tokenId
+    )
+  )
+  const skillNames = new Set(
+    Array.from(editor.querySelectorAll<HTMLElement>('[data-token-kind="skill"]')).map(
+      token => token.dataset.tokenId
+    )
+  )
+  const images = attachments.value.filter(item => item.type === 'image')
+  attachments.value = [
+    ...images,
+    ...Array.from(fileIds)
+      .map(id => (id ? attachmentRegistry.get(id) : undefined))
+      .filter((item): item is ComposerAttachment => !!item),
+  ]
+  workspaceReferences.value = Array.from(fileIds)
+    .map(id => (id ? referenceRegistry.get(id) : undefined))
+    .filter((item): item is WorkspaceReference => !!item)
+  selectedSkills.value = Array.from(skillNames)
+    .map(name => (name ? skillRegistry.get(name) : undefined))
+    .filter((item): item is MessageSkill => !!item)
+}
+
+function insertToken(kind: 'file' | 'skill', label: string, id: string, replaceTrigger = '') {
+  const editor = textarea.value
+  if (!editor) return
+  const selection = window.getSelection()
+  editor.focus()
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange()
+  if (!selection?.rangeCount) {
+    range.selectNodeContents(editor)
+    range.collapse(false)
+  }
+  if (
+    replaceTrigger &&
+    range.collapsed &&
+    range.startContainer.nodeType === Node.TEXT_NODE &&
+    range.startOffset >= replaceTrigger.length
+  ) {
+    const text = range.startContainer.textContent || ''
+    const start = range.startOffset - replaceTrigger.length
+    if (text.slice(start, range.startOffset) === replaceTrigger) {
+      range.setStart(range.startContainer, start)
+      range.deleteContents()
+    }
+  }
+  const token = document.createElement('span')
+  token.className = `inline-token inline-token--${kind}`
+  token.dataset.tokenKind = kind
+  token.dataset.tokenId = id
+  if (kind === 'skill')
+    token.dataset.skillDescription =
+      selectedSkills.value.find(skill => skill.name === label)?.description || ''
+  token.contentEditable = 'false'
+  const iconHost = document.createElement('span')
+  iconHost.className = 'inline-token__icon'
+  render(h(kind === 'file' ? FileIcon : Box, { size: 16, strokeWidth: 2 }), iconHost)
+  token.append(iconHost)
+  const labelNode = document.createElement('span')
+  labelNode.textContent = label
+  token.append(labelNode)
+  range.deleteContents()
+  range.insertNode(token)
+  range.setStartAfter(token)
+  range.collapse(true)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  syncEditorInput()
+}
+
+function removeTriggerText(trigger: string) {
+  const editor = textarea.value
+  if (!editor) return
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  let node: Node | null
+  while ((node = walker.nextNode())) nodes.push(node as Text)
+  const target = nodes[nodes.length - 1]
+  if (!target) return
+  const index = target.data.lastIndexOf(trigger)
+  if (index >= 0)
+    target.data = target.data.slice(0, index) + target.data.slice(index + trigger.length)
+}
+
+function insertTextAtCaret(text: string) {
+  const editor = textarea.value
+  if (!editor) return
+  const selection = window.getSelection()
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange()
+  if (!selection?.rangeCount) {
+    range.selectNodeContents(editor)
+    range.collapse(false)
+  }
+  range.deleteContents()
+  const node = document.createTextNode(text)
+  range.insertNode(node)
+  range.setStartAfter(node)
+  range.collapse(true)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+}
+
+function serializeEditor() {
+  const editor = textarea.value
+  if (!editor) {
+    const segments: InlineMessageSegment[] = [{ type: 'text', text: input.value }]
+    return { content: input.value, skills: selectedSkills.value, segments }
+  }
+  const skillsInOrder: MessageSkill[] = []
+  const segments: InlineMessageSegment[] = []
+  const walk = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || ''
+      if (text) segments.push({ type: 'text', text })
+      return text
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+    const element = node as HTMLElement
+    if (element.dataset.tokenKind === 'skill') {
+      const skill = {
+        name: element.textContent || '',
+        description: element.dataset.skillDescription || undefined,
+      }
+      skillsInOrder.push(skill)
+      segments.push({ type: 'skill', name: skill.name, description: skill.description })
+      return formatSkillPrompt(skill)
+    }
+    if (element.dataset.tokenKind === 'file') {
+      const id = element.dataset.tokenId
+      const file =
+        attachments.value.find(item => item.id === id) ||
+        workspaceReferences.value.find(item => item.id === id)
+      if (file) segments.push({ type: 'file', name: file.name, path: file.path })
+      return ''
+    }
+    if (element.tagName === 'BR') return '\n'
+    return Array.from(node.childNodes).map(walk).join('')
+  }
+  return {
+    content: Array.from(editor.childNodes).map(walk).join('').trim(),
+    skills: skillsInOrder,
+    segments,
+  }
+}
+
 function handleInput() {
   adjustHeight()
-  const cursor = textarea.value?.selectionStart ?? input.value.length
+  const cursor = input.value.length
 
   // /skill-list 需优先于普通斜杠命令检测，否则会被当作普通斜杠命令
   const skillList = findSkillListTrigger(input.value, cursor)
@@ -209,20 +393,47 @@ function handleSend() {
     return
   }
 
-  const text = input.value.trim()
-  if (!text && !attachments.value.length && !workspaceReferences.value.length) return
+  const serialized = serializeEditor()
+  const text = serialized.content.trim()
+  if (
+    !text &&
+    !attachments.value.length &&
+    !workspaceReferences.value.length &&
+    !selectedSkills.value.length
+  )
+    return
 
-  const referencePrompt = formatWorkspaceReferencePrompt(workspaceReferences.value)
-  const content = [text, referencePrompt].filter(Boolean).join('\n\n')
+  const content = text
   const files = [
     ...attachments.value.map(composerAttachmentToPayload),
     ...workspaceReferences.value.map(workspaceReferenceToPayload),
   ]
+  const displayAttachments = [
+    ...attachments.value.map(attachment => ({
+      path: attachment.path || attachment.name,
+      name: attachment.name,
+      kind: attachment.type === 'image' ? ('image' as const) : ('binary' as const),
+      mime: attachment.mimeType,
+      size: attachment.size || 0,
+      base64: attachment.type === 'image' ? attachment.data?.split(',')[1] : undefined,
+    })),
+    ...workspaceReferences.value.map(reference => ({
+      path: reference.path,
+      name: reference.name,
+      kind: 'text' as const,
+      size: 0,
+    })),
+  ]
 
-  chatStore.sendMessage(content, files)
+  chatStore.sendMessage(content, files, serialized.skills, displayAttachments, serialized.segments)
   input.value = ''
+  if (textarea.value) textarea.value.innerHTML = ''
   attachments.value = []
   workspaceReferences.value = []
+  selectedSkills.value = []
+  attachmentRegistry.clear()
+  referenceRegistry.clear()
+  skillRegistry.clear()
   openPanel.value = null
   nextTick(adjustHeight)
 }
@@ -295,7 +506,13 @@ function handleKeydown(event: KeyboardEvent) {
     }
   }
 
-  if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  if (
+    event.key === 'Enter' &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  ) {
     event.preventDefault()
     handleSend()
   }
@@ -315,12 +532,13 @@ function applySlashCommand(command: SlashCommand) {
   // /skill-list 不作为文本插入，改为打开技能选择弹框
   if (normalized.name === 'skill-list') {
     if (slashTriggerStart.value != null) {
-      const cursor = textarea.value?.selectionStart ?? input.value.length
+      const trigger = input.value.slice(slashTriggerStart.value)
       const before = input.value.slice(0, slashTriggerStart.value)
-      const after = input.value.slice(cursor)
+      const after = ''
       input.value = `${before}${after}`
+      removeTriggerText(trigger)
       nextTick(() => {
-        textarea.value?.setSelectionRange(before.length, before.length)
+        textarea.value?.focus()
         adjustHeight()
       })
     }
@@ -333,15 +551,18 @@ function applySlashCommand(command: SlashCommand) {
   }
 
   if (slashTriggerStart.value == null) return
-  const cursor = textarea.value?.selectionStart ?? input.value.length
+  const cursor = input.value.length
+  const trigger =
+    slashTriggerStart.value == null ? '' : input.value.slice(slashTriggerStart.value, cursor)
   const before = input.value.slice(0, slashTriggerStart.value)
   const after = input.value.slice(cursor)
   const inserted = `/${normalized.name} `
   input.value = `${before}${inserted}${after}`
+  removeTriggerText(trigger)
+  insertTextAtCaret(inserted)
   openPanel.value = null
   nextTick(() => {
-    const nextCursor = before.length + inserted.length
-    textarea.value?.setSelectionRange(nextCursor, nextCursor)
+    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
@@ -349,40 +570,52 @@ function applySlashCommand(command: SlashCommand) {
 
 function applyFileReference(entry: FileSearchEntry) {
   if (atTriggerStart.value == null) return
-  const cursor = textarea.value?.selectionStart ?? input.value.length
+  const cursor = input.value.length
+  const trigger = input.value.slice(atTriggerStart.value, cursor)
   const before = input.value.slice(0, atTriggerStart.value)
   const after = input.value.slice(cursor)
   input.value = `${before}${after}`
   if (!workspaceReferences.value.some(reference => reference.path === entry.path)) {
+    const id = createId()
     workspaceReferences.value.push({
-      id: createId(),
+      id,
       type: entry.type,
       name: entry.name,
       path: entry.path,
       relativePath: entry.relativePath,
     })
+    referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
+    insertToken('file', entry.name, id, trigger)
   }
   openPanel.value = null
   nextTick(() => {
-    textarea.value?.setSelectionRange(before.length, before.length)
+    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
 }
 
 function applySkill(skill: SkillEntry) {
-  const cursor = textarea.value?.selectionStart ?? input.value.length
+  const cursor = input.value.length
   // skillTriggerStart 为空表示通过 + 菜单等入口打开，直接插入到光标处
   const anchor = skillTriggerStart.value ?? cursor
   const before = input.value.slice(0, anchor)
   const after = input.value.slice(cursor)
-  const inserted = formatSkillPrompt(skill)
-  input.value = `${before}${inserted}${after}`
+  const trigger = input.value.slice(anchor, cursor)
+  input.value = `${before}${after}`
+  if (!selectedSkills.value.some(item => item.name === skill.name)) {
+    selectedSkills.value.push({
+      name: skill.name,
+      description: skill.description,
+      trigger: skill.trigger,
+    })
+    skillRegistry.set(skill.name, selectedSkills.value[selectedSkills.value.length - 1])
+    insertToken('skill', skill.name, skill.name, trigger)
+  }
   openPanel.value = null
   skillTriggerStart.value = null
   nextTick(() => {
-    const nextCursor = before.length + inserted.length
-    textarea.value?.setSelectionRange(nextCursor, nextCursor)
+    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
@@ -425,10 +658,49 @@ function openSkillListPanel() {
 
 async function appendFiles(files: File[]) {
   const converted = await Promise.all(files.map(fileToComposerAttachment))
-  attachments.value.push(...converted)
+  converted.forEach(file => {
+    attachments.value.push(file)
+    if (file.type === 'file') {
+      attachmentRegistry.set(file.id, file)
+      insertToken('file', file.name, file.id)
+    }
+  })
 }
 
 async function handlePaste(event: ClipboardEvent) {
+  const inlineData = event.clipboardData?.getData('application/x-evancod-inline-segments')
+  if (inlineData) {
+    try {
+      const segments = JSON.parse(inlineData) as InlineMessageSegment[]
+      event.preventDefault()
+      for (const segment of segments) {
+        if (segment.type === 'text') insertTextAtCaret(segment.text || '')
+        else if (segment.type === 'skill') {
+          selectedSkills.value.push({ name: segment.name || '', description: segment.description })
+          skillRegistry.set(
+            segment.name || '',
+            selectedSkills.value[selectedSkills.value.length - 1]
+          )
+          insertToken('skill', segment.name || '', segment.name || '')
+        } else if (segment.type === 'file' && segment.path) {
+          const id = createId()
+          workspaceReferences.value.push({
+            id,
+            type: 'file',
+            name: segment.name || segment.path,
+            path: segment.path,
+            relativePath: segment.path,
+          })
+          referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
+          insertToken('file', segment.name || segment.path, id)
+        }
+      }
+      syncEditorInput()
+      return
+    } catch {
+      // 回退到普通粘贴
+    }
+  }
   const files = Array.from(event.clipboardData?.items ?? [])
     .filter(item => item.type.startsWith('image/'))
     .map(item => item.getAsFile())
@@ -463,6 +735,9 @@ function handleMessage(event: MessageEvent) {
         name: file.name || file.path,
         size: 0,
       })
+      const attachment = attachments.value[attachments.value.length - 1]
+      attachmentRegistry.set(attachment.id, attachment)
+      insertToken('file', file.name || file.path, attachment.id)
     }
   }
 
@@ -519,8 +794,8 @@ onUnmounted(() => {
     >
       <ComposerDropOverlay v-if="isDragActive" />
       <AttachmentGallery
-        :attachments="attachments"
-        :references="workspaceReferences"
+        :attachments="attachments.filter(item => item.type === 'image')"
+        :references="[]"
         @remove-attachment="attachments = attachments.filter(item => item.id !== $event)"
         @remove-reference="
           workspaceReferences = workspaceReferences.filter(item => item.id !== $event)
@@ -528,16 +803,17 @@ onUnmounted(() => {
         @preview-image="handlePreviewImage"
       />
 
-      <textarea
+      <div
         ref="textarea"
-        v-model="input"
         class="chat-input__textarea"
+        contenteditable="true"
+        role="textbox"
+        aria-multiline="true"
         placeholder="让 Evancod 编辑、调试或解释代码..."
-        rows="1"
-        @input="handleInput"
+        @input="syncEditorInput"
         @keydown="handleKeydown"
         @paste="handlePaste"
-      />
+      ></div>
 
       <div class="chat-input__controls">
         <div class="controls-left">
@@ -784,6 +1060,7 @@ onUnmounted(() => {
   }
 
   &__textarea {
+    display: block;
     min-height: 74px;
     max-height: 300px;
     padding: 22px 18px 16px;
@@ -801,6 +1078,16 @@ onUnmounted(() => {
     &:focus {
       outline: none;
     }
+
+    &:empty::before {
+      color: var(--vscode-input-placeholderForeground, var(--color-text-tertiary));
+      content: attr(placeholder);
+      pointer-events: none;
+    }
+  }
+
+  :deep(.inline-token--file) {
+    color: #f3c777;
   }
 
   &__controls {
@@ -813,6 +1100,33 @@ onUnmounted(() => {
     background: color-mix(in srgb, var(--color-surface) 54%, transparent);
     border-radius: 0 0 18px 18px;
   }
+}
+
+:deep(.inline-token) {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 2px;
+  color: #67c0ff;
+  font-size: 13px;
+  line-height: 1.5;
+  vertical-align: bottom;
+  user-select: all;
+}
+:deep(.inline-token--file) {
+  color: #79c9ff;
+}
+:deep(.inline-token__icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 5px;
+  color: #55b7ff;
+}
+:deep(.inline-token__icon svg) {
+  display: block;
+}
+:deep(.inline-token--skill) {
+  color: #69bfff;
 }
 
 .icon-trigger,

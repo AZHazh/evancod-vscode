@@ -107,6 +107,7 @@ export interface Message {
   toolName?: string
   contentBlocks?: ContentBlock[]
   attachments?: AttachmentContext[]
+  inlineSegments?: InlineMessageSegment[]
 }
 
 export interface ToolCall {
@@ -148,6 +149,20 @@ export interface UIAttachment {
   type?: string
 }
 
+export interface MessageSkill {
+  name: string
+  description?: string
+  trigger?: string
+}
+
+export interface InlineMessageSegment {
+  type: 'text' | 'file' | 'skill'
+  text?: string
+  path?: string
+  name?: string
+  description?: string
+}
+
 export type UIMessage =
   | {
       id: string
@@ -155,6 +170,8 @@ export type UIMessage =
       content: string
       timestamp: number
       attachments?: AttachmentContext[]
+      skills?: MessageSkill[]
+      inlineSegments?: InlineMessageSegment[]
     }
   | {
       id: string
@@ -313,12 +330,29 @@ export type AgentServerEvent =
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'
-      subtype: 'task_started' | 'task_progress' | 'task_notification' | 'compact_started' | 'compact_complete'
+      subtype:
+        | 'task_started'
+        | 'task_progress'
+        | 'task_notification'
+        | 'compact_started'
+        | 'compact_complete'
       message?: string
       data?: AgentTaskNotification | Record<string, unknown>
     }
-  | { type: 'bash_output'; toolUseId: string; stream: 'stdout' | 'stderr'; text: string; taskId?: string }
-  | { type: 'bash_status'; toolUseId: string; status: BashStatus; exitCode?: number | null; taskId?: string }
+  | {
+      type: 'bash_output'
+      toolUseId: string
+      stream: 'stdout' | 'stderr'
+      text: string
+      taskId?: string
+    }
+  | {
+      type: 'bash_status'
+      toolUseId: string
+      status: BashStatus
+      exitCode?: number | null
+      taskId?: string
+    }
 
 export interface PermissionRequest {
   requestId: string

@@ -130,7 +130,7 @@ export function filterSkills(skills: SkillEntry[], filter: string) {
  * 选中技能后插入到输入框的自然语言指令。
  * 让模型据此按需调用 skill 工具加载正文，而非直接下发技能内容。
  */
-export function formatSkillPrompt(skill: SkillEntry) {
+export function formatSkillPrompt(skill: { name: string; description?: string }) {
   const desc = skill.description ? `（${skill.description}）` : ''
   return `使用 ${skill.name} 技能${desc}，`
 }

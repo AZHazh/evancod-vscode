@@ -3,11 +3,22 @@ import { ref, computed, toRaw, isRef } from 'vue'
 import { useVSCode } from '@/composables/useVSCode'
 import { useProviderStore } from './provider'
 import { useAgentStore } from './agent'
-import type { Session, UIMessage, AgentServerEvent, PermissionRequest, TokenUsage, AttachmentContext, SessionListItem } from '@/types'
+import type {
+  Session,
+  UIMessage,
+  AgentServerEvent,
+  PermissionRequest,
+  TokenUsage,
+  AttachmentContext,
+  SessionListItem,
+  MessageSkill,
+  InlineMessageSegment,
+} from '@/types'
 
 import { reorderTranscript } from '@/utils/messageGrouping'
 
-type JsonSafeValue = string | number | boolean | null | JsonSafeValue[] | { [key: string]: JsonSafeValue }
+type JsonSafeValue =
+  string | number | boolean | null | JsonSafeValue[] | { [key: string]: JsonSafeValue }
 
 function toPlainJsonSafe(value: unknown): JsonSafeValue | undefined {
   if (isRef(value)) {
@@ -23,7 +34,12 @@ function toPlainJsonSafe(value: unknown): JsonSafeValue | undefined {
     return rawValue as string | number | boolean
   }
 
-  if (valueType === 'undefined' || valueType === 'function' || valueType === 'symbol' || valueType === 'bigint') {
+  if (
+    valueType === 'undefined' ||
+    valueType === 'function' ||
+    valueType === 'symbol' ||
+    valueType === 'bigint'
+  ) {
     return undefined
   }
 
@@ -53,7 +69,9 @@ export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
   const isStreaming = ref(false)
   const providerStore = useProviderStore()
-  const chatState = ref<'idle' | 'thinking' | 'waiting_permission' | 'waiting_interaction' | 'stopped'>('idle')
+  const chatState = ref<
+    'idle' | 'thinking' | 'waiting_permission' | 'waiting_interaction' | 'stopped'
+  >('idle')
   const streamingText = ref('')
   const streamingToolInput = ref('')
   const activeToolUseId = ref<string | null>(null)
@@ -62,7 +80,9 @@ export const useChatStore = defineStore('chat', () => {
   const tokenUsage = ref<TokenUsage | null>(null)
   const uiMessages = ref<UIMessage[]>([])
   const pendingOptimisticUserMessageIds = ref(new Set<string>())
-  const agentTaskNotifications = ref<Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>>({})
+  const agentTaskNotifications = ref<
+    Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>
+  >({})
   const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
   // ===== 性能优化：流式更新 rAF 批量合并 =====
@@ -110,7 +130,12 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  function scheduleBashOutput(toolUseId: string, stream: 'stdout' | 'stderr', text: string, taskId?: string) {
+  function scheduleBashOutput(
+    toolUseId: string,
+    stream: 'stdout' | 'stderr',
+    text: string,
+    taskId?: string
+  ) {
     const pending = pendingBashUpdates.get(toolUseId) || { stdout: '', stderr: '', taskId }
     if (stream === 'stdout') pending.stdout += text
     else pending.stderr += text
@@ -249,8 +274,11 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 性能优化：如果是追加模式且已有消息，只处理新增的部分
-    const existingCount = uiMessages.value.filter(m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')).length
-    const isAppendMode = preserveRuntime && existingCount > 0 && currentSession.value.messages.length > existingCount
+    const existingCount = uiMessages.value.filter(
+      m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')
+    ).length
+    const isAppendMode =
+      preserveRuntime && existingCount > 0 && currentSession.value.messages.length > existingCount
 
     // 合并 agentTaskNotifications，保留本地已有的通知（避免被后端旧数据覆盖）
     const incomingNotifications = currentSession.value.agentTaskNotifications || {}
@@ -313,15 +341,15 @@ export const useChatStore = defineStore('chat', () => {
 
       // 流式过程中，保留前端临时消息（thinking、assistant streaming）
       if (isStreaming) {
-        const streamingMessages = uiMessages.value.filter(m =>
-          m.id === 'streaming-thinking' ||
-          m.id === 'streaming-assistant' ||
-          (m.type === 'tool_use' && m.isPending && m.partialInput)
+        const streamingMessages = uiMessages.value.filter(
+          m =>
+            m.id === 'streaming-thinking' ||
+            m.id === 'streaming-assistant' ||
+            (m.type === 'tool_use' && m.isPending && m.partialInput)
         )
         // 移除 transcript 中可能存在的同类型旧消息，用流式临时消息替换
-        rebuiltMessages = rebuiltMessages.filter(m =>
-          m.id !== 'streaming-thinking' &&
-          m.id !== 'streaming-assistant'
+        rebuiltMessages = rebuiltMessages.filter(
+          m => m.id !== 'streaming-thinking' && m.id !== 'streaming-assistant'
         )
         rebuiltMessages.push(...streamingMessages)
       }
@@ -338,7 +366,10 @@ export const useChatStore = defineStore('chat', () => {
     const existingRuntime = preserveRuntime
       ? new Map(
           uiMessages.value
-            .filter((message): message is Extract<UIMessage, { type: 'tool_use' }> => message.type === 'tool_use')
+            .filter(
+              (message): message is Extract<UIMessage, { type: 'tool_use' }> =>
+                message.type === 'tool_use'
+            )
             .map(message => [message.toolUseId, message])
         )
       : new Map<string, Extract<UIMessage, { type: 'tool_use' }>>()
@@ -349,7 +380,11 @@ export const useChatStore = defineStore('chat', () => {
     let startIndex = 0
     if (isAppendMode) {
       // 复用已有的消息（除了临时消息）
-      nextMessages.push(...uiMessages.value.filter(m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')))
+      nextMessages.push(
+        ...uiMessages.value.filter(
+          m => !m.id.startsWith('optimistic-') && !m.id.startsWith('streaming-')
+        )
+      )
       startIndex = existingCount
     }
 
@@ -362,6 +397,8 @@ export const useChatStore = defineStore('chat', () => {
           type: 'user_text',
           content: message.content,
           timestamp: message.timestamp,
+          attachments: message.attachments,
+          inlineSegments: message.inlineSegments,
         })
         continue
       }
@@ -386,7 +423,9 @@ export const useChatStore = defineStore('chat', () => {
             toolUseId: toolCall.id,
             input: toolCall.input ?? toolCall.args ?? null,
             timestamp: toolCall.startTime || message.timestamp,
-            isPending: existing?.isPending ?? (toolCall.status === 'pending' || toolCall.status === 'running'),
+            isPending:
+              existing?.isPending ??
+              (toolCall.status === 'pending' || toolCall.status === 'running'),
             bash: existing?.bash,
             notification: existing?.notification || agentTaskNotifications.value[toolCall.id],
           })
@@ -422,7 +461,10 @@ export const useChatStore = defineStore('chat', () => {
   function removeReconciledOptimisticMessages(nextMessages: UIMessage[]) {
     const serverUserMessages = new Set(
       nextMessages
-        .filter((message): message is Extract<UIMessage, { type: 'user_text' }> => message.type === 'user_text' && !message.id.startsWith('optimistic-user-'))
+        .filter(
+          (message): message is Extract<UIMessage, { type: 'user_text' }> =>
+            message.type === 'user_text' && !message.id.startsWith('optimistic-user-')
+        )
         .map(message => normalizeUserContent(message.content))
     )
 
@@ -440,7 +482,9 @@ export const useChatStore = defineStore('chat', () => {
 
   function upsertPlanApprovalMessage(plan: import('./plan').Plan) {
     const id = `plan-approval-${plan.id}`
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'plan_approval' && message.plan.id === plan.id)
+    const existingIndex = uiMessages.value.findIndex(
+      message => message.type === 'plan_approval' && message.plan.id === plan.id
+    )
     const nextMessage: UIMessage = {
       id,
       type: 'plan_approval',
@@ -455,8 +499,13 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  function updatePlanApprovalMessage(planId: string, updater: (plan: import('./plan').Plan) => void) {
-    const message = uiMessages.value.find(message => message.type === 'plan_approval' && message.plan.id === planId)
+  function updatePlanApprovalMessage(
+    planId: string,
+    updater: (plan: import('./plan').Plan) => void
+  ) {
+    const message = uiMessages.value.find(
+      message => message.type === 'plan_approval' && message.plan.id === planId
+    )
     if (!message || message.type !== 'plan_approval') return
     updater(message.plan)
   }
@@ -498,7 +547,9 @@ export const useChatStore = defineStore('chat', () => {
       case 'content_delta':
         if (typeof event.text === 'string') {
           // 首次收到最终回答时，finalize 当前 thinking 段
-          const existingAssistant = uiMessages.value.find(m => m.type === 'assistant_text' && m.id === 'streaming-assistant')
+          const existingAssistant = uiMessages.value.find(
+            m => m.type === 'assistant_text' && m.id === 'streaming-assistant'
+          )
           if (!existingAssistant) {
             if (thinkingBlockRaf) {
               window.cancelAnimationFrame(thinkingBlockRaf)
@@ -664,9 +715,16 @@ export const useChatStore = defineStore('chat', () => {
     // 如果缓存的索引已失效（消息被 finalize 改名或数组被重建），重新查找
     const len = uiMessages.value.length
     let idx = streamingAssistantIndex
-    if (idx < 0 || idx >= len || uiMessages.value[idx]?.type !== 'assistant_text' || (uiMessages.value[idx] as any)?.id !== 'streaming-assistant') {
+    if (
+      idx < 0 ||
+      idx >= len ||
+      uiMessages.value[idx]?.type !== 'assistant_text' ||
+      (uiMessages.value[idx] as any)?.id !== 'streaming-assistant'
+    ) {
       // 回退到 O(n) 查找，但只查一次，后续命中缓存
-      idx = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
+      idx = uiMessages.value.findIndex(
+        message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+      )
     }
     streamingAssistantIndex = idx
 
@@ -690,8 +748,15 @@ export const useChatStore = defineStore('chat', () => {
   function upsertThinkingBlock(text: string) {
     const len = uiMessages.value.length
     let idx = streamingThinkingIndex
-    if (idx < 0 || idx >= len || uiMessages.value[idx]?.type !== 'thinking' || (uiMessages.value[idx] as any)?.id !== 'streaming-thinking') {
-      idx = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
+    if (
+      idx < 0 ||
+      idx >= len ||
+      uiMessages.value[idx]?.type !== 'thinking' ||
+      (uiMessages.value[idx] as any)?.id !== 'streaming-thinking'
+    ) {
+      idx = uiMessages.value.findIndex(
+        message => message.type === 'thinking' && message.id === 'streaming-thinking'
+      )
     }
     streamingThinkingIndex = idx
 
@@ -713,7 +778,9 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function finalizeCurrentThinkingSegment() {
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'thinking' && message.id === 'streaming-thinking')
+    const existingIndex = uiMessages.value.findIndex(
+      message => message.type === 'thinking' && message.id === 'streaming-thinking'
+    )
     if (existingIndex === -1) {
       streamingThinkingIndex = -1
       return
@@ -735,7 +802,9 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function finalizeCurrentAssistantSegment() {
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'assistant_text' && message.id === 'streaming-assistant')
+    const existingIndex = uiMessages.value.findIndex(
+      message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+    )
     // 重置流式文本缓冲，使工具之后的新文字从空开始，另起新块排在工具下方
     streamingText.value = ''
     streamingAssistantIndex = -1
@@ -781,7 +850,12 @@ export const useChatStore = defineStore('chat', () => {
     uiMessages.value.splice(existingIndex, 1, payload)
   }
 
-  function upsertToolUse(input?: { toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string }) {
+  function upsertToolUse(input?: {
+    toolName: string
+    toolUseId: string
+    input: unknown
+    parentToolUseId?: string
+  }) {
     if (!activeToolUseId.value && !input?.toolUseId) return
 
     const toolUseId = input?.toolUseId || activeToolUseId.value || ''
@@ -791,12 +865,20 @@ export const useChatStore = defineStore('chat', () => {
     // 使用缓存索引，避免每次 O(n) findIndex
     const len = uiMessages.value.length
     let existingIndex = toolUseIndexCache.get(toolUseId) ?? -1
-    if (existingIndex < 0 || existingIndex >= len || uiMessages.value[existingIndex]?.type !== 'tool_use' || (uiMessages.value[existingIndex] as any)?.toolUseId !== toolUseId) {
-      existingIndex = uiMessages.value.findIndex(message => message.type === 'tool_use' && message.toolUseId === toolUseId)
+    if (
+      existingIndex < 0 ||
+      existingIndex >= len ||
+      uiMessages.value[existingIndex]?.type !== 'tool_use' ||
+      (uiMessages.value[existingIndex] as any)?.toolUseId !== toolUseId
+    ) {
+      existingIndex = uiMessages.value.findIndex(
+        message => message.type === 'tool_use' && message.toolUseId === toolUseId
+      )
     }
-    const existingItem = existingIndex === -1 || uiMessages.value[existingIndex].type !== 'tool_use'
-      ? null
-      : uiMessages.value[existingIndex] as Extract<UIMessage, { type: 'tool_use' }>
+    const existingItem =
+      existingIndex === -1 || uiMessages.value[existingIndex].type !== 'tool_use'
+        ? null
+        : (uiMessages.value[existingIndex] as Extract<UIMessage, { type: 'tool_use' }>)
     const nextItem = {
       id: toolUseId,
       type: 'tool_use' as const,
@@ -832,7 +914,9 @@ export const useChatStore = defineStore('chat', () => {
       parentToolUseId: event.parentToolUseId,
     }
 
-    const existingIndex = uiMessages.value.findIndex(message => message.type === 'tool_result' && message.toolUseId === event.toolUseId)
+    const existingIndex = uiMessages.value.findIndex(
+      message => message.type === 'tool_result' && message.toolUseId === event.toolUseId
+    )
     if (existingIndex === -1) {
       uiMessages.value.push(payload)
       return
@@ -870,14 +954,23 @@ export const useChatStore = defineStore('chat', () => {
 
   function updateBashMessage(
     toolUseId: string,
-    updater: (message: Extract<UIMessage, { type: 'tool_use' }>) => Extract<UIMessage, { type: 'tool_use' }>
+    updater: (
+      message: Extract<UIMessage, { type: 'tool_use' }>
+    ) => Extract<UIMessage, { type: 'tool_use' }>
   ) {
-    const index = uiMessages.value.findIndex(message => message.type === 'tool_use' && message.toolUseId === toolUseId)
+    const index = uiMessages.value.findIndex(
+      message => message.type === 'tool_use' && message.toolUseId === toolUseId
+    )
     if (index === -1 || uiMessages.value[index].type !== 'tool_use') return
     Object.assign(uiMessages.value[index], updater(uiMessages.value[index]))
   }
 
-  function appendBashOutput(toolUseId: string, stream: 'stdout' | 'stderr', text: string, taskId?: string) {
+  function appendBashOutput(
+    toolUseId: string,
+    stream: 'stdout' | 'stderr',
+    text: string,
+    taskId?: string
+  ) {
     updateBashMessage(toolUseId, message => {
       const bash = message.bash || { stdout: '', stderr: '' }
       return {
@@ -893,7 +986,12 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  function updateBashStatus(toolUseId: string, status: NonNullable<NonNullable<Extract<UIMessage, { type: 'tool_use' }>['bash']>['status']>, exitCode?: number | null, taskId?: string) {
+  function updateBashStatus(
+    toolUseId: string,
+    status: NonNullable<NonNullable<Extract<UIMessage, { type: 'tool_use' }>['bash']>['status']>,
+    exitCode?: number | null,
+    taskId?: string
+  ) {
     updateBashMessage(toolUseId, message => {
       const bash = message.bash || { stdout: '', stderr: '' }
       return {
@@ -919,10 +1017,17 @@ export const useChatStore = defineStore('chat', () => {
     mergeBashToolResult(uiMessages.value, event.toolUseId, event.content, event.isError)
   }
 
-  function mergeBashToolResult(messages: UIMessage[], toolUseId: string, content: unknown, isError = false) {
+  function mergeBashToolResult(
+    messages: UIMessage[],
+    toolUseId: string,
+    content: unknown,
+    isError = false
+  ) {
     const index = messages.findIndex(
       (message): message is Extract<UIMessage, { type: 'tool_use' }> =>
-        message.type === 'tool_use' && message.toolUseId === toolUseId && message.toolName === 'bash'
+        message.type === 'tool_use' &&
+        message.toolUseId === toolUseId &&
+        message.toolName === 'bash'
     )
     if (index === -1 || messages[index].type !== 'tool_use') return
 
@@ -942,16 +1047,23 @@ export const useChatStore = defineStore('chat', () => {
       isPending: false,
       bash: {
         ...bash,
-        stdout: typeof metadata?.stdout === 'string' && !bash.stdout ? metadata.stdout : bash.stdout,
-        stderr: typeof metadata?.stderr === 'string' && !bash.stderr ? metadata.stderr : bash.stderr,
-        exitCode: typeof metadata?.exitCode === 'number' || metadata?.exitCode === null ? metadata.exitCode : bash.exitCode,
+        stdout:
+          typeof metadata?.stdout === 'string' && !bash.stdout ? metadata.stdout : bash.stdout,
+        stderr:
+          typeof metadata?.stderr === 'string' && !bash.stderr ? metadata.stderr : bash.stderr,
+        exitCode:
+          typeof metadata?.exitCode === 'number' || metadata?.exitCode === null
+            ? metadata.exitCode
+            : bash.exitCode,
         taskId: typeof metadata?.taskId === 'string' ? metadata.taskId : bash.taskId,
         status,
       },
     })
   }
 
-  function parseToolResultContent(content: unknown): { success?: boolean; metadata?: Record<string, any> } | null {
+  function parseToolResultContent(
+    content: unknown
+  ): { success?: boolean; metadata?: Record<string, any> } | null {
     if (typeof content !== 'string') return null
     try {
       const parsed = JSON.parse(content)
@@ -992,10 +1104,10 @@ export const useChatStore = defineStore('chat', () => {
   function updateInteractionResponseState(
     requestId: string,
     responseState: 'answered' | 'cancelled',
-    responseAnswers?: unknown,
+    responseAnswers?: unknown
   ) {
     const index = uiMessages.value.findIndex(
-      message => message.type === 'interaction_request' && message.requestId === requestId,
+      message => message.type === 'interaction_request' && message.requestId === requestId
     )
     if (index === -1 || uiMessages.value[index].type !== 'interaction_request') return
 
@@ -1006,7 +1118,13 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  function sendMessage(content: string, files: (string | AttachmentContext)[] = []) {
+  function sendMessage(
+    content: string,
+    files: (string | AttachmentContext)[] = [],
+    skills: MessageSkill[] = [],
+    displayAttachments?: AttachmentContext[],
+    inlineSegments: InlineMessageSegment[] = []
+  ) {
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
     const isBuiltinCommand = /^\/(clear|clean|new|compact|help)(\s|$)/i.test(trimmed)
@@ -1017,7 +1135,11 @@ export const useChatStore = defineStore('chat', () => {
       type: 'user_text',
       content,
       timestamp: Date.now(),
-      attachments: files.filter((file): file is AttachmentContext => typeof file !== 'string'),
+      attachments:
+        displayAttachments ||
+        files.filter((file): file is AttachmentContext => typeof file !== 'string'),
+      skills,
+      inlineSegments,
     }
 
     pendingOptimisticUserMessageIds.value.add(optimisticId)
@@ -1030,7 +1152,7 @@ export const useChatStore = defineStore('chat', () => {
 
     vscode.postMessage({
       type: 'chat.send',
-      data: { content, files }
+      data: { content, files, inlineSegments },
     })
   }
 
@@ -1074,7 +1196,13 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  function sendPermissionResponse(response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) {
+  function sendPermissionResponse(response: {
+    requestId: string
+    approved: boolean
+    reason?: string
+    updatedInput?: unknown
+    rule?: 'once' | 'always'
+  }) {
     updatePermissionResponseState(response.requestId, response.approved ? 'approved' : 'denied')
 
     const plainResponse = toPlainJsonSafe(response)
@@ -1096,7 +1224,7 @@ export const useChatStore = defineStore('chat', () => {
     updateInteractionResponseState(
       response.requestId,
       response.answered ? 'answered' : 'cancelled',
-      response.answered ? response.answers : undefined,
+      response.answered ? response.answers : undefined
     )
     vscode.postMessage({
       type: 'interaction_response',
@@ -1135,4 +1263,3 @@ export const useChatStore = defineStore('chat', () => {
     isTaskToolUse,
   }
 })
-

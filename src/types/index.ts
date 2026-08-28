@@ -21,6 +21,14 @@ export interface AttachmentContext {
   inline?: boolean
 }
 
+export interface InlineMessageSegment {
+  type: 'text' | 'file' | 'skill'
+  text?: string
+  path?: string
+  name?: string
+  description?: string
+}
+
 export interface TokenUsage {
   inputTokens?: number
   outputTokens?: number
@@ -75,7 +83,7 @@ export interface GeneratedImageRef {
 }
 
 export type AgentTranscriptBlock =
-  | { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: AttachmentContext[] }
+  | { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: AttachmentContext[]; inlineSegments?: InlineMessageSegment[] }
   | { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string }
   | { id: string; type: 'thinking'; content: string; timestamp: number }
   | {
@@ -147,6 +155,7 @@ export interface Message {
   toolName?: string
   contentBlocks?: ContentBlock[]
   attachments?: AttachmentContext[]
+  inlineSegments?: InlineMessageSegment[]
 }
 
 export interface ToolCall {

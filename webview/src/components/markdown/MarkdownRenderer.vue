@@ -1,26 +1,7 @@
-/**
- * Markdown 渲染组件
- *
- * 职责：
- * 1. 将 Markdown 文本渲染为 HTML
- * 2. 支持代码语法高亮
- * 3. 支持代码块复制
- * 4. 支持表格、列表等常见格式
- *
- * 使用的库：
- * - marked: Markdown 解析器
- * - highlight.js: 代码语法高亮
- *
- * 设计理念：
- * - 安全渲染（防止 XSS）
- * - 自定义样式
- * - 代码块增强
- *
- * 使用场景：
- * - AI 回复消息
- * - 工具执行结果
- * - 帮助文档
- */
+/** * Markdown 渲染组件 * * 职责： * 1. 将 Markdown 文本渲染为 HTML * 2. 支持代码语法高亮 * 3.
+支持代码块复制 * 4. 支持表格、列表等常见格式 * * 使用的库： * - marked: Markdown 解析器 * -
+highlight.js: 代码语法高亮 * * 设计理念： * - 安全渲染（防止 XSS） * - 自定义样式 * - 代码块增强 * *
+使用场景： * - AI 回复消息 * - 工具执行结果 * - 帮助文档 */
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
@@ -93,13 +74,21 @@ sharedRenderer.code = ({ text, lang }) => {
 }
 
 sharedRenderer.link = ({ href, title, tokens }) => {
-  const text = tokens.map(token => 'raw' in token ? token.raw : '').join('')
+  const text = tokens.map(token => ('raw' in token ? token.raw : '')).join('')
   if (!href.startsWith('http://') && !href.startsWith('https://')) {
-    return text
+    return `<a href="#" data-file-path="${escapeHtml(href)}">${text}</a>`
   }
 
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : ''
   return `<a href="${escapeHtml(href)}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+}
+
+sharedRenderer.codespan = ({ text }) => {
+  const value = text.trim()
+  const fileAttr = /(?:^|[\\/])[^\\/\n]+\.[A-Za-z0-9]{1,8}$/.test(value)
+    ? ` data-file-path="${escapeHtml(value)}"`
+    : ''
+  return `<code${fileAttr}>${escapeHtml(text)}</code>`
 }
 
 /**
@@ -149,7 +138,7 @@ watch(
     }
 
     scheduleRender()
-  },
+  }
 )
 
 onBeforeUnmount(() => {
@@ -191,7 +180,7 @@ function escapeHtml(text: string): string {
  * 在模板中通过 onclick 调用
  */
 if (typeof window !== 'undefined') {
-  (window as any).copyCode = async (button: HTMLButtonElement) => {
+  ;(window as any).copyCode = async (button: HTMLButtonElement) => {
     const code = button.getAttribute('data-code')
     if (!code) return
 
@@ -211,15 +200,8 @@ if (typeof window !== 'undefined') {
 
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
-    <div
-      v-if="streaming"
-      class="markdown-content markdown-content--streaming"
-    >{{ content }}</div>
-    <div
-      v-else
-      class="markdown-content"
-      v-html="renderedHtml"
-    ></div>
+    <div v-if="streaming" class="markdown-content markdown-content--streaming">{{ content }}</div>
+    <div v-else class="markdown-content" v-html="renderedHtml"></div>
   </div>
 </template>
 
@@ -268,10 +250,18 @@ if (typeof window !== 'undefined') {
     line-height: 1.25;
   }
 
-  :deep(h1) { font-size: 20px; }
-  :deep(h2) { font-size: 18px; }
-  :deep(h3) { font-size: 16px; }
-  :deep(h4) { font-size: 15px; }
+  :deep(h1) {
+    font-size: 20px;
+  }
+  :deep(h2) {
+    font-size: 18px;
+  }
+  :deep(h3) {
+    font-size: 16px;
+  }
+  :deep(h4) {
+    font-size: 15px;
+  }
 
   :deep(ul),
   :deep(ol) {
@@ -357,7 +347,9 @@ if (typeof window !== 'undefined') {
     color: var(--chat-color-text-accent);
     text-decoration: none;
 
-    &:hover { text-decoration: underline; }
+    &:hover {
+      text-decoration: underline;
+    }
   }
 
   :deep(table) {

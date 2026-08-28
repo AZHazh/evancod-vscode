@@ -55,11 +55,18 @@ const skillArgs = computed(() => textValue(inputRecord.value?.args))
 const imagePrompt = computed(() => textValue(inputRecord.value?.prompt))
 const bashStatus = computed(() => props.bash?.status || (props.isPending ? 'running' : 'completed'))
 const notificationStatus = computed(() => props.notification?.status)
-const notificationText = computed(() => props.notification?.summary || props.notification?.result || '')
+const notificationText = computed(
+  () => props.notification?.summary || props.notification?.result || ''
+)
 const status = computed(() => {
   if (props.isPending) return 'pending'
   if (props.resultError) return 'error'
-  if (notificationStatus.value === 'failed' || bashStatus.value === 'error' || bashStatus.value === 'timeout') return 'error'
+  if (
+    notificationStatus.value === 'failed' ||
+    bashStatus.value === 'error' ||
+    bashStatus.value === 'timeout'
+  )
+    return 'error'
   if (notificationStatus.value === 'stopped' || bashStatus.value === 'cancelled') return 'cancelled'
   return 'success'
 })
@@ -173,6 +180,11 @@ const resultSummary = computed(() => {
 
 const expandable = computed(() => true)
 
+function openFile() {
+  if (!filePath.value) return
+  window.vscode?.postMessage({ type: 'file.open', data: { path: filePath.value } })
+}
+
 // 结果预览上限：超过则截断，避免把整段结果/日志全量塞进 DOM 做布局
 const RESULT_MAX_CHARS = 4000
 
@@ -195,7 +207,10 @@ const resultErrorSummary = computed(() =>
 const rawResultCollapsed = ref(true)
 
 const hasResult = computed(() => {
-  return props.result !== undefined && (['read_file', 'grep', 'glob'].includes(props.toolName) || isTaskTool.value)
+  return (
+    props.result !== undefined &&
+    (['read_file', 'grep', 'glob'].includes(props.toolName) || isTaskTool.value)
+  )
 })
 
 /** 解析 image_gen 结果中的图片预览（base64） */
@@ -224,7 +239,7 @@ const generatedImages = computed<GeneratedImage[]>(() => {
     if (!preview?.base64) continue
     images.push({
       src: base64ToDataUrl(preview.base64, preview.mime),
-      name: preview.name || preview.path || 'image'
+      name: preview.name || preview.path || 'image',
     })
   }
   return images
@@ -248,7 +263,6 @@ function downloadImage(image: GeneratedImage) {
     },
   })
 }
-
 </script>
 
 <template>
@@ -256,140 +270,457 @@ function downloadImage(image: GeneratedImage) {
     <button class="tool-call__header" type="button" @click="expanded = !expanded">
       <span class="tool-call__icon" :class="{ 'tool-call__icon--active': status === 'pending' }">
         <!-- Read icon -->
-        <svg v-if="iconType === 'read'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M5 5h6M5 8h6M5 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-if="iconType === 'read'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2h10v12H3V2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M5 5h6M5 8h6M5 11h4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Write icon -->
-        <svg v-else-if="iconType === 'write'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M6 10l1.5-1.5L11 5l-1.5-1.5L6 7v3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'write'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2h10v12H3V2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M6 10l1.5-1.5L11 5l-1.5-1.5L6 7v3z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Edit icon -->
-        <svg v-else-if="iconType === 'edit'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M5 5h3M5 8h4M5 11h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M10 8l2 2M10 11l2-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'edit'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2h10v12H3V2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M5 5h3M5 8h4M5 11h3"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <path
+            d="M10 8l2 2M10 11l2-2"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Delete icon -->
-        <svg v-else-if="iconType === 'delete'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'delete'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2h10v12H3V2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M6 6l4 4M10 6l-4 4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Copy icon -->
-        <svg v-else-if="iconType === 'copy'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="5" y="5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M3 11V3a1 1 0 0 1 1-1h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'copy'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect x="5" y="5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M3 11V3a1 1 0 0 1 1-1h8"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Move icon -->
-        <svg v-else-if="iconType === 'move'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2h10v12H3V2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M6 8h4M8 6l2 2-2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'move'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2h10v12H3V2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M6 8h4M8 6l2 2-2 2"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Bash/Terminal icon -->
-        <svg v-else-if="iconType === 'bash'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M4 6l2 2-2 2M7 10h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'bash'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect
+            x="1.5"
+            y="2.5"
+            width="13"
+            height="11"
+            rx="1.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path
+            d="M4 6l2 2-2 2M7 10h3"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Grep icon (search/magnifier) -->
-        <svg v-else-if="iconType === 'grep'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'grep'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5" />
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <!-- Glob icon -->
-        <svg v-else-if="iconType === 'glob'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'glob'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5" />
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <!-- Find icon -->
-        <svg v-else-if="iconType === 'find'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M5 6.5h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'find'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5" />
+          <path d="M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          <path d="M5 6.5h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <!-- List Directory icon -->
-        <svg v-else-if="iconType === 'list_directory'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M2 3.5h4.5V8H2V3.5z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2 10h12M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M8 3.5h6M8 6h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'list_directory'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M2 3.5h4.5V8H2V3.5z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M2 10h12M2 13h12"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <path
+            d="M8 3.5h6M8 6h4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Agent icon -->
-        <svg v-else-if="iconType === 'agent'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M8 2l6 4v6l-6 4-6-4V6l6-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'agent'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M8 2l6 4v6l-6 4-6-4V6l6-4z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Skill icon -->
-        <svg v-else-if="iconType === 'skill'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M8 2l1.5 4.5H14l-3.75 3L12 14l-4-3-4 3 1.75-4.5L2 6.5h4.5L8 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'skill'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M8 2l1.5 4.5H14l-3.75 3L12 14l-4-3-4 3 1.75-4.5L2 6.5h4.5L8 2z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- MCP icon -->
-        <svg v-else-if="iconType === 'mcp'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'mcp'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" />
+          <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <!-- Image icon -->
-        <svg v-else-if="iconType === 'image'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="5.5" cy="6.5" r="1" fill="currentColor"/>
-          <path d="M3 12l3.5-3.5L9 11l2-2 2 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'image'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect
+            x="2"
+            y="3"
+            width="12"
+            height="10"
+            rx="1.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <circle cx="5.5" cy="6.5" r="1" fill="currentColor" />
+          <path
+            d="M3 12l3.5-3.5L9 11l2-2 2 2.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Ask icon (chat bubble with question mark) -->
-        <svg v-else-if="iconType === 'ask'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v6A1.5 1.5 0 0 1 12.5 11H6l-3 3v-3H3.5A1.5 1.5 0 0 1 2 9.5v-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M6.5 5.5a1.5 1.5 0 0 1 2.4 1.2c0 1-1.4 1.1-1.4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <circle cx="7.5" cy="10" r="0.4" fill="currentColor"/>
+        <svg
+          v-else-if="iconType === 'ask'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v6A1.5 1.5 0 0 1 12.5 11H6l-3 3v-3H3.5A1.5 1.5 0 0 1 2 9.5v-6z"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M6.5 5.5a1.5 1.5 0 0 1 2.4 1.2c0 1-1.4 1.1-1.4 2"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <circle cx="7.5" cy="10" r="0.4" fill="currentColor" />
         </svg>
         <!-- Task icon -->
-        <svg v-else-if="iconType === 'task'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v8A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4A1.5 1.5 0 0 1 3 2.5z" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M4.5 6l1.25 1.25L8 5M4.5 10h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'task'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v8A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4A1.5 1.5 0 0 1 3 2.5z"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path
+            d="M4.5 6l1.25 1.25L8 5M4.5 10h7"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Plan icon -->
-        <svg v-else-if="iconType === 'plan'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M5 2v2M11 2v2M2 6h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <circle cx="5.5" cy="9" r="0.5" fill="currentColor"/>
-          <circle cx="8" cy="9" r="0.5" fill="currentColor"/>
-          <circle cx="10.5" cy="9" r="0.5" fill="currentColor"/>
+        <svg
+          v-else-if="iconType === 'plan'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect
+            x="2"
+            y="2"
+            width="12"
+            height="12"
+            rx="1.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path
+            d="M5 2v2M11 2v2M2 6h12"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <circle cx="5.5" cy="9" r="0.5" fill="currentColor" />
+          <circle cx="8" cy="9" r="0.5" fill="currentColor" />
+          <circle cx="10.5" cy="9" r="0.5" fill="currentColor" />
         </svg>
         <!-- Web/Fetch icon -->
-        <svg v-else-if="iconType === 'web'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M2 8h12M8 2c1.5 1.5 2 4 2 6s-.5 4.5-2 6M8 2c-1.5 1.5-2 4-2 6s.5 4.5 2 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'web'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M2 8h12M8 2c1.5 1.5 2 4 2 6s-.5 4.5-2 6M8 2c-1.5 1.5-2 4-2 6s.5 4.5 2 6"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Search icon -->
-        <svg v-else-if="iconType === 'search'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M10 10l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M7 4.5v5M4.5 7h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'search'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M10 10l3.5 3.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <path
+            d="M7 4.5v5M4.5 7h5"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- Git icon -->
-        <svg v-else-if="iconType === 'git'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="12" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="4" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M6 4h4M6 12h4M4 6v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'git'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.5" />
+          <circle cx="12" cy="8" r="2" stroke="currentColor" stroke-width="1.5" />
+          <circle cx="4" cy="12" r="2" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M6 4h4M6 12h4M4 6v4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
         <!-- LSP icon -->
-        <svg v-else-if="iconType === 'lsp'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M2 8l3-3 3 3M14 8l-3 3-3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M5 5v6M11 5v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <svg
+          v-else-if="iconType === 'lsp'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M2 8l3-3 3 3M14 8l-3 3-3-3"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path d="M5 5v6M11 5v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <!-- Notebook icon -->
-        <svg v-else-if="iconType === 'notebook'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="3" y="2" width="10" height="12" rx="1" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M3 5h10M3 9h10" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="6" cy="3.5" r="0.5" fill="currentColor"/>
-          <circle cx="6" cy="6.5" r="0.5" fill="currentColor"/>
-          <circle cx="6" cy="11" r="0.5" fill="currentColor"/>
+        <svg
+          v-else-if="iconType === 'notebook'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect
+            x="3"
+            y="2"
+            width="10"
+            height="12"
+            rx="1"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path d="M3 5h10M3 9h10" stroke="currentColor" stroke-width="1.5" />
+          <circle cx="6" cy="3.5" r="0.5" fill="currentColor" />
+          <circle cx="6" cy="6.5" r="0.5" fill="currentColor" />
+          <circle cx="6" cy="11" r="0.5" fill="currentColor" />
         </svg>
         <!-- Analyze icon -->
-        <svg v-else-if="iconType === 'analyze'" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M5 8h6M8 5l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg
+          v-else-if="iconType === 'analyze'"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="M5 8h6M8 5l3 3-3 3"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <!-- Default icon -->
         <svg v-else viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="8" cy="8" r="2" fill="currentColor"/>
+          <circle cx="8" cy="8" r="2" fill="currentColor" />
         </svg>
       </span>
       <span class="tool-call__name">{{ title }}</span>
@@ -403,10 +734,22 @@ function downloadImage(image: GeneratedImage) {
       <span v-if="status === 'error'" class="tool-call__error-icon">!</span>
       <span v-if="expandable" class="tool-call__chevron">
         <svg v-if="expanded" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path
+            d="M4 10l4-4 4 4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
         <svg v-else viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path
+            d="M4 6l4 4 4-4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
         </svg>
       </span>
     </button>
@@ -424,10 +767,23 @@ function downloadImage(image: GeneratedImage) {
         @cancel="emit('cancelBash', props.toolUseId, bash?.taskId)"
       />
 
-      <DiffViewer v-else-if="toolName === 'edit_file' && (oldString || newString)" :file-path="filePath" :old-text="oldString" :new-text="newString" />
-      <DiffViewer v-else-if="toolName === 'write_file' && content" :file-path="filePath" :content="content" />
+      <DiffViewer
+        v-else-if="toolName === 'edit_file' && (oldString || newString)"
+        :file-path="filePath"
+        :old-text="oldString"
+        :new-text="newString"
+      />
+      <DiffViewer
+        v-else-if="toolName === 'write_file' && content"
+        :file-path="filePath"
+        :content="content"
+      />
 
-      <div v-else-if="hasResult" class="tool-result-container" :class="{ 'tool-result-container--error': resultError }">
+      <div
+        v-else-if="hasResult"
+        class="tool-result-container"
+        :class="{ 'tool-result-container--error': resultError }"
+      >
         <!-- 错误且能提炼主旨：默认只显示一句话，原始日志折叠 -->
         <template v-if="resultErrorSummary">
           <div class="tool-result-header">
@@ -473,53 +829,97 @@ function downloadImage(image: GeneratedImage) {
       </div>
 
       <div v-else-if="toolName === 'mcp'" class="tool-summary vertical">
-        <div v-if="mcpAction"><span class="summary-label">操作</span><code>{{ mcpAction }}</code></div>
-        <div v-if="mcpServer"><span class="summary-label">Server</span><code>{{ mcpServer }}</code></div>
-        <div v-if="mcpTool"><span class="summary-label">Tool</span><code>{{ mcpTool }}</code></div>
-        <div v-if="mcpUri"><span class="summary-label">URI</span><code>{{ mcpUri }}</code></div>
+        <div v-if="mcpAction">
+          <span class="summary-label">操作</span><code>{{ mcpAction }}</code>
+        </div>
+        <div v-if="mcpServer">
+          <span class="summary-label">Server</span><code>{{ mcpServer }}</code>
+        </div>
+        <div v-if="mcpTool">
+          <span class="summary-label">Tool</span><code>{{ mcpTool }}</code>
+        </div>
+        <div v-if="mcpUri">
+          <span class="summary-label">URI</span><code>{{ mcpUri }}</code>
+        </div>
         <pre class="tool-json compact">{{ inputText }}</pre>
       </div>
 
       <div v-else-if="toolName === 'skill'" class="tool-summary vertical">
-        <div v-if="skillName"><span class="summary-label">Skill</span><code>{{ skillName }}</code></div>
-        <div v-if="skillArgs"><span class="summary-label">参数</span><code>{{ skillArgs }}</code></div>
+        <div v-if="skillName">
+          <span class="summary-label">Skill</span><code>{{ skillName }}</code>
+        </div>
+        <div v-if="skillArgs">
+          <span class="summary-label">参数</span><code>{{ skillArgs }}</code>
+        </div>
         <pre class="tool-json compact">{{ inputText }}</pre>
       </div>
 
       <div v-else-if="toolName === 'image_gen'" class="tool-summary vertical">
-        <div v-if="imagePrompt"><span class="summary-label">提示词</span><code>{{ imagePrompt }}</code></div>
+        <div v-if="imagePrompt">
+          <span class="summary-label">提示词</span><code>{{ imagePrompt }}</code>
+        </div>
 
         <!-- 骨架屏：生成中 -->
         <div v-if="isPending" class="image-gen-skeleton">
           <div class="image-gen-skeleton__shimmer" />
           <div class="image-gen-skeleton__label">
-            <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="image-gen-skeleton__icon">
-              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-              <circle cx="5.5" cy="6.5" r="1" fill="currentColor"/>
-              <path d="M3 12l3.5-3.5L9 11l2-2 2 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <svg
+              viewBox="0 0 16 16"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              class="image-gen-skeleton__icon"
+            >
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                stroke="currentColor"
+                stroke-width="1.5"
+              />
+              <circle cx="5.5" cy="6.5" r="1" fill="currentColor" />
+              <path
+                d="M3 12l3.5-3.5L9 11l2-2 2 2.5"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
             </svg>
             <span>正在生成图片…</span>
           </div>
         </div>
 
         <!-- 生成完成：图片 + 下载 -->
-        <div v-else-if="generatedImages.length > 0" class="image-gen-grid" :class="{ single: generatedImages.length === 1 }">
+        <div
+          v-else-if="generatedImages.length > 0"
+          class="image-gen-grid"
+          :class="{ single: generatedImages.length === 1 }"
+        >
           <div
             v-for="(image, index) in generatedImages"
             :key="`${image.name}-${index}`"
             class="image-gen-card-wrapper"
           >
-            <button
-              type="button"
-              class="image-gen-card"
-              @click="openImageAt(index)"
-            >
+            <button type="button" class="image-gen-card" @click="openImageAt(index)">
               <img :src="image.src" :alt="image.name" loading="lazy" />
               <span class="image-gen-name">{{ image.name }}</span>
             </button>
             <button type="button" class="image-gen-download" @click.stop="downloadImage(image)">
-              <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="image-gen-download__icon">
-                <path d="M8 2v9M8 11l-3-3M8 11l3-3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                class="image-gen-download__icon"
+              >
+                <path
+                  d="M8 2v9M8 11l-3-3M8 11l3-3M3 13h10"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
               </svg>
               <span>下载</span>
             </button>
@@ -537,16 +937,24 @@ function downloadImage(image: GeneratedImage) {
       </div>
 
       <div v-else-if="toolName === 'agent'" class="tool-summary vertical">
-        <div v-if="description"><span class="summary-label">任务</span><code>{{ description }}</code></div>
-        <div v-if="notification?.taskId"><span class="summary-label">Task</span><code>{{ notification.taskId }}</code></div>
-        <div v-if="notification?.usage?.durationMs"><span class="summary-label">耗时</span><code>{{ notification.usage.durationMs }}ms</code></div>
+        <div v-if="description">
+          <span class="summary-label">任务</span><code>{{ description }}</code>
+        </div>
+        <div v-if="notification?.taskId">
+          <span class="summary-label">Task</span><code>{{ notification.taskId }}</code>
+        </div>
+        <div v-if="notification?.usage?.durationMs">
+          <span class="summary-label">耗时</span><code>{{ notification.usage.durationMs }}ms</code>
+        </div>
         <pre v-if="notificationText" class="tool-json compact">{{ notificationText }}</pre>
         <pre v-else class="tool-json compact">{{ inputText }}</pre>
       </div>
 
       <div v-else-if="filePath" class="tool-summary">
         <span class="summary-label">路径</span>
-        <code>{{ filePath }}</code>
+        <button type="button" class="file-path-link" @click="openFile">
+          <code>{{ filePath }}</code>
+        </button>
       </div>
 
       <pre v-else class="tool-json">{{ inputText }}</pre>
@@ -560,6 +968,18 @@ function downloadImage(image: GeneratedImage) {
   border: 1px solid color-mix(in srgb, var(--chat-color-border) 50%, transparent);
   border-radius: var(--chat-radius-md);
   background: var(--chat-color-surface-container-lowest);
+}
+.file-path-link {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+.file-path-link:hover code {
+  color: var(--chat-color-text-accent);
+  text-decoration: underline;
 }
 
 .tool-call--error {
@@ -735,10 +1155,16 @@ code,
   background: var(--chat-color-surface-container-low);
   cursor: pointer;
   text-align: left;
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease;
 
   &:hover {
-    border-color: color-mix(in srgb, var(--chat-color-primary, var(--chat-color-outline)) 50%, transparent);
+    border-color: color-mix(
+      in srgb,
+      var(--chat-color-primary, var(--chat-color-outline)) 50%,
+      transparent
+    );
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
   }
 
@@ -806,13 +1232,24 @@ code,
 }
 
 @keyframes image-gen-shimmer {
-  0% { background-position: 180% 0; }
-  100% { background-position: -80% 0; }
+  0% {
+    background-position: 180% 0;
+  }
+  100% {
+    background-position: -80% 0;
+  }
 }
 
 @keyframes image-gen-pulse {
-  0%, 100% { opacity: 0.4; transform: scale(0.96); }
-  50% { opacity: 0.85; transform: scale(1.04); }
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.04);
+  }
 }
 
 /* ===== image_gen 下载按钮 ===== */
@@ -836,7 +1273,10 @@ code,
   color: var(--chat-color-text-tertiary);
   cursor: pointer;
   font-size: 11px;
-  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease,
+    background 150ms ease;
 
   &:hover {
     border-color: color-mix(in srgb, var(--vscode-focusBorder) 50%, transparent);
@@ -859,7 +1299,11 @@ code,
 
 .tool-result-container--error {
   border-color: color-mix(in srgb, var(--chat-color-error) 50%, transparent);
-  background: color-mix(in srgb, var(--chat-color-error-container) 35%, var(--chat-color-surface-container-low));
+  background: color-mix(
+    in srgb,
+    var(--chat-color-error-container) 35%,
+    var(--chat-color-surface-container-low)
+  );
 }
 
 .tool-result-header {
