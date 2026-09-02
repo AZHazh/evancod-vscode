@@ -16,6 +16,7 @@ import {
   type ApiClientResponse,
   type StreamCallback,
   isOutputLimitStopReason,
+  normalizeRequestUsage,
   throwIfAborted,
   withStreamRetry,
 } from './shared'
@@ -215,7 +216,7 @@ export class AnthropicClient implements ApiClient {
       return {
         content: fullContent,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage,
+        usage: normalizeRequestUsage(usage, false),
         stopReason,
         incomplete: !receivedMessageStop || isOutputLimitStopReason(stopReason),
       }

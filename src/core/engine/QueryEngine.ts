@@ -231,6 +231,21 @@ function mergeUsage(current: TokenUsage | undefined, next: unknown): TokenUsage 
   if (typeof incoming.inputTokens === 'number') {
     merged.lastPromptTokens = incoming.inputTokens
   }
+  if (typeof incoming.lastPromptTokens === 'number') {
+    merged.lastPromptTokens = incoming.lastPromptTokens
+  }
+  if (typeof incoming.lastOutputTokens === 'number') {
+    merged.lastOutputTokens = incoming.lastOutputTokens
+  }
+  if (typeof incoming.lastCacheReadTokens === 'number') {
+    merged.lastCacheReadTokens = incoming.lastCacheReadTokens
+  }
+  if (typeof incoming.lastCacheWriteTokens === 'number') {
+    merged.lastCacheWriteTokens = incoming.lastCacheWriteTokens
+  }
+  if (typeof incoming.lastTotalTokens === 'number') {
+    merged.lastTotalTokens = incoming.lastTotalTokens
+  }
 
   for (const [key, value] of Object.entries(incoming)) {
     if (!(key in merged)) {
@@ -743,36 +758,41 @@ Skill 使用契约：
           messageCount: this.config.messages.length,
         })
 
-        // 检查是否需要自动压缩
-        if (totalUsage?.lastPromptTokens) {
-          const currentTokens = totalUsage.lastPromptTokens
-          if (
-            shouldAutoCompact(currentTokens, this.config.model, this.consecutiveCompactFailures)
-          ) {
-            try {
-              this.onAgentEventCallback?.({
-                type: 'system_notification',
-                subtype: 'compact_started',
-                data: { message: '上下文正在压缩' },
-              })
-              await this.performAutoCompact()
-              this.consecutiveCompactFailures = 0
-              this.onAgentEventCallback?.({
-                type: 'system_notification',
-                subtype: 'compact_complete',
-                data: { message: '上下文已自动压缩', success: true },
-              })
-            } catch (error) {
-              this.consecutiveCompactFailures++
-              console.error('Auto-compact failed:', error)
-              // 压缩失败也要通知前端复位状态，避免 UI 永久停在"正在压缩"
-              this.onAgentEventCallback?.({
-                type: 'system_notification',
-                subtype: 'compact_complete',
-                data: { message: '上下文压缩失败', success: false },
-              })
-              // 继续执行，不中断工具循环
-            }
+        // 检查是否需要自动压缩。首次请求没有服务端 usage 时，使用保守估算值。
+        const estimatedTokens = estimateMessagesTokens(this.config.messages)
+        const currentTokens = Math.max(totalUsage?.lastTotalTokens || 0, estimatedTokens)
+        if (
+          currentTokens > 0 &&
+          shouldAutoCompact(
+            currentTokens,
+            this.config.model,
+            this.consecutiveCompactFailures,
+            this.getConfiguredContextWindow()
+          )
+        ) {
+          try {
+            this.onAgentEventCallback?.({
+              type: 'system_notification',
+              subtype: 'compact_started',
+              data: { message: '上下文正在压缩' },
+            })
+            await this.performAutoCompact()
+            this.consecutiveCompactFailures = 0
+            this.onAgentEventCallback?.({
+              type: 'system_notification',
+              subtype: 'compact_complete',
+              data: { message: '上下文已自动压缩', success: true },
+            })
+          } catch (error) {
+            this.consecutiveCompactFailures++
+            console.error('Auto-compact failed:', error)
+            // 压缩失败也要通知前端复位状态，避免 UI 永久停在"正在压缩"
+            this.onAgentEventCallback?.({
+              type: 'system_notification',
+              subtype: 'compact_complete',
+              data: { message: '上下文压缩失败', success: false },
+            })
+            // 继续执行，不中断工具循环
           }
         }
 
@@ -1114,12 +1134,14 @@ Skill 使用契约：
 
       // 计算上下文窗口使用百分比
       if (totalUsage) {
-        const contextWindow = getContextWindowForModel(this.config.model)
-        const effectiveWindow = getEffectiveContextWindow(this.config.model)
+        const contextWindow = this.getConfiguredContextWindow()
+        const effectiveWindow = getEffectiveContextWindow(this.config.model, contextWindow)
 
         totalUsage.contextWindow = contextWindow
-        // 用最后一次 API 的 prompt tokens，而非累计的 inputTokens
-        const currentTokens = totalUsage.lastPromptTokens || totalUsage.inputTokens || 0
+        totalUsage.effectiveContextWindow = effectiveWindow
+        // 用最后一次 API 的 prompt + output，而非累计的 input/cache/output
+        const currentTokens =
+          totalUsage.lastTotalTokens || totalUsage.lastPromptTokens || totalUsage.inputTokens || 0
         totalUsage.estimatedCurrentTokens = currentTokens
         totalUsage.percentUsed = Math.min(Math.round((currentTokens / effectiveWindow) * 100), 100)
       }
@@ -1310,7 +1332,8 @@ Skill 使用契约：
    * 有损的 microcompact，避免模型丢失刚获取的工具结果而重复调用。
    */
   private buildRequestMessages(): Message[] {
-    const effectiveWindow = getEffectiveContextWindow(this.config.model)
+    const contextWindow = this.getConfiguredContextWindow()
+    const effectiveWindow = getEffectiveContextWindow(this.config.model, contextWindow)
     const estimated = estimateMessagesTokens(this.config.messages)
 
     if (!shouldMicrocompact(estimated, effectiveWindow)) {
@@ -1318,6 +1341,13 @@ Skill 使用契约：
     }
 
     return microcompact(this.config.messages, 5)
+  }
+
+  private getConfiguredContextWindow(): number {
+    const configured =
+      this.config.provider.modelContextWindows?.[this.config.model] ||
+      this.config.provider.autoCompactWindow
+    return getContextWindowForModel(this.config.model, configured)
   }
 
   /**

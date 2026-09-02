@@ -64,6 +64,47 @@ export interface ApiClient {
   testConnection(): Promise<boolean>
 }
 
+/**
+ * 计算单次请求的上下文用量。
+ * OpenAI 将缓存输入作为 input_tokens 的子集返回；Anthropic 则把缓存输入拆成独立字段。
+ */
+export function normalizeRequestUsage(
+  usage: TokenUsage | undefined,
+  cacheIncludedInInput: boolean
+): TokenUsage | undefined {
+  if (!usage) return undefined
+
+  const input = typeof usage.inputTokens === 'number' ? usage.inputTokens : 0
+  const cacheRead = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0
+  const cacheWrite = typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0
+  const output = typeof usage.outputTokens === 'number' ? usage.outputTokens : 0
+  const promptTokens = cacheIncludedInInput ? input : input + cacheRead + cacheWrite
+
+  return {
+    ...usage,
+    lastPromptTokens: promptTokens,
+    lastCacheReadTokens: cacheRead,
+    lastCacheWriteTokens: cacheWrite,
+    lastOutputTokens: output,
+    lastTotalTokens: promptTokens + output,
+  }
+}
+
+export function normalizeOpenAIUsage(usage: any): TokenUsage | undefined {
+  if (!usage || typeof usage !== 'object') return undefined
+
+  return normalizeRequestUsage(
+    {
+      inputTokens: usage.prompt_tokens ?? usage.input_tokens,
+      outputTokens: usage.completion_tokens ?? usage.output_tokens,
+      cacheReadTokens:
+        usage.prompt_tokens_details?.cached_tokens ?? usage.input_token_details?.cached_tokens,
+      cacheWriteTokens: usage.cache_creation_input_tokens ?? usage.cache_write_input_tokens,
+    },
+    true
+  )
+}
+
 export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new Error('Query cancelled')

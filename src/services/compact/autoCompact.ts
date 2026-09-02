@@ -11,8 +11,8 @@ const AUTOCOMPACT_BUFFER_TOKENS = 13_000
  * @param model 模型名称
  * @returns 触发自动压缩的 token 数
  */
-export function getAutoCompactThreshold(model: string): number {
-  const effective = getEffectiveContextWindow(model)
+export function getAutoCompactThreshold(model: string, configuredWindow?: number): number {
+  const effective = getEffectiveContextWindow(model, configuredWindow)
   return effective - AUTOCOMPACT_BUFFER_TOKENS
 }
 
@@ -26,14 +26,15 @@ export function getAutoCompactThreshold(model: string): number {
 export function shouldAutoCompact(
   currentTokens: number,
   model: string,
-  compactFailures: number
+  compactFailures: number,
+  configuredWindow?: number
 ): boolean {
   // 断路器：3 次失败后停止自动压缩
   if (compactFailures >= 3) {
     return false
   }
 
-  const threshold = getAutoCompactThreshold(model)
+  const threshold = getAutoCompactThreshold(model, configuredWindow)
   return currentTokens >= threshold
 }
 
@@ -43,7 +44,7 @@ export function shouldAutoCompact(
  * @param model 模型名称
  * @returns 百分比（0-100）
  */
-export function calculateContextPercent(currentTokens: number, model: string): number {
-  const effective = getEffectiveContextWindow(model)
+export function calculateContextPercent(currentTokens: number, model: string, configuredWindow?: number): number {
+  const effective = getEffectiveContextWindow(model, configuredWindow)
   return Math.min(Math.round((currentTokens / effective) * 100), 100)
 }

@@ -30,15 +30,32 @@ export interface InlineMessageSegment {
 }
 
 export interface TokenUsage {
+  /** 没有服务端 usage 时按历史消息估算，仅用于 UI 展示。 */
+  estimated?: boolean
+  /** 当前任务/会话累计的未缓存输入 Token（用于消耗统计） */
   inputTokens?: number
+  /** 当前任务/会话累计的输出 Token（用于消耗统计） */
   outputTokens?: number
+  /** 当前任务/会话累计的缓存命中输入 Token（用于消耗统计） */
   cacheReadTokens?: number
+  /** 当前任务/会话累计的缓存写入输入 Token（用于消耗统计） */
   cacheWriteTokens?: number
   contextWindow?: number
+  effectiveContextWindow?: number
   estimatedRemaining?: number
-  lastPromptTokens?: number        // 最后一次请求的实际 input tokens
-  estimatedCurrentTokens?: number  // 当前上下文估算（用于计算百分比）
-  percentUsed?: number             // 上下文使用百分比
+  /** 最后一次请求的完整 prompt Token（按 Provider 语义归一化，含缓存部分） */
+  lastPromptTokens?: number
+  /** 最后一次请求的输出 Token */
+  lastOutputTokens?: number
+  /** 最后一次请求命中的缓存输入 Token */
+  lastCacheReadTokens?: number
+  /** 最后一次请求写入缓存的输入 Token */
+  lastCacheWriteTokens?: number
+  /** 最后一次请求的 prompt + output Token */
+  lastTotalTokens?: number
+  /** 当前上下文估算（用于计算百分比，等于最后一次请求总量） */
+  estimatedCurrentTokens?: number
+  percentUsed?: number
   [key: string]: unknown
 }
 

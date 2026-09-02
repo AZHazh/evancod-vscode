@@ -74,6 +74,8 @@ export class ChatService {
    * null 表示没有活动会话
    */
   private currentSessionId: string | null = null
+  /** 用于丢弃并发会话切换中较早的加载结果。 */
+  private sessionSwitchGeneration = 0
 
   /**
    * 是否正在流式接收 AI 响应
@@ -243,7 +245,8 @@ export class ChatService {
     // 添加到会话列表
     this.sessions.push(session)
 
-    // 设置为当前活动会话
+    // 设置为当前活动会话。新会话也会使尚未完成的历史会话加载失效。
+    this.sessionSwitchGeneration++
     // QueryEngine 持有创建时会话的完整消息历史，切换会话时必须丢弃。
     this.queryEngine = undefined
     this.currentSessionId = session.id
@@ -276,7 +279,10 @@ export class ChatService {
     const session = this.sessions.find(s => s.id === sessionId) || null
     if (!session) return null
 
+    const generation = ++this.sessionSwitchGeneration
     await this.settleActiveRequestBeforeSessionSwitch()
+    // 用户在等待期间又选择了另一个会话，当前结果不能覆盖更新的选择。
+    if (generation !== this.sessionSwitchGeneration) return null
     this.currentSessionId = session.id
     this.queryEngine = undefined
     this.saveSessions()
@@ -345,6 +351,8 @@ export class ChatService {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    // 删除操作同样会使并发中的历史会话加载失效。
+    this.sessionSwitchGeneration++
     if (this.currentSessionId === sessionId) {
       await this.settleActiveRequestBeforeSessionSwitch()
     }
@@ -1178,8 +1186,8 @@ export class ChatService {
     })
 
     this.queryEngine.onAgentEvent((event: AgentServerEvent) => {
-      this.recordAgentEvent(event)
-      this.agentEventCallback?.(event)
+      const recordedEvent = this.recordAgentEvent(event)
+      this.agentEventCallback?.(recordedEvent)
     })
 
     // 设置完成回调
@@ -1243,9 +1251,10 @@ export class ChatService {
     this.saveSessions(true)
   }
 
-  private recordAgentEvent(event: AgentServerEvent): void {
+  private recordAgentEvent(event: AgentServerEvent): AgentServerEvent {
     const session = this.getCurrentSession()
-    if (!session) return
+    if (!session) return event
+    let emittedEvent = event
 
     const now = Date.now()
 
@@ -1390,7 +1399,8 @@ export class ChatService {
       case 'message_complete': {
         const usage = this.normalizeUsage(event.usage)
         if (usage) {
-          session.tokenUsage = usage
+          session.tokenUsage = this.mergeSessionUsage(session.tokenUsage, usage)
+          emittedEvent = { ...event, usage: session.tokenUsage }
         }
         this.finalizeStreamingTranscript(session)
         break
@@ -1410,6 +1420,8 @@ export class ChatService {
     ) {
       this.saveSessions()
     }
+
+    return emittedEvent
   }
 
   private appendOrUpdateTranscript(session: Session, block: AgentTranscriptBlock): void {
@@ -1558,6 +1570,21 @@ export class ChatService {
   private normalizeUsage(usage: unknown): TokenUsage | undefined {
     if (!usage || typeof usage !== 'object') return undefined
     return usage as TokenUsage
+  }
+
+  private mergeSessionUsage(previous: TokenUsage | undefined, current: TokenUsage): TokenUsage {
+    const merged: TokenUsage = { ...current }
+    for (const key of [
+      'inputTokens',
+      'outputTokens',
+      'cacheReadTokens',
+      'cacheWriteTokens',
+    ] as const) {
+      const previousValue = typeof previous?.[key] === 'number' ? previous[key] as number : 0
+      const currentValue = typeof current[key] === 'number' ? current[key] as number : 0
+      merged[key] = previousValue + currentValue
+    }
+    return merged
   }
 
   private createCompactSummary(session: Session): string {

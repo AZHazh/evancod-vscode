@@ -1,4 +1,4 @@
-import type { Message } from '../../../types'
+import type { Message, TokenUsage } from '../../../types'
 import { resolveOpenAIReasoningEffort } from '../../../utils/thinking'
 import { sanitizeToolMessageSequence } from './toolMessageSanitizer'
 import {
@@ -6,6 +6,7 @@ import {
   buildUrl,
   createFetchError,
   isOutputLimitStopReason,
+  normalizeOpenAIUsage,
   parseJsonObject,
   stringifyToolResultContent,
   throwIfAborted,
@@ -96,6 +97,7 @@ export class OpenAIResponsesClient implements ApiClient {
     let receivedTerminalEvent = false
     let stopReason: string | undefined
     let responseIncomplete = false
+    let usage: TokenUsage | undefined
 
     // 工具调用重组：Responses 用独立的 function_call 事件流表达工具调用。
     //  - response.output_item.added（item.type === 'function_call'）：新调用开始，带 call_id/name
@@ -158,6 +160,7 @@ export class OpenAIResponsesClient implements ApiClient {
 
         if (type === 'response.completed') {
           receivedTerminalEvent = true
+          usage = normalizeOpenAIUsage(event.response?.usage)
           stopReason = event.response?.status || 'completed'
           continue
         }
@@ -165,6 +168,7 @@ export class OpenAIResponsesClient implements ApiClient {
         if (type === 'response.incomplete') {
           receivedTerminalEvent = true
           responseIncomplete = true
+          usage = normalizeOpenAIUsage(event.response?.usage)
           stopReason =
             event.response?.incomplete_details?.reason ||
             event.response?.status ||
@@ -300,6 +304,7 @@ export class OpenAIResponsesClient implements ApiClient {
     return {
       content: fullContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
       stopReason,
       incomplete:
         responseIncomplete ||

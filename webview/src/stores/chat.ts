@@ -61,6 +61,46 @@ function toPlainJsonSafe(value: unknown): JsonSafeValue | undefined {
   return undefined
 }
 
+/**
+ * 旧会话可能没有保存服务端 usage，只能按消息内容做保守估算。
+ * 该值只用于恢复界面上的上下文进度，不参与后续累计消耗。
+ */
+function estimateHistoricalUsage(session: Session, contextWindow: number): TokenUsage {
+  let chars = 0
+
+  for (const message of session.messages || []) {
+    if (message.internal) continue
+    chars += message.content?.length || 0
+    for (const block of message.contentBlocks || []) {
+      chars += block.text?.length || 0
+      chars += block.source?.data?.length || 0
+    }
+    for (const toolCall of message.toolCalls || []) {
+      try {
+        chars += JSON.stringify(toolCall.input ?? toolCall.args ?? '').length
+      } catch {
+        // 非 JSON 工具参数不影响其余消息的估算。
+      }
+    }
+  }
+
+  const estimatedTokens = Math.ceil(chars / 4)
+  const effectiveContextWindow = Math.max(
+    contextWindow - Math.min(20_000, Math.floor(contextWindow * 0.1)),
+    1
+  )
+
+  return {
+    estimated: true,
+    contextWindow,
+    effectiveContextWindow,
+    lastPromptTokens: estimatedTokens,
+    lastTotalTokens: estimatedTokens,
+    estimatedCurrentTokens: estimatedTokens,
+    percentUsed: Math.min(Math.round((estimatedTokens / effectiveContextWindow) * 100), 100),
+  }
+}
+
 export const useChatStore = defineStore('chat', () => {
   const vscode = useVSCode()
   const agentStore = useAgentStore()
@@ -270,7 +310,20 @@ export const useChatStore = defineStore('chat', () => {
     if (!currentSession.value) {
       uiMessages.value = []
       agentTaskNotifications.value = {}
+      tokenUsage.value = null
       return
+    }
+
+    // 会话切换/新建时不能沿用上一个会话的运行态；同会话增量更新才保留它们。
+    if (!preserveRuntime) {
+      agentTaskNotifications.value = {}
+      const model = currentSession.value.runtimeConfig?.model || providerStore.currentModel
+      const contextWindow =
+        providerStore.activeProvider?.modelContextWindows?.[model] ||
+        providerStore.activeProvider?.autoCompactWindow ||
+        200_000
+      tokenUsage.value =
+        currentSession.value.tokenUsage || estimateHistoricalUsage(currentSession.value, contextWindow)
     }
 
     // 性能优化：如果是追加模式且已有消息，只处理新增的部分
@@ -359,7 +412,6 @@ export const useChatStore = defineStore('chat', () => {
       streamingAssistantIndex = -1
       streamingThinkingIndex = -1
       toolUseIndexCache.clear()
-      tokenUsage.value = currentSession.value.tokenUsage || null
       return
     }
 

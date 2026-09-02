@@ -241,19 +241,26 @@ export class WebviewManager implements vscode.WebviewViewProvider {
 
           case 'chat.send': {
             // 处理用户发送消息
+            const requestSessionId = this.chatService.getCurrentSession()?.id
             try {
               await this.chatService.sendMessage(
                 message.data.content,
                 message.data.files || message.data.images || [],
                 message.data.inlineSegments || []
               )
-              this.postMessage({
-                type: 'chat.messages.update',
-                data: {
-                  session: await this.chatService.hydrateSessionImages(this.chatService.getCurrentSession()),
-                  messages: this.chatService.getCurrentSession()?.messages || [],
-                },
-              })
+              // 切换会话期间，旧请求完成后不能把旧消息推回新会话。
+              const currentSession = this.chatService.getCurrentSession()
+              if (currentSession && currentSession.id === requestSessionId) {
+                const sessionMessages = currentSession.messages
+                const hydratedSession = await this.chatService.hydrateSessionImages(currentSession)
+                this.postMessage({
+                  type: 'chat.messages.update',
+                  data: {
+                    session: hydratedSession,
+                    messages: sessionMessages,
+                  },
+                })
+              }
               this.sendSessionList()
             } catch (error) {
               this.postMessage({
@@ -267,18 +274,22 @@ export class WebviewManager implements vscode.WebviewViewProvider {
           }
 
           case 'chat.stop': {
+            const requestSessionId = message.data?.sessionId
             const session = await this.chatService.stopGeneration()
-            this.postMessage({
-              type: 'agent.event',
-              data: { type: 'status', state: 'idle', verb: 'stopped' },
-            })
-            this.postMessage({
-              type: 'chat.messages.update',
-              data: {
-                session,
-                messages: session?.messages || [],
-              },
-            })
+            // 停止请求也可能与会话切换并发；旧会话完成后不再覆盖新会话 UI。
+            if (this.chatService.getCurrentSession()?.id === requestSessionId) {
+              this.postMessage({
+                type: 'agent.event',
+                data: { type: 'status', state: 'idle', verb: 'stopped' },
+              })
+              this.postMessage({
+                type: 'chat.messages.update',
+                data: {
+                  session,
+                  messages: session?.messages || [],
+                },
+              })
+            }
             this.sendSessionList()
             break
           }

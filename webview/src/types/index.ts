@@ -363,13 +363,19 @@ export interface PermissionRequest {
 }
 
 export interface TokenUsage {
+  estimated?: boolean
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
   contextWindow?: number
+  effectiveContextWindow?: number
   estimatedRemaining?: number
   lastPromptTokens?: number
+  lastOutputTokens?: number
+  lastCacheReadTokens?: number
+  lastCacheWriteTokens?: number
+  lastTotalTokens?: number
   estimatedCurrentTokens?: number
   percentUsed?: number
   [key: string]: unknown

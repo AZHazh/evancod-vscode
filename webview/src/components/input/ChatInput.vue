@@ -112,18 +112,30 @@ const contextWindow = computed(
     providerStore.activeProvider?.autoCompactWindow ||
     200000
 )
+const effectiveContextWindow = computed(
+  () =>
+    usage.value?.effectiveContextWindow ||
+    Math.max(contextWindow.value - Math.min(20000, Math.floor(contextWindow.value * 0.1)), 0)
+)
 const inputTokens = computed(() => usage.value?.inputTokens || 0)
 const cacheReadTokens = computed(() => usage.value?.cacheReadTokens || 0)
+const cacheWriteTokens = computed(() => usage.value?.cacheWriteTokens || 0)
 const outputTokens = computed(() => usage.value?.outputTokens || 0)
+const currentPromptTokens = computed(() => usage.value?.lastPromptTokens || 0)
+const currentCacheReadTokens = computed(() => usage.value?.lastCacheReadTokens || 0)
+const currentCacheWriteTokens = computed(() => usage.value?.lastCacheWriteTokens || 0)
+const currentOutputTokens = computed(() => usage.value?.lastOutputTokens || 0)
 const usedTokens = computed(
   () => usage.value?.estimatedCurrentTokens || usage.value?.lastPromptTokens || inputTokens.value
 )
-const remainingTokens = computed(() => Math.max(contextWindow.value - usedTokens.value, 0))
+const remainingTokens = computed(() =>
+  Math.max(effectiveContextWindow.value - usedTokens.value, 0)
+)
 const contextPercent = computed(
   () =>
     usage.value?.percentUsed ??
-    (contextWindow.value
-      ? Math.min(Math.round((usedTokens.value / contextWindow.value) * 100), 100)
+    (effectiveContextWindow.value
+      ? Math.min(Math.round((usedTokens.value / effectiveContextWindow.value) * 100), 100)
       : 0)
 )
 const currentPermission = computed(
@@ -1072,8 +1084,8 @@ onUnmounted(() => {
 
       <div v-if="openPanel === 'context'" class="floating-panel context-panel">
         <div class="context-head">
-          <span
-            >上下文<br /><strong>{{ modelLabel }}</strong></span
+            <span
+            >上下文<span v-if="usage?.estimated">（估算）</span><br /><strong>{{ modelLabel }}</strong></span
           >
           <strong>{{ contextPercent }}%</strong>
         </div>
@@ -1089,28 +1101,33 @@ onUnmounted(() => {
           >
         </div>
         <div class="meter-row">
-          <span>Input tokens</span><em>{{ inputTokens.toLocaleString() }}</em>
+          <span>当前 Prompt（含缓存）</span><em>{{ currentPromptTokens.toLocaleString() }}</em>
         </div>
-        <div class="meter"><i :style="{ width: `${Math.min(contextPercent, 100)}%` }" /></div>
+        <div class="meter"><i :style="{ width: `${Math.min(Math.round((currentPromptTokens / contextWindow) * 100), 100)}%` }" /></div>
         <div class="meter-row">
-          <span>Cache read</span><em>{{ cacheReadTokens.toLocaleString() }}</em>
+          <span>Cache read（已含于 Prompt）</span><em>{{ currentCacheReadTokens.toLocaleString() }}</em>
         </div>
         <div class="meter blue">
-          <i
-            :style="{
-              width: `${Math.min(Math.round((cacheReadTokens / contextWindow) * 100), 100)}%`,
-            }"
-          />
+          <i :style="{ width: `${Math.min(Math.round((currentCacheReadTokens / contextWindow) * 100), 100)}%` }" />
         </div>
         <div class="meter-row">
-          <span>Output tokens</span><em>{{ outputTokens.toLocaleString() }}</em>
+          <span>当前 Cache write</span><em>{{ currentCacheWriteTokens.toLocaleString() }}</em>
+        </div>
+        <div class="meter blue">
+          <i :style="{ width: `${Math.min(Math.round((currentCacheWriteTokens / contextWindow) * 100), 100)}%` }" />
+        </div>
+        <div class="meter-row">
+          <span>当前 Output</span><em>{{ currentOutputTokens.toLocaleString() }}</em>
         </div>
         <div class="meter">
-          <i
-            :style="{
-              width: `${Math.min(Math.round((outputTokens / contextWindow) * 100), 100)}%`,
-            }"
-          />
+          <i :style="{ width: `${Math.min(Math.round((currentOutputTokens / contextWindow) * 100), 100)}%` }" />
+        </div>
+        <div class="meter-row meter-row--cumulative">
+          <span>累计 Input / Cache / Output</span>
+          <em>{{ inputTokens.toLocaleString() }} / {{ cacheReadTokens.toLocaleString() }} / {{ outputTokens.toLocaleString() }}</em>
+        </div>
+        <div v-if="cacheWriteTokens" class="meter-row meter-row--cumulative">
+          <span>累计 Cache write</span><em>{{ cacheWriteTokens.toLocaleString() }}</em>
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import type { Message } from '../../../types'
+import type { Message, TokenUsage } from '../../../types'
 import { resolveOpenAIReasoningEffort } from '../../../utils/thinking'
 import { sanitizeToolMessageSequence } from './toolMessageSanitizer'
 import {
@@ -6,6 +6,7 @@ import {
   buildUrl,
   createFetchError,
   isOutputLimitStopReason,
+  normalizeOpenAIUsage,
   parseJsonObject,
   stringifyToolResultContent,
   throwIfAborted,
@@ -50,6 +51,7 @@ export class OpenAIChatClient implements ApiClient {
       max_tokens: this.config.maxTokens || 4096,
       temperature: this.config.temperature ?? 1,
       stream: true,
+      stream_options: { include_usage: true },
     }
 
     // OpenAI 推理参数。
@@ -104,6 +106,7 @@ export class OpenAIChatClient implements ApiClient {
       const byIndex = new Map<number, number>()
       let finishReason: string | undefined
       let receivedDone = false
+      let usage: TokenUsage | undefined
 
       while (true) {
         const { value, done } = await reader.read()
@@ -126,6 +129,9 @@ export class OpenAIChatClient implements ApiClient {
           }
 
           const chunk = JSON.parse(data)
+          if (chunk.usage) {
+            usage = normalizeOpenAIUsage(chunk.usage)
+          }
           const choice = chunk.choices?.[0]
           if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
             finishReason = choice.finish_reason
@@ -196,6 +202,7 @@ export class OpenAIChatClient implements ApiClient {
       return {
         content: fullContent,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        usage,
         stopReason: finishReason,
         incomplete:
           isOutputLimitStopReason(finishReason) || (!receivedDone && !finishReason),
