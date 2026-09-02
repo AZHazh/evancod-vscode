@@ -228,8 +228,11 @@ function insertToken(kind: 'file' | 'skill', label: string, id: string, replaceT
   if (!editor) return
   const selection = window.getSelection()
   editor.focus()
-  const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange()
-  if (!selection?.rangeCount) {
+  const currentRange = selection?.rangeCount ? selection.getRangeAt(0) : null
+  const range = currentRange && editor.contains(currentRange.commonAncestorContainer)
+    ? currentRange
+    : document.createRange()
+  if (!currentRange || !editor.contains(currentRange.commonAncestorContainer)) {
     range.selectNodeContents(editor)
     range.collapse(false)
   }
@@ -272,16 +275,98 @@ function insertToken(kind: 'file' | 'skill', label: string, id: string, replaceT
 
 function removeTriggerText(trigger: string) {
   const editor = textarea.value
-  if (!editor) return
+  if (!editor || !trigger) return
   const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
   const nodes: Text[] = []
   let node: Node | null
   while ((node = walker.nextNode())) nodes.push(node as Text)
-  const target = nodes[nodes.length - 1]
-  if (!target) return
-  const index = target.data.lastIndexOf(trigger)
-  if (index >= 0)
-    target.data = target.data.slice(0, index) + target.data.slice(index + trigger.length)
+
+  // 触发文本可能因 contenteditable 的选区操作被拆到多个文本节点，
+  // 先按可见文本定位最后一次出现位置，再跨节点删除对应字符。
+  const fullText = nodes.map(textNode => textNode.data).join('')
+  const start = fullText.lastIndexOf(trigger)
+  if (start < 0) return
+
+  let offset = 0
+  let remainingLength = trigger.length
+  for (const textNode of nodes) {
+    const nodeStart = offset
+    const nodeEnd = offset + textNode.data.length
+    offset = nodeEnd
+    if (nodeEnd <= start || nodeStart >= start + trigger.length) continue
+
+    const deleteStart = Math.max(start, nodeStart) - nodeStart
+    const deleteEnd = Math.min(start + trigger.length, nodeEnd) - nodeStart
+    textNode.deleteData(deleteStart, deleteEnd - deleteStart)
+    remainingLength -= deleteEnd - deleteStart
+    if (remainingLength <= 0) break
+  }
+}
+
+function removeToken(token: HTMLElement) {
+  const kind = token.dataset.tokenKind
+  const id = token.dataset.tokenId
+  token.remove()
+
+  if (kind === 'file') {
+    attachments.value = attachments.value.filter(item => item.id !== id)
+    workspaceReferences.value = workspaceReferences.value.filter(item => item.id !== id)
+    attachmentRegistry.delete(id || '')
+    referenceRegistry.delete(id || '')
+  } else if (kind === 'skill') {
+    selectedSkills.value = selectedSkills.value.filter(item => item.name !== id)
+    skillRegistry.delete(id || '')
+  }
+
+  syncEditorInput()
+}
+
+function adjacentSibling(node: Node, direction: 'backward' | 'forward'): Node | null {
+  let current: Node | null = node
+  while (current && current.parentNode) {
+    const parent: Node = current.parentNode
+    const index = Array.prototype.indexOf.call(parent.childNodes, current) as number
+    const sibling = parent.childNodes[direction === 'backward' ? index - 1 : index + 1]
+    if (sibling) return sibling
+    current = parent
+  }
+  return null
+}
+
+function tokenAdjacentToCaret(direction: 'backward' | 'forward') {
+  const editor = textarea.value
+  const selection = window.getSelection()
+  if (!editor || !selection?.rangeCount) return null
+  const range = selection.getRangeAt(0)
+  if (!editor.contains(range.commonAncestorContainer)) return null
+  if (!range.collapsed) {
+    return (
+      Array.from(editor.querySelectorAll<HTMLElement>('[data-token-kind]')).find(token =>
+        range.intersectsNode(token)
+      ) || null
+    )
+  }
+
+  if (range.startContainer.nodeType === Node.TEXT_NODE) {
+    const textLength = range.startContainer.textContent?.length || 0
+    if (direction === 'backward' && range.startOffset > 0) return null
+    if (direction === 'forward' && range.startOffset < textLength) return null
+  } else {
+    const childCount = range.startContainer.childNodes.length
+    if (direction === 'backward' && range.startOffset > 0) {
+      const previous = range.startContainer.childNodes[range.startOffset - 1] as HTMLElement
+      if (previous?.dataset?.tokenKind) return previous
+      return null
+    }
+    if (direction === 'forward' && range.startOffset < childCount) {
+      const next = range.startContainer.childNodes[range.startOffset] as HTMLElement
+      if (next?.dataset?.tokenKind) return next
+      return null
+    }
+  }
+
+  const sibling = adjacentSibling(range.startContainer, direction)
+  return sibling instanceof HTMLElement && sibling.dataset.tokenKind ? sibling : null
 }
 
 function insertTextAtCaret(text: string) {
@@ -439,6 +524,16 @@ function handleSend() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    const direction = event.key === 'Backspace' ? 'backward' : 'forward'
+    const token = tokenAdjacentToCaret(direction)
+    if (token) {
+      event.preventDefault()
+      removeToken(token)
+      return
+    }
+  }
+
   if (openPanel.value === 'slash') {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
@@ -575,6 +670,7 @@ function applyFileReference(entry: FileSearchEntry) {
   const before = input.value.slice(0, atTriggerStart.value)
   const after = input.value.slice(cursor)
   input.value = `${before}${after}`
+  removeTriggerText(trigger)
   if (!workspaceReferences.value.some(reference => reference.path === entry.path)) {
     const id = createId()
     workspaceReferences.value.push({
@@ -585,8 +681,11 @@ function applyFileReference(entry: FileSearchEntry) {
       relativePath: entry.relativePath,
     })
     referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
-    insertToken('file', entry.name, id, trigger)
+    insertToken('file', entry.name, id)
   }
+  // 插入 token 可能重新定位选区，再做一次 DOM 清理，避免触发路径残留。
+  removeTriggerText(trigger)
+  syncEditorInput()
   openPanel.value = null
   nextTick(() => {
     textarea.value?.focus()
@@ -603,6 +702,7 @@ function applySkill(skill: SkillEntry) {
   const after = input.value.slice(cursor)
   const trigger = input.value.slice(anchor, cursor)
   input.value = `${before}${after}`
+  removeTriggerText(trigger)
   if (!selectedSkills.value.some(item => item.name === skill.name)) {
     selectedSkills.value.push({
       name: skill.name,
@@ -610,8 +710,10 @@ function applySkill(skill: SkillEntry) {
       trigger: skill.trigger,
     })
     skillRegistry.set(skill.name, selectedSkills.value[selectedSkills.value.length - 1])
-    insertToken('skill', skill.name, skill.name, trigger)
+    insertToken('skill', skill.name, skill.name)
   }
+  removeTriggerText(trigger)
+  syncEditorInput()
   openPanel.value = null
   skillTriggerStart.value = null
   nextTick(() => {
@@ -701,13 +803,24 @@ async function handlePaste(event: ClipboardEvent) {
       // 回退到普通粘贴
     }
   }
+
+  // contenteditable 默认会粘贴来源编辑器的 HTML/style，导致字体和布局被污染。
+  // 普通文本统一以纯文本插入，使内容继承当前输入区样式。
   const files = Array.from(event.clipboardData?.items ?? [])
     .filter(item => item.type.startsWith('image/'))
     .map(item => item.getAsFile())
     .filter((file): file is File => !!file)
-  if (!files.length) return
+  if (files.length) {
+    event.preventDefault()
+    await appendFiles(files)
+    return
+  }
+
+  const text = event.clipboardData?.getData('text/plain')
+  if (text == null) return
   event.preventDefault()
-  await appendFiles(files)
+  insertTextAtCaret(text.replace(/\r\n?/g, '\n'))
+  syncEditorInput()
 }
 
 function handleDrop(event: DragEvent) {
@@ -1061,6 +1174,7 @@ onUnmounted(() => {
 
   &__textarea {
     display: block;
+    min-width: 0;
     min-height: 74px;
     max-height: 300px;
     padding: 22px 18px 16px;
@@ -1071,6 +1185,10 @@ onUnmounted(() => {
     font-family: var(--vscode-font-family);
     font-size: 14px;
     line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    overflow-y: auto;
 
     &::placeholder {
       color: var(--vscode-input-placeholderForeground, var(--color-text-tertiary));

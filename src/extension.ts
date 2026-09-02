@@ -149,6 +149,14 @@ export async function activate(context: vscode.ExtensionContext) {
       agentCoordinator
     )
 
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider('evancod.chatView', webviewManager, {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      })
+    )
+
     // 将 WebviewManager 注入到服务中（反向依赖注入）
     taskManager.setWebviewManager(webviewManager)
     planModeManager.setWebviewManager(webviewManager)

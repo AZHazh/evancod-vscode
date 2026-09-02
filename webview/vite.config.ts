@@ -19,7 +19,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 9999,
     strictPort: true,
     cors: {
       origin: /^vscode-webview:\/\//,

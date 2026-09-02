@@ -2,7 +2,7 @@
   "name": "vscode-evancod",
   "displayName": "Evancod",
   "description": "AI-powered coding agent for VSCode",
-  "version": "0.1.27",
+  "version": "0.1.30",
   "publisher": "evancod",
   "icon": "resources/extension-icon.png",
   "engines": {
@@ -34,7 +34,7 @@
       }
     ],
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "evancod",
           "title": "Evancod",
@@ -47,7 +47,8 @@
         {
           "type": "webview",
           "id": "evancod.chatView",
-          "name": "聊天"
+          "name": "聊天",
+          "icon": "resources/icon.svg"
         }
       ]
     },

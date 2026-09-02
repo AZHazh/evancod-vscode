@@ -2,14 +2,14 @@
  * Webview 管理器 - Webview 生命周期和消息通信
  *
  * 职责：
- * 1. 创建和管理 Webview 面板
+ * 1. 创建和管理 Webview 视图
  * 2. 加载 HTML 内容（开发/生产模式）
  * 3. 处理 Extension ↔ Webview 消息通信
  * 4. 管理 Webview 生命周期
  *
  * 设计模式：单例模式 + 工厂模式
  * - 只创建一个 Webview 实例（避免资源浪费）
- * - 如果已存在则复用（reveal）
+ * - 如果已存在则复用（show）
  * - 保持状态（retainContextWhenHidden: true）
  *
  * 为什么只创建一个 Webview？
@@ -40,12 +40,20 @@ const PROVIDER_MUTATION_TYPES = new Set([
   'newapi.sync.import',
 ])
 
-export class WebviewManager {
+// 开发模式下 Webview 通过 Vite 加载资源。可用环境变量覆盖默认端口，
+// 以保证扩展端地址与 webview/vite.config.ts 的 server.port 保持一致。
+const DEV_WEBVIEW_ORIGIN = process.env.EVANCOD_WEBVIEW_URL || 'http://localhost:9999'
+const DEV_WEBVIEW_WS_ORIGIN = DEV_WEBVIEW_ORIGIN.replace(/^http/, 'ws')
+
+export class WebviewManager implements vscode.WebviewViewProvider {
   /**
-   * Webview 面板实例
-   * undefined 表示还没有创建
+   * Webview 视图实例
+   * undefined 表示视图尚未被 VS Code 解析
    */
-  private panel: vscode.WebviewPanel | undefined
+  private view: vscode.WebviewView | undefined
+  private webview: vscode.Webview | undefined
+  private viewReadyPromise: Promise<vscode.Webview> | undefined
+  private resolveViewReady: ((webview: vscode.Webview) => void) | undefined
   private createFreshSessionOnReady = false
 
   /**
@@ -84,63 +92,48 @@ export class WebviewManager {
   ) {}
 
   /**
-   * 显示 Webview 面板
-   *
-   * 流程：
-   * 1. 如果已存在，直接 reveal（显示）
-   * 2. 如果不存在，创建新的 Webview
-   * 3. 设置 HTML 内容
-   * 4. 设置消息处理器
-   * 5. 监听 dispose 事件
+   * 显示右侧 Webview 视图。
+   * WebviewView 由 VS Code 根据 package.json 中的视图贡献创建，
+   * 这里仅负责展开它。首次展开时会触发 resolveWebviewView。
    */
   show(options: { createFreshSessionOnOpen?: boolean } = {}) {
-    // 如果已存在，直接显示
-    if (this.panel) {
-      this.panel.reveal()
+    if (this.view) {
+      this.view.show()
       return
     }
 
     this.createFreshSessionOnReady = options.createFreshSessionOnOpen !== false
 
-    // 创建新的 Webview 面板
-    this.panel = vscode.window.createWebviewPanel(
-      'evancodChat', // 唯一标识符
-      'Evancod 聊天', // 面板标题
-      vscode.ViewColumn.Beside, // 默认在当前编辑器右侧打开
-      {
-        // 启用 JavaScript
-        enableScripts: true,
+    // 展开 evancod 容器，不会创建新的编辑器 Tab。
+    void vscode.commands.executeCommand('workbench.view.extension.evancod')
+  }
 
-        // 保持上下文（隐藏时不销毁状态）
-        // 这样切换标签页后再回来，状态还在
-        retainContextWhenHidden: true,
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView
+    this.webview = webviewView.webview
 
-        // 允许访问的本地资源根目录
-        // Webview 只能访问这些目录下的文件
-        localResourceRoots: [
-          vscode.Uri.file(path.join(this.context.extensionPath, 'webview', 'dist'))
-        ],
-      }
-    )
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.file(path.join(this.context.extensionPath, 'webview', 'dist'))
+      ],
+    }
+    webviewView.webview.html = this.getHtmlContent(webviewView.webview)
 
-    // Webview 编辑器标签不会自动继承扩展或活动栏图标，需要显式设置。
-    this.panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'extension-icon.png')
-
-    // 设置 HTML 内容
-    this.panel.webview.html = this.getHtmlContent(this.panel.webview)
-
-    // 设置消息处理器（监听来自 Webview 的消息）
-    this.setupMessageHandler(this.panel.webview)
+    this.setupMessageHandler(webviewView.webview)
     this.setupChatEventForwarding()
 
-    // 监听面板关闭事件
-    this.panel.onDidDispose(() => {
-      this.panel = undefined
+    this.resolveViewReady?.(webviewView.webview)
+    this.resolveViewReady = undefined
+    this.viewReadyPromise = undefined
 
-      // 清理所有资源
+    webviewView.onDidDispose(() => {
+      if (this.view !== webviewView) return
+      this.view = undefined
+      this.webview = undefined
       this.disposables.forEach(d => d.dispose())
       this.disposables = []
-    })
+    }, undefined, this.disposables)
   }
 
   /**
@@ -149,16 +142,24 @@ export class WebviewManager {
   async startNewApiSync() {
     this.show()
 
-    if (!this.panel) {
-      return
-    }
+    const webview = await this.getWebview()
 
     const { handleNewApiMessage } = await import('../newapi/NewApiMessageHandler')
     await handleNewApiMessage(
       { type: 'newapi.sync.start', data: {} },
       this.providerService,
-      this.panel.webview
+      webview
     )
+  }
+
+  private getWebview(): Promise<vscode.Webview> {
+    if (this.webview) return Promise.resolve(this.webview)
+    if (!this.viewReadyPromise) {
+      this.viewReadyPromise = new Promise(resolve => {
+        this.resolveViewReady = resolve
+      })
+    }
+    return this.viewReadyPromise
   }
 
   /**
@@ -944,7 +945,7 @@ export class WebviewManager {
    * @param message - 要发送的消息对象
    */
   postMessage(message: any) {
-    this.panel?.webview.postMessage(message)
+    void this.webview?.postMessage(message)
   }
 
   sendAgentEvent(event: AgentServerEvent): void {
@@ -1085,22 +1086,22 @@ export class WebviewManager {
 
     if (isDevelopment) {
       // 开发模式：连接到 Vite dev server
-      // Vite 会运行在 localhost:5173
+      // 默认运行在 localhost:9999，可通过 EVANCOD_WEBVIEW_URL 覆盖
       // 支持热重载（修改代码后自动刷新）
       return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline' http://localhost:5173; script-src ${webview.cspSource} 'unsafe-eval' http://localhost:5173; connect-src http://localhost:5173 ws://localhost:5173; img-src ${webview.cspSource} data: http://localhost:5173;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline' ${DEV_WEBVIEW_ORIGIN}; script-src ${webview.cspSource} 'unsafe-eval' ${DEV_WEBVIEW_ORIGIN}; connect-src ${DEV_WEBVIEW_ORIGIN} ${DEV_WEBVIEW_WS_ORIGIN}; img-src ${webview.cspSource} data: ${DEV_WEBVIEW_ORIGIN};">
   <title>Evancod Chat</title>
 </head>
 <body>
   <div id="app"></div>
   <!-- Vite 客户端（用于热重载） -->
-  <script type="module" src="http://localhost:5173/@vite/client"></script>
+  <script type="module" src="${DEV_WEBVIEW_ORIGIN}/@vite/client"></script>
   <!-- Vue 应用入口 -->
-  <script type="module" src="http://localhost:5173/src/main.ts"></script>
+  <script type="module" src="${DEV_WEBVIEW_ORIGIN}/src/main.ts"></script>
 </body>
 </html>`
     }
