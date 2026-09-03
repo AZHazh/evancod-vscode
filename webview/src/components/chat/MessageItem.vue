@@ -15,6 +15,7 @@ import GeneratedImageBlock from './GeneratedImageBlock.vue'
 import AgentCard from './AgentCard.vue'
 import SkillBadge from '@/components/common/SkillBadge.vue'
 import { useVSCode } from '@/composables/useVSCode'
+import { copyText } from '@/utils/clipboard'
 
 const props = defineProps<{
   message: UIMessage
@@ -140,7 +141,7 @@ function shouldUseDocumentLayout(value: string) {
 
 async function copyMessage() {
   if (typeof content.value !== 'string' || !content.value.trim()) return
-  await navigator.clipboard.writeText(content.value)
+  await copyText(content.value)
 }
 </script>
 

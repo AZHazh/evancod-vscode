@@ -6,6 +6,7 @@ import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { base64ToDataUrl } from '@/utils/imageAttachments'
 import { summarizeError } from '@/utils/errorSummary'
 import type { BashRuntimeState, AgentTaskNotification } from '@/types'
+import { useChatStore } from '@/stores/chat'
 
 const props = defineProps<{
   toolName: string
@@ -24,7 +25,11 @@ const emit = defineEmits<{
   cancelBash: [toolUseId: string, taskId?: string]
 }>()
 
-const expanded = ref(props.toolName === 'image_gen')
+const chatStore = useChatStore()
+const expanded = computed({
+  get: () => chatStore.isToolCallExpanded(props.toolUseId, props.toolName === 'image_gen'),
+  set: value => chatStore.setToolCallExpanded(props.toolUseId, value),
+})
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

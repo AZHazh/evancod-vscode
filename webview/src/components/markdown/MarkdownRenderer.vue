@@ -6,6 +6,7 @@ highlight.js: 代码语法高亮 * * 设计理念： * - 安全渲染（防止 X
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { marked } from 'marked'
+import { copyText } from '@/utils/clipboard'
 
 /**
  * 组件 Props
@@ -58,9 +59,10 @@ sharedRenderer.code = ({ text, lang }) => {
   const language = lang || 'plaintext'
   const highlighted = escapeHtml(text)
 
-  const copyButton = props.showCopyButton
-    ? `<button class="copy-btn" data-code="${escapeHtml(text)}" onclick="copyCode(this)">复制</button>`
-    : ''
+  const copyButton =
+    props.showCopyButton && language !== 'plaintext'
+      ? `<button type="button" class="copy-btn" data-code="${escapeHtml(text)}">复制</button>`
+      : ''
 
   return `
     <div class="code-block">
@@ -175,25 +177,22 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, m => map[m])
 }
 
-/**
- * 全局复制代码函数
- * 在模板中通过 onclick 调用
- */
-if (typeof window !== 'undefined') {
-  ;(window as any).copyCode = async (button: HTMLButtonElement) => {
-    const code = button.getAttribute('data-code')
-    if (!code) return
+async function handleRenderedClick(event: MouseEvent) {
+  const target = event.target as HTMLElement
+  const button = target.closest<HTMLButtonElement>('.copy-btn')
+  if (!button) return
 
-    try {
-      await navigator.clipboard.writeText(code)
-      button.textContent = '已复制！'
-      setTimeout(() => {
-        button.textContent = '复制'
-      }, 2000)
-    } catch (error) {
-      console.error('复制失败:', error)
-      button.textContent = '复制失败'
-    }
+  event.preventDefault()
+  event.stopPropagation()
+  const code = button.dataset.code || ''
+  if (!code) return
+
+  const copied = await copyText(code)
+  button.textContent = copied ? '已复制！' : '复制失败'
+  if (copied) {
+    window.setTimeout(() => {
+      button.textContent = '复制'
+    }, 2000)
   }
 }
 </script>
@@ -201,7 +200,7 @@ if (typeof window !== 'undefined') {
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
     <div v-if="streaming" class="markdown-content markdown-content--streaming">{{ content }}</div>
-    <div v-else class="markdown-content" v-html="renderedHtml"></div>
+    <div v-else class="markdown-content" v-html="renderedHtml" @click="handleRenderedClick"></div>
   </div>
 </template>
 
@@ -375,6 +374,9 @@ if (typeof window !== 'undefined') {
     height: auto;
     border-radius: var(--chat-radius-sm);
     margin: 0.75em 0;
+  }
+  :deep(.language-plaintext) {
+    background-color: transparent;
   }
 }
 

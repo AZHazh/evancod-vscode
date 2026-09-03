@@ -123,6 +123,9 @@ export const useChatStore = defineStore('chat', () => {
   const agentTaskNotifications = ref<
     Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>
   >({})
+  // 虚拟列表可能回收消息组件，交互状态不能只保存在组件实例中。
+  const toolCallExpanded = ref<Record<string, boolean>>({})
+  const openAgentResultToolUseId = ref<string | null>(null)
   const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
   // ===== 性能优化：流式更新 rAF 批量合并 =====
@@ -310,6 +313,8 @@ export const useChatStore = defineStore('chat', () => {
     if (!currentSession.value) {
       uiMessages.value = []
       agentTaskNotifications.value = {}
+      toolCallExpanded.value = {}
+      openAgentResultToolUseId.value = null
       tokenUsage.value = null
       return
     }
@@ -317,13 +322,16 @@ export const useChatStore = defineStore('chat', () => {
     // 会话切换/新建时不能沿用上一个会话的运行态；同会话增量更新才保留它们。
     if (!preserveRuntime) {
       agentTaskNotifications.value = {}
+      toolCallExpanded.value = {}
+      openAgentResultToolUseId.value = null
       const model = currentSession.value.runtimeConfig?.model || providerStore.currentModel
       const contextWindow =
         providerStore.activeProvider?.modelContextWindows?.[model] ||
         providerStore.activeProvider?.autoCompactWindow ||
         200_000
       tokenUsage.value =
-        currentSession.value.tokenUsage || estimateHistoricalUsage(currentSession.value, contextWindow)
+        currentSession.value.tokenUsage ||
+        estimateHistoricalUsage(currentSession.value, contextWindow)
     }
 
     // 性能优化：如果是追加模式且已有消息，只处理新增的部分
@@ -407,7 +415,17 @@ export const useChatStore = defineStore('chat', () => {
         rebuiltMessages.push(...streamingMessages)
       }
 
-      uiMessages.value = rebuiltMessages
+      // 复用相同 id/type 的消息对象，避免虚拟列表把已有项识别为全新项，
+      // 从而丢失动态高度缓存并触发可见区域闪烁。
+      const previousById = new Map(uiMessages.value.map(message => [message.id, message]))
+      uiMessages.value = rebuiltMessages.map(message => {
+        const previous = previousById.get(message.id)
+        if (previous && previous.type === message.type) {
+          Object.assign(previous, message)
+          return previous
+        }
+        return message
+      })
       // 缓存索引失效：uiMessages 被全量重建
       streamingAssistantIndex = -1
       streamingThinkingIndex = -1
@@ -1248,6 +1266,15 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  function isToolCallExpanded(toolUseId: string, defaultValue = false) {
+    const value = toolCallExpanded.value[toolUseId]
+    return value === undefined ? defaultValue : value
+  }
+
+  function setToolCallExpanded(toolUseId: string, expanded: boolean) {
+    toolCallExpanded.value[toolUseId] = expanded
+  }
+
   function sendPermissionResponse(response: {
     requestId: string
     approved: boolean
@@ -1293,6 +1320,8 @@ export const useChatStore = defineStore('chat', () => {
     messages,
     uiMessages,
     agentTaskNotifications,
+    toolCallExpanded,
+    openAgentResultToolUseId,
     chatState,
     streamingText,
     streamingToolInput,
@@ -1308,6 +1337,8 @@ export const useChatStore = defineStore('chat', () => {
     openSession,
     fetchSessions,
     cancelBash,
+    isToolCallExpanded,
+    setToolCallExpanded,
     sendPermissionResponse,
     sendInteractionResponse,
     upsertPlanApprovalMessage,

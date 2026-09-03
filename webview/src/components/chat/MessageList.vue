@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ArrowDown } from 'lucide-vue-next'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import type { UIMessage } from '@/types'
@@ -72,41 +72,64 @@ function isTaskTool(toolName: string) {
   return toolName.startsWith('task_')
 }
 
-// 增强的消息列表，将 tool_result 数据注入到 tool_use 中
+// 增强的消息列表，将 tool_result 数据注入到 tool_use 中。
+// 保持列表数组引用稳定：子工具流式更新或回答文本增长时，不要让 DynamicScroller
+// 把整个列表当成新数据重算，否则已展开项会短暂回收并出现错误的空白高度。
+const enhancedToolCache = new Map<string, UIMessage>()
+let enhancedItems: UIMessage[] = []
+let enhancedKeys = ''
 const enhancedMessages = computed(() => {
-  return messages.value
-    .filter(msg => {
-      // 过滤掉 agent 子工具调用（在 AgentCard 内展示，不在主消息流重复）
-      if (
-        (msg.type === 'tool_use' || msg.type === 'tool_result') &&
-        msg.parentToolUseId &&
-        agentToolUseIds.value.has(msg.parentToolUseId)
-      ) {
-        return false
+  const nextItems: UIMessage[] = []
+  messages.value.forEach(msg => {
+    // 过滤掉 agent 子工具调用（在 AgentCard 内展示，不在主消息流重复）
+    if (
+      (msg.type === 'tool_use' || msg.type === 'tool_result') &&
+      msg.parentToolUseId &&
+      agentToolUseIds.value.has(msg.parentToolUseId)
+    ) {
+      return
+    }
+    // 过滤掉特定工具的 tool_result 消息（用 Map 查 O(1) 代替 find O(n)）
+    if (msg.type === 'tool_result') {
+      const toolName = toolUseMap.value.get(msg.toolUseId)
+      if (toolName) {
+        if (HIDDEN_TOOL_RESULTS.has(toolName) || isTaskTool(toolName)) return
       }
-      // 过滤掉特定工具的 tool_result 消息（用 Map 查 O(1) 代替 find O(n)）
-      if (msg.type === 'tool_result') {
-        const toolName = toolUseMap.value.get(msg.toolUseId)
-        if (toolName) {
-          return !HIDDEN_TOOL_RESULTS.has(toolName) && !isTaskTool(toolName)
-        }
+    }
+    // 为工具项复用一个 reactive 包装对象。这样结果流式更新时既能刷新内容，
+    // 又不会因为每次 map 都创建新对象而触发 DynamicScroller 重置。
+    if (msg.type === 'tool_use') {
+      let cached = enhancedToolCache.get(msg.id)
+      if (!cached || cached.type !== 'tool_use') {
+        cached = reactive({ ...msg }) as UIMessage
+        enhancedToolCache.set(msg.id, cached)
       }
-      return true
+      Object.assign(cached, msg)
+      const result = toolResultMap.value.get(msg.toolUseId)
+      if (result && (RESULT_INJECTABLE_TOOLS.has(msg.toolName) || isTaskTool(msg.toolName))) {
+        Object.assign(cached, msg, { result: result.content, resultError: result.isError })
+        nextItems.push(cached)
+        return
+      }
+      if ('result' in cached) delete (cached as any).result
+      if ('resultError' in cached) delete (cached as any).resultError
+      nextItems.push(cached)
+      return
+    }
+    nextItems.push(msg)
+  })
+
+  const nextKeys = nextItems.map(item => item.id).join('|')
+  if (nextKeys === enhancedKeys && nextItems.length === enhancedItems.length) {
+    nextItems.forEach((item, index) => {
+      enhancedItems[index] = item
     })
-    .map(msg => {
-      // 将 tool_result 数据注入到对应的 tool_use 消息中
-      if (msg.type === 'tool_use') {
-        const result = toolResultMap.value.get(msg.toolUseId)
-        if (result && (RESULT_INJECTABLE_TOOLS.has(msg.toolName) || isTaskTool(msg.toolName))) {
-          return {
-            ...msg,
-            result: result.content,
-            resultError: result.isError,
-          }
-        }
-      }
-      return msg
-    })
+    return enhancedItems
+  }
+
+  enhancedKeys = nextKeys
+  enhancedItems = nextItems
+  return enhancedItems
 })
 const showThinkingIndicator = computed(() => {
   // 如果消息列表中已有活跃的 thinking 块，不显示底部指示器（避免重复）
@@ -252,26 +275,6 @@ async function scrollToLatest(smooth = true) {
   showBackToLatest.value = false
 }
 
-// 计算影响消息高度的字段，供 DynamicScrollerItem 的 size-dependencies 使用。
-// item 是联合类型，用 'in' 收窄后安全取值，任一变化触发重新测量高度。
-// 对流式文本内容进行分段，避免每个字符都触发重测量（每100字符触发一次）
-function sizeDependencies(item: UIMessage): unknown[] {
-  const deps: unknown[] = []
-
-  if ('content' in item && typeof item.content === 'string') {
-    deps.push(Math.floor(item.content.length / 100))
-  } else if ('content' in item) {
-    deps.push(item.content)
-  }
-
-  if ('result' in item) deps.push(item.result)
-  if ('partialInput' in item) deps.push(item.partialInput)
-  if ('isPending' in item) deps.push(item.isPending)
-  if ('image' in item) deps.push(item.image)
-
-  return deps
-}
-
 function estimateTokenCount(value: string) {
   // 底部状态只需要近似值，按长度估算可避免每个增量扫描完整回答。
   return Math.max(0, Math.ceil(value.length / 3))
@@ -344,12 +347,7 @@ onBeforeUnmount(() => {
       </template>
 
       <template #default="{ item, index, active }">
-        <DynamicScrollerItem
-          :item="item"
-          :active="active"
-          :data-index="index"
-          :size-dependencies="sizeDependencies(item)"
-        >
+        <DynamicScrollerItem :item="item" :active="active" :data-index="index">
           <div class="chat-list__row">
             <MessageItem :message="item" />
           </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock, Bot } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import type { AgentTaskNotification, UIMessage } from '@/types'
@@ -16,8 +16,16 @@ const props = defineProps<{
 }>()
 
 const chatStore = useChatStore()
-const expanded = ref(false)
-const showResultModal = ref(false)
+const expanded = computed({
+  get: () => chatStore.isToolCallExpanded(props.toolUseId),
+  set: value => chatStore.setToolCallExpanded(props.toolUseId, value),
+})
+const showResultModal = computed({
+  get: () => chatStore.openAgentResultToolUseId === props.toolUseId,
+  set: value => {
+    chatStore.openAgentResultToolUseId = value ? props.toolUseId : null
+  },
+})
 
 // 解析 input 获取 description 和 prompt
 const inputRecord = computed(() => {
@@ -43,8 +51,11 @@ const resolvedNotification = computed(() => {
 const status = computed(() => {
   // 如果有 notification，使用 notification 的状态
   if (resolvedNotification.value) {
-    return resolvedNotification.value.status === 'completed' ? 'completed' :
-           resolvedNotification.value.status === 'failed' ? 'failed' : 'stopped'
+    return resolvedNotification.value.status === 'completed'
+      ? 'completed'
+      : resolvedNotification.value.status === 'failed'
+        ? 'failed'
+        : 'stopped'
   }
   // 没有 notification 说明还在运行
   return 'running'
@@ -55,7 +66,7 @@ const statusText = computed(() => {
     running: '执行中',
     completed: '完成',
     failed: '失败',
-    stopped: '已停止'
+    stopped: '已停止',
   }
   return map[status.value as keyof typeof map] || status.value
 })
@@ -65,7 +76,7 @@ const statusIcon = computed(() => {
     running: Clock,
     completed: CheckCircle2,
     failed: XCircle,
-    stopped: XCircle
+    stopped: XCircle,
   }
   return map[status.value as keyof typeof map] || Clock
 })
@@ -76,7 +87,10 @@ function viewResult() {
 }
 
 const hasResult = computed(() => {
-  return status.value === 'completed' && (resolvedNotification.value?.summary || resolvedNotification.value?.result)
+  return (
+    status.value === 'completed' &&
+    (resolvedNotification.value?.summary || resolvedNotification.value?.result)
+  )
 })
 
 // 获取子工具调用列表
@@ -100,17 +114,19 @@ const toolResultMap = computed(() => {
 
 // 增强的子工具调用列表，将 tool_result 数据注入到 tool_use 中
 const enhancedChildToolCalls = computed(() => {
-  return childToolCalls.value.map((msg): ToolUseMessage & { result?: unknown; resultError?: boolean } => {
-    const result = toolResultMap.value.get(msg.toolUseId)
-    if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
-      return {
-        ...msg,
-        result: result.content,
-        resultError: result.isError
+  return childToolCalls.value.map(
+    (msg): ToolUseMessage & { result?: unknown; resultError?: boolean } => {
+      const result = toolResultMap.value.get(msg.toolUseId)
+      if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
+        return {
+          ...msg,
+          result: result.content,
+          resultError: result.isError,
+        }
       }
+      return msg
     }
-    return msg
-  })
+  )
 })
 </script>
 
@@ -126,7 +142,9 @@ const enhancedChildToolCalls = computed(() => {
             <span class="agent-card__label">Agent</span>
             <span class="agent-card__name">{{ agentDescription }}</span>
           </div>
-          <div class="agent-card__subtitle">{{ agentPrompt.slice(0, 100) }}{{ agentPrompt.length > 100 ? '...' : '' }}</div>
+          <div class="agent-card__subtitle">
+            {{ agentPrompt.slice(0, 100) }}{{ agentPrompt.length > 100 ? '...' : '' }}
+          </div>
         </div>
       </div>
 
@@ -168,7 +186,9 @@ const enhancedChildToolCalls = computed(() => {
             :bash="toolCall.bash"
             :notification="toolCall.notification"
             :result="'result' in toolCall ? toolCall.result : undefined"
-            :result-error="'resultError' in toolCall ? (toolCall.resultError as boolean) : undefined"
+            :result-error="
+              'resultError' in toolCall ? (toolCall.resultError as boolean) : undefined
+            "
             @cancel-bash="chatStore.cancelBash"
           />
         </div>
@@ -176,12 +196,13 @@ const enhancedChildToolCalls = computed(() => {
 
       <div v-else-if="status === 'running'" class="agent-card__section">
         <div class="agent-card__section-title">工具活动</div>
-        <div class="agent-card__section-content agent-card__tool-activity">
-          暂时还没有工具活动
-        </div>
+        <div class="agent-card__section-content agent-card__tool-activity">暂时还没有工具活动</div>
       </div>
 
-      <div v-if="resolvedNotification?.error" class="agent-card__section agent-card__section--error">
+      <div
+        v-if="resolvedNotification?.error"
+        class="agent-card__section agent-card__section--error"
+      >
         <div class="agent-card__section-title">错误信息</div>
         <div class="agent-card__section-content">{{ resolvedNotification.error }}</div>
       </div>
@@ -189,11 +210,15 @@ const enhancedChildToolCalls = computed(() => {
       <div v-if="resolvedNotification?.usage" class="agent-card__meta">
         <div v-if="resolvedNotification.usage.durationMs" class="agent-card__meta-item">
           <span class="agent-card__meta-label">耗时:</span>
-          <span class="agent-card__meta-value">{{ Math.round(resolvedNotification.usage.durationMs / 1000) }}s</span>
+          <span class="agent-card__meta-value"
+            >{{ Math.round(resolvedNotification.usage.durationMs / 1000) }}s</span
+          >
         </div>
         <div v-if="resolvedNotification.usage.totalTokens" class="agent-card__meta-item">
           <span class="agent-card__meta-label">Tokens:</span>
-          <span class="agent-card__meta-value">{{ resolvedNotification.usage.totalTokens.toLocaleString() }}</span>
+          <span class="agent-card__meta-value">{{
+            resolvedNotification.usage.totalTokens.toLocaleString()
+          }}</span>
         </div>
       </div>
     </div>
@@ -213,11 +238,15 @@ const enhancedChildToolCalls = computed(() => {
         <div v-if="resolvedNotification?.usage" class="result-meta">
           <div v-if="resolvedNotification.usage.durationMs" class="result-meta-item">
             <span class="result-meta-label">耗时:</span>
-            <span class="result-meta-value">{{ Math.round(resolvedNotification.usage.durationMs / 1000) }}s</span>
+            <span class="result-meta-value"
+              >{{ Math.round(resolvedNotification.usage.durationMs / 1000) }}s</span
+            >
           </div>
           <div v-if="resolvedNotification.usage.totalTokens" class="result-meta-item">
             <span class="result-meta-label">Tokens:</span>
-            <span class="result-meta-value">{{ resolvedNotification.usage.totalTokens.toLocaleString() }}</span>
+            <span class="result-meta-value">{{
+              resolvedNotification.usage.totalTokens.toLocaleString()
+            }}</span>
           </div>
           <div v-if="resolvedNotification.usage.toolUses" class="result-meta-item">
             <span class="result-meta-label">工具调用:</span>
@@ -366,7 +395,11 @@ const enhancedChildToolCalls = computed(() => {
 
   &:hover {
     border-color: var(--chat-color-brand);
-    background: color-mix(in srgb, var(--chat-color-brand) 10%, var(--chat-color-surface-container-low));
+    background: color-mix(
+      in srgb,
+      var(--chat-color-brand) 10%,
+      var(--chat-color-surface-container-low)
+    );
     color: var(--chat-color-brand);
   }
 }

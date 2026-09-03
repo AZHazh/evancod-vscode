@@ -35,6 +35,20 @@ const elapsedSeconds = computed(() => {
   }
   return Math.max(0, Math.floor((now.value - props.timestamp) / 1000))
 })
+
+const formattedElapsed = computed(() => {
+  const total = elapsedSeconds.value
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) {
+    return `${h}h ${m}m ${s}s`
+  }
+  if (m > 0) {
+    return `${m}m ${s}s`
+  }
+  return `${s}s`
+})
 const tokenCount = ref(0)
 let countedLength = 0
 
@@ -76,7 +90,7 @@ onBeforeUnmount(() => {
       <span v-if="!isActive && !expanded" class="thinking-block__icon">▾</span>
       <span v-if="!isActive && expanded" class="thinking-block__icon">▴</span>
       <template v-if="isActive">
-        <span class="thinking-block__meta">{{ elapsedSeconds }}s</span>
+        <span class="thinking-block__meta">{{ formattedElapsed }}</span>
         <span class="thinking-block__meta">↓ {{ tokenCount }} tokens</span>
       </template>
     </button>
