@@ -721,7 +721,6 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'thinking':
         chatState.value = 'thinking'
-        streamingText.value = event.text
         // 性能优化：thinking 增量高频，rAF 合并，每帧最多 upsert 一次
         scheduleThinkingBlockUpdate(event.text)
         break

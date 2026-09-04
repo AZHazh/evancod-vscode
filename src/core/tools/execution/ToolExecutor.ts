@@ -31,6 +31,7 @@ export interface ToolExecutionResult {
 
 export class ToolExecutor {
   private activeToolUseIds = new Set<string>()
+  private cancellationWaiters = new Map<string, () => void>()
 
   constructor(
     private tools: Tool[],
@@ -77,7 +78,13 @@ export class ToolExecutor {
 
     try {
       this.activeToolUseIds.add(id)
-      const toolResult = await this.executeTool(tool, name, id, executionInput)
+      const execution = this.executeTool(tool, name, id, executionInput)
+      const cancelled = new Promise<ToolResult>(resolve => {
+        this.cancellationWaiters.set(id, () =>
+          resolve({ success: false, content: '工具执行已取消', error: '工具执行已取消' })
+        )
+      })
+      const toolResult = await Promise.race([execution, cancelled])
       // 发送给前端的内容保留完整 metadata（含仅供 Webview 的预览数据，如图片 base64）
       const webviewContent = this.formatToolResultContent(toolResult, { forWebview: true })
       // 回灌给 LLM 的内容剔除 _webviewOnly 与 image（大体积 base64），避免灌入模型上下文
@@ -96,11 +103,13 @@ export class ToolExecutor {
       return { toolCallId: id, toolName: name, content }
     } finally {
       this.activeToolUseIds.delete(id)
+      this.cancellationWaiters.delete(id)
     }
   }
 
   cancelAll(): void {
     for (const toolUseId of this.activeToolUseIds) {
+      this.cancellationWaiters.get(toolUseId)?.()
       this.bashTool.cancel(toolUseId)
     }
     this.bashTool.cancelAll()

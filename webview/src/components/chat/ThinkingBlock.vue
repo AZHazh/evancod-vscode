@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer.vue'
+import { formatElapsed } from '@/utils/formatElapsed'
 
 const props = withDefaults(
   defineProps<{
@@ -17,11 +18,28 @@ const expanded = ref(false)
 const now = ref(Date.now())
 let timer: number | null = null
 
-if (props.isActive) {
+function startTimer() {
+  if (timer !== null) return
+  now.value = Date.now()
   timer = window.setInterval(() => {
     now.value = Date.now()
   }, 1000)
 }
+
+function stopTimer() {
+  if (timer === null) return
+  window.clearInterval(timer)
+  timer = null
+}
+
+watch(
+  () => props.isActive,
+  isActive => {
+    if (isActive) startTimer()
+    else stopTimer()
+  },
+  { immediate: true },
+)
 
 function toggleExpanded() {
   expanded.value = !expanded.value
@@ -36,19 +54,7 @@ const elapsedSeconds = computed(() => {
   return Math.max(0, Math.floor((now.value - props.timestamp) / 1000))
 })
 
-const formattedElapsed = computed(() => {
-  const total = elapsedSeconds.value
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (h > 0) {
-    return `${h}h ${m}m ${s}s`
-  }
-  if (m > 0) {
-    return `${m}m ${s}s`
-  }
-  return `${s}s`
-})
+const formattedElapsed = computed(() => formatElapsed(elapsedSeconds.value))
 const tokenCount = ref(0)
 let countedLength = 0
 
@@ -76,9 +82,7 @@ function estimateTokenCount(value: string) {
 }
 
 onBeforeUnmount(() => {
-  if (timer !== null) {
-    window.clearInterval(timer)
-  }
+  stopTimer()
 })
 </script>
 

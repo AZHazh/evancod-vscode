@@ -142,7 +142,8 @@ export class AnthropicClient implements ApiClient {
       if (tools && tools.length > 0) {
         requestParams.tools = tools
       }
-      const stream = this.client.messages.stream(requestParams)
+      // 将取消信号传入 SDK；仅在迭代事件后检查 signal 无法中断“等待下一帧”的请求。
+      const stream = this.client.messages.stream(requestParams, { signal: options?.signal })
       let fullContent = ''
       const toolCalls: any[] = []
       let currentToolCall: any = null

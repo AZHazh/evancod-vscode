@@ -11,6 +11,23 @@ import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import * as fs from 'fs'
 
+function terminateProcess(child: ChildProcessWithoutNullStreams): void {
+  if (process.platform === 'win32' && child.pid) {
+    // Windows 的 SIGTERM 通常只结束 shell，子进程仍会占用 stdout 管道。
+    // taskkill /T /F 终止整个进程树，配合 forceFinish 保证 Promise 收敛。
+    const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+    killer.unref()
+  }
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    // 进程已经退出时忽略 kill 错误。
+  }
+}
+
 /**
  * BashTool 参数
  */
@@ -44,6 +61,7 @@ interface RunningProcess {
   taskId?: string
   timeoutId?: NodeJS.Timeout
   cancelled: boolean
+  forceFinish?: (status: BashStatus) => void
 }
 
 /**
@@ -74,6 +92,7 @@ export class BashTool extends Tool {
   ]
 
   private readonly running = new Map<string, RunningProcess>()
+  private readonly cancelledBeforeStart = new Set<string>()
 
   /** 缓存探测到的 shell，避免每次执行都做文件系统探测 */
   private cachedShell?: string | boolean
@@ -135,9 +154,17 @@ export class BashTool extends Tool {
       const stderrChunks: string[] = []
       let timedOut = false
 
+      if (this.cancelledBeforeStart.delete(toolUseId)) {
+        return this.createErrorResult('命令已取消')
+      }
+
+      const shell = await this.resolveShell()
+      if (this.cancelledBeforeStart.delete(toolUseId)) {
+        return this.createErrorResult('命令已取消')
+      }
       const child = spawn(args.command, {
         cwd: this.cwd,
-        shell: await this.resolveShell(),
+        shell,
         env: {
           ...process.env,
           LANG: 'en_US.UTF-8',
@@ -173,25 +200,37 @@ export class BashTool extends Tool {
 
       runningProcess.timeoutId = setTimeout(() => {
         timedOut = true
-        child.kill('SIGTERM')
+        runningProcess.forceFinish?.('timeout')
       }, timeout)
 
+      let settled = false
       const completion = new Promise<ToolResult>(resolve => {
+        const finish = (status: BashStatus, code: number) => {
+          if (settled) return
+          settled = true
+          this.cleanupProcess(toolUseId, taskId)
+          emitStatus(status, code)
+          resolve(this.buildResult(args, stdoutChunks.join(''), stderrChunks.join(''), code, status, taskId))
+        }
+
+        runningProcess.forceFinish = status => {
+          terminateProcess(child)
+          finish(status, status === 'completed' ? 0 : 1)
+        }
+
         child.on('error', error => {
+          if (settled) return
+          settled = true
           this.cleanupProcess(toolUseId, taskId)
           emitStatus('error', 1)
           resolve(this.createErrorResult(error))
         })
 
         child.on('close', code => {
-          this.cleanupProcess(toolUseId, taskId)
-          const stdout = stdoutChunks.join('')
-          const stderr = stderrChunks.join('')
           const exitCode = typeof code === 'number' ? code : 1
           const cancelled = runningProcess.cancelled
           const status: BashStatus = cancelled ? 'cancelled' : timedOut ? 'timeout' : exitCode === 0 ? 'completed' : 'error'
-          emitStatus(status, exitCode)
-          resolve(this.buildResult(args, stdout, stderr, exitCode, status, taskId))
+          finish(status, exitCode)
         })
       })
 
@@ -218,9 +257,12 @@ export class BashTool extends Tool {
 
   cancel(toolUseId: string, taskId?: string): boolean {
     const runningProcess = this.running.get(taskId || toolUseId) || this.running.get(toolUseId)
-    if (!runningProcess) return false
+    if (!runningProcess) {
+      this.cancelledBeforeStart.add(taskId || toolUseId)
+      return false
+    }
     runningProcess.cancelled = true
-    runningProcess.process.kill('SIGTERM')
+    runningProcess.forceFinish?.('cancelled')
     return true
   }
 
@@ -228,7 +270,7 @@ export class BashTool extends Tool {
     const processes = new Set(this.running.values())
     for (const runningProcess of processes) {
       runningProcess.cancelled = true
-      runningProcess.process.kill('SIGTERM')
+      runningProcess.forceFinish?.('cancelled')
     }
   }
 

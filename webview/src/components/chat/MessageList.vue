@@ -4,6 +4,7 @@ import { ArrowDown } from 'lucide-vue-next'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import type { UIMessage } from '@/types'
 import { useChatStore } from '@/stores/chat'
+import { formatElapsed } from '@/utils/formatElapsed'
 import MessageItem from './MessageItem.vue'
 
 const chatStore = useChatStore()
@@ -154,7 +155,13 @@ const streamingVerb = computed(() => {
 const thinkingElapsedSeconds = computed(() =>
   Math.max(0, Math.floor((now.value - thinkingStartedAt.value) / 1000))
 )
-const thinkingTokenCount = computed(() => estimateTokenCount(chatStore.streamingText))
+const formattedThinkingElapsed = computed(() => formatElapsed(thinkingElapsedSeconds.value))
+const thinkingTokenCount = computed(() => {
+  const activeThinking = enhancedMessages.value.find(
+    message => message.type === 'thinking' && message.id === 'streaming-thinking',
+  )
+  return activeThinking?.type === 'thinking' ? estimateTokenCount(activeThinking.content) : 0
+})
 const latestAssistantTextLength = computed(() => {
   const latest = enhancedMessages.value.at(-1)
   return latest?.type === 'assistant_text' ? latest.content.length : 0
@@ -359,7 +366,7 @@ onBeforeUnmount(() => {
           <div class="streaming-indicator">
             <span class="streaming-indicator__spark" aria-hidden="true">✦</span>
             <span class="streaming-indicator__verb">{{ streamingVerb }}</span>
-            <span class="streaming-indicator__meta">{{ thinkingElapsedSeconds }}s</span>
+            <span class="streaming-indicator__meta">{{ formattedThinkingElapsed }}</span>
             <span class="streaming-indicator__meta">↓ {{ thinkingTokenCount }} tokens</span>
           </div>
         </div>
