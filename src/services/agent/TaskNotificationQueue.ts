@@ -86,7 +86,9 @@ export class TaskNotificationQueue {
   }
 
   private toSyntheticMessage(notification: AgentTaskNotification, id: string): Message {
-    const resultText = notification.result || notification.summary || notification.error || ''
+    // 完整结果保留在 notification.result 中供 UI 查看；主 Agent 的上下文优先
+    // 注入语义摘要，避免后台 Agent 完成后又把整份长报告灌回主会话。
+    const resultText = notification.summary || notification.result || notification.error || ''
     return {
       id,
       role: 'user',

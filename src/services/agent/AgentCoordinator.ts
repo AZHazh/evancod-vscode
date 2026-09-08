@@ -26,6 +26,7 @@
 
 import * as vscode from 'vscode'
 import { QueryCancelledError, QueryEngine, QueryEngineConfig } from '../../core/engine/QueryEngine'
+import { createApiClient } from '../../core/services/api'
 import { LocalAgentTaskStore } from '../../tasks/LocalAgentTask'
 import { TaskNotificationQueue } from './TaskNotificationQueue'
 import { AgentWorktreeManager, type WorktreeLease } from './AgentWorktreeManager'
@@ -366,11 +367,10 @@ export class AgentCoordinator {
       // 执行查询
       const message = await engine.query(`${systemPrompt}\n\n${config.prompt}`, [])
 
-      // 计算执行时间
+      // 为主 Agent 生成一份保留结论与证据的语义摘要。完整输出仍单独保存，
+      // 避免为了节省上下文而把关键结论简单截掉，导致主 Agent 重复调查。
+      const summary = await this.summarizeResult(config, message.content)
       const duration = Date.now() - startTime
-
-      // 提取摘要
-      const summary = this.extractSummary(message.content)
 
       return {
         id: config.id,
@@ -654,21 +654,55 @@ export class AgentCoordinator {
   }
 
   /**
-   * 提取摘要
+   * 将子 Agent 的完整报告压缩为可直接交给主 Agent 继续工作的语义摘要。
    *
-   * 从完整输出中提取关键信息作为摘要
-   *
-   * @param fullOutput - 完整输出
-   * @returns 摘要
+   * 短报告无需二次改写；长报告优先使用低成本模型提炼。摘要失败时返回
+   * 完整报告，而不是做有损的字符截断，确保主 Agent 不会因证据缺失而重做。
    */
-  private extractSummary(fullOutput: string): string {
-    // 简单实现：取前 500 个字符
-    // TODO: 使用更智能的摘要算法
-    if (fullOutput.length <= 500) {
-      return fullOutput
+  private async summarizeResult(config: SubAgentConfig, fullOutput: string): Promise<string> {
+    const normalizedOutput = fullOutput.trim()
+    if (!normalizedOutput) return '子 Agent 已完成，但没有返回文本结果。'
+    if (normalizedOutput.length <= 1200) return normalizedOutput
+
+    const summaryModel = config.provider.models.haiku?.trim() || config.model
+    const summaryClient = createApiClient({
+      provider: config.provider,
+      model: summaryModel,
+      systemPrompt: `你负责把子 Agent 的执行报告整理成供主 Agent 直接继续工作的高保真摘要。
+
+要求：
+- 只依据报告内容，不补充、猜测或美化事实。
+- 优先保留最终结论、根因、已完成工作、验证结果、失败信息和未解决事项。
+- 保留关键文件路径、符号名、命令、错误文本、配置值和其他可复查证据。
+- 明确区分已验证事实、推断和建议；任务未完成时必须明确说明阻塞点。
+- 删除重复的探索过程、寒暄和无助于后续行动的细节。
+- 摘要必须自包含，使主 Agent 无需重新读取相同文件或重复相同调查。
+- 使用简体中文和清晰的小标题；不要输出前言，也不要声称查看了原报告之外的内容。`,
+      maxTokens: 1800,
+      temperature: 0.2,
+      effortLevel: 'low',
+    })
+
+    try {
+      const summary = await summaryClient.sendMessage([
+        {
+          id: `agent-summary-${config.id}`,
+          role: 'user',
+          content: `子 Agent 任务：${config.description}\n\n任务指令：\n${config.prompt}\n\n完整执行报告：\n${normalizedOutput}`,
+          timestamp: Date.now(),
+        },
+      ])
+      const normalizedSummary = summary.trim()
+      if (normalizedSummary) return normalizedSummary
+      console.warn(`[AgentCoordinator] Agent ${config.id} 摘要模型返回空内容，使用完整输出`)
+    } catch (error) {
+      console.warn(
+        `[AgentCoordinator] Agent ${config.id} 语义摘要生成失败，使用完整输出:`,
+        error
+      )
     }
 
-    return fullOutput.substring(0, 500) + '...\n\n（输出已截断，完整内容请查看 fullOutput）'
+    return `摘要生成失败，以下为子 Agent 的完整结果：\n\n${normalizedOutput}`
   }
 
   /**

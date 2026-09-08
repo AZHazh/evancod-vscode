@@ -216,7 +216,7 @@ Agent ID: ${result.id}
 ${result.success ? '结果摘要:' : '错误信息:'}
 ${result.success ? result.summary : result.error}
 
-${result.fullOutput && result.fullOutput.length > 500 ? '提示: 完整输出已截断，摘要中包含关键信息。' : ''}`
+${result.fullOutput && result.summary !== result.fullOutput.trim() ? '提示: 以上是面向主 Agent 的语义摘要，完整输出已单独保存并可在 Agent 详情中查看。' : ''}`
 
         return this.createSuccessResult(content, {
           agentId: result.id,
