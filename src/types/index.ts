@@ -29,6 +29,57 @@ export interface InlineMessageSegment {
   description?: string
 }
 
+export interface RequestReference {
+  id: string
+  path: string
+  name: string
+  sourceSegmentIndex: number
+}
+
+/** 保留整条用户原始指令，避免二次提取时改写或遗漏明确要求。 */
+export interface RequestRequirement {
+  id: string
+  sourceText: string
+  strength: 'explicit'
+  referenceIds: string[]
+}
+
+export interface RequestContext {
+  id: string
+  sourceMessageId: string
+  rawContent: string
+  references: RequestReference[]
+  requirements: RequestRequirement[]
+  status: 'active' | 'completed' | 'interrupted' | 'cancelled'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CompletionEvidence {
+  requirementId: string
+  summary: string
+  refs?: string[]
+}
+
+export interface TaskCompletionReview {
+  state: 'none' | 'reviewing' | 'passed' | 'failed'
+  evidence?: CompletionEvidence[]
+  issues?: string[]
+  requestedAt?: string
+  reviewedAt?: string
+}
+
+export interface RunState {
+  id: string
+  requestId: string
+  status: 'running' | 'interrupted' | 'completed' | 'cancelled'
+  activeTaskId?: string
+  phase: 'planning' | 'implementing' | 'verifying' | 'reviewing'
+  reason?: string
+  retryable?: boolean
+  updatedAt: number
+}
+
 export interface TokenUsage {
   /** 没有服务端 usage 时按历史消息估算，仅用于 UI 展示。 */
   estimated?: boolean
@@ -100,7 +151,14 @@ export interface GeneratedImageRef {
 }
 
 export type AgentTranscriptBlock =
-  | { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: AttachmentContext[]; inlineSegments?: InlineMessageSegment[] }
+  | {
+      id: string
+      type: 'user_text'
+      content: string
+      timestamp: number
+      attachments?: AttachmentContext[]
+      inlineSegments?: InlineMessageSegment[]
+    }
   | { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string }
   | { id: string; type: 'thinking'; content: string; timestamp: number }
   | {
@@ -204,6 +262,8 @@ export interface Session {
   tokenUsage?: TokenUsage
   compactSummary?: string
   attachments?: AttachmentContext[]
+  requestContexts?: RequestContext[]
+  activeRun?: RunState
   // 性能优化：缓存消息数量，避免每次遍历计算
   messageCount?: number
 }
@@ -211,11 +271,7 @@ export interface Session {
 export type ProviderType = 'anthropic' | 'bedrock' | 'vertex' | 'azure' | 'custom'
 export type ProviderApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses' | 'openai_image'
 export type ProviderAuthStrategy =
-  | 'api_key'
-  | 'auth_token'
-  | 'auth_token_empty_api_key'
-  | 'dual_same_token'
-  | 'dual_dummy'
+  'api_key' | 'auth_token' | 'auth_token_empty_api_key' | 'dual_same_token' | 'dual_dummy'
 export type ProviderRuntimeKind = 'anthropic_compatible' | 'openai_oauth'
 
 export interface Provider {
@@ -305,6 +361,12 @@ export interface TaskItem {
 
   /** 任意元数据，用于扩展 */
   metadata?: Record<string, any>
+
+  /** 创建任务时自动继承，不能通过改写 description 静默删除。 */
+  requestId?: string
+  requirementIds?: string[]
+  referenceIds?: string[]
+  completion?: TaskCompletionReview
 }
 
 /**

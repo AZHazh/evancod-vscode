@@ -21,6 +21,7 @@ import type {
   AgentTranscriptBlock,
   TokenUsage,
   Provider,
+  InlineMessageSegment,
 } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { ProviderService } from '../provider/ProviderService'
@@ -42,6 +43,11 @@ import { SessionPersistenceService } from '../persistence/SessionPersistenceServ
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
 import { createApiClient } from '../../core/services/api'
 import { compactConversation } from '../compact/compact'
+import {
+  composeUserPrompt,
+  createRequestContext,
+  formatRequestContract,
+} from './UserPromptComposer'
 
 /**
  * 消息回调类型
@@ -146,11 +152,30 @@ export class ChatService {
     for (const session of this.sessions) {
       this.expirePendingTranscript(session)
       this.taskNotificationQueue.restore(session)
+      // 扩展重启后不可能仍有运行中的请求。只修正内存状态，沿用后续正常保存节奏。
+      if (session.activeRun?.status === 'running') {
+        session.activeRun.status = 'interrupted'
+        session.activeRun.reason = '扩展重启前请求尚未结束，可继续执行。'
+        session.activeRun.retryable = true
+        session.activeRun.updatedAt = Date.now()
+        const requestContext = session.requestContexts?.find(
+          context => context.id === session.activeRun?.requestId
+        )
+        if (requestContext) {
+          requestContext.status = 'interrupted'
+          requestContext.updatedAt = new Date().toISOString()
+        }
+      }
       // 性能优化：初始化时计算并缓存消息数量
       if (session.messageCount === undefined) {
         session.messageCount = session.messages.length
       }
     }
+    const currentSession = this.getCurrentSession()
+    const activeRequestContext = currentSession?.requestContexts?.find(
+      context => context.id === currentSession.activeRun?.requestId
+    )
+    this.taskManager.setActiveRequestContext(activeRequestContext)
   }
 
   async flush(): Promise<void> {
@@ -313,6 +338,11 @@ export class ChatService {
 
     // 加载期间会话可能已切换，避免用旧会话结果覆盖
     if (this.currentSessionId !== sessionId) return
+    const session = this.getCurrentSession()
+    const activeRequestContext = session?.requestContexts?.find(
+      context => context.id === session.activeRun?.requestId
+    )
+    this.taskManager.setActiveRequestContext(activeRequestContext)
     this.taskManager.notifyTaskList()
   }
 
@@ -535,7 +565,8 @@ export class ChatService {
   async sendMessage(
     content: string,
     attachments: (string | AttachmentContext)[] = [],
-    inlineSegments: import('../../types').InlineMessageSegment[] = []
+    inlineSegments: InlineMessageSegment[] = [],
+    messageId?: string
   ): Promise<void> {
     const previousRequest = this.activeRequest
     const request = this.requestQueue
@@ -544,7 +575,7 @@ export class ChatService {
         if (previousRequest) {
           await previousRequest.catch(() => undefined)
         }
-        await this.runMessage(content, attachments, inlineSegments)
+        await this.runMessage(content, attachments, inlineSegments, messageId)
       })
     this.requestQueue = request
     this.activeRequest = request
@@ -560,7 +591,8 @@ export class ChatService {
   private async runMessage(
     content: string,
     attachments: (string | AttachmentContext)[] = [],
-    inlineSegments: import('../../types').InlineMessageSegment[] = []
+    inlineSegments: InlineMessageSegment[] = [],
+    messageId?: string
   ): Promise<void> {
     // 1. 验证会话
     const session = this.getCurrentSession()
@@ -579,8 +611,46 @@ export class ChatService {
     }
 
     const attachmentContexts = await this.resolveAttachments(attachments)
-    const messageContent = this.buildMessageContent(commandResult.content, attachmentContexts)
-    const userContentBlocks = this.buildUserContentBlocks(commandResult.content, attachmentContexts)
+    const interruptedContext = isContinuationMessage(commandResult.content)
+      ? this.findInterruptedRequestContext(session)
+      : undefined
+    const composedPrompt = composeUserPrompt(
+      commandResult.content,
+      inlineSegments,
+      attachmentContexts
+    )
+    const sourceMessageId = messageId || this.generateId()
+    const requestContext =
+      interruptedContext ||
+      createRequestContext(
+        `request-${sourceMessageId}`,
+        sourceMessageId,
+        commandResult.content,
+        composedPrompt
+      )
+    if (!interruptedContext) {
+      session.requestContexts ||= []
+      session.requestContexts.push(requestContext)
+    } else {
+      requestContext.status = 'active'
+      requestContext.updatedAt = new Date().toISOString()
+    }
+    this.taskManager.setActiveRequestContext(requestContext)
+    session.activeRun = {
+      id: `run-${sourceMessageId}`,
+      requestId: requestContext.id,
+      status: 'running',
+      phase: 'planning',
+      updatedAt: Date.now(),
+    }
+    const requestContract = formatRequestContract(requestContext)
+    const recoveryInstruction = interruptedContext
+      ? '这是对上次中断请求的继续执行。先检查工作区和未完成任务的实际状态，不要重复已完成步骤。'
+      : ''
+    const messageContent = [composedPrompt.modelContent, recoveryInstruction, requestContract]
+      .filter(Boolean)
+      .join('\n\n')
+    const userContentBlocks = this.buildUserContentBlocks(messageContent, attachmentContexts, true)
 
     // 检测是否为 openai_image 格式的 Provider —— 不需要初始化 QueryEngine
     const activeProvider = this.providerService.getActiveProvider()
@@ -597,7 +667,7 @@ export class ChatService {
     // 2. 创建用户消息，先更新 UI；最终以 QueryEngine 的完整消息历史为准
     const displayContent = commandResult.displayContent || commandResult.content
     const userMessage: Message = {
-      id: this.generateId(),
+      id: sourceMessageId,
       role: 'user',
       content: displayContent,
       timestamp: Date.now(),
@@ -638,23 +708,53 @@ export class ChatService {
       // openai_image 格式 Provider —— 直接走图片生成路径
       if (isDirectImageGen && activeProvider) {
         await this.handleDirectImageGeneration(commandResult.content, session, activeProvider)
+        requestContext.status = 'completed'
+        requestContext.updatedAt = new Date().toISOString()
+        if (session.activeRun?.id === `run-${sourceMessageId}`) {
+          session.activeRun.status = 'completed'
+          session.activeRun.updatedAt = Date.now()
+        }
         this.isStreaming = false
         return
       }
 
       // 4. 调用 QueryEngine 发送消息
-      await this.queryEngine!.query(messageContent, userContentBlocks)
+      await this.queryEngine!.query(messageContent, userContentBlocks, sourceMessageId)
 
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
       session.messages = this.queryEngine!.getMessages()
-      this.restoreDisplayedCommand(session.messages, commandResult.content, displayContent)
-      const persistedUser = [...session.messages].reverse().find(message => message.role === 'user')
+      this.restoreDisplayedCommand(
+        session.messages,
+        commandResult.content,
+        displayContent,
+        sourceMessageId
+      )
+      const persistedUser = session.messages.find(message => message.id === sourceMessageId)
       if (persistedUser) {
         persistedUser.attachments = attachmentContexts
         persistedUser.inlineSegments = inlineSegments
       }
       session.updatedAt = Date.now()
       session.messageCount = session.messages.length
+      const unfinishedTasks = this.taskManager
+        .listTasks()
+        .filter(
+          task =>
+            task.requestId === requestContext.id &&
+            (task.status === 'pending' ||
+              task.status === 'in_progress' ||
+              task.completion?.state === 'reviewing')
+        )
+      requestContext.status = unfinishedTasks.length ? 'interrupted' : 'completed'
+      requestContext.updatedAt = new Date().toISOString()
+      if (session.activeRun?.id === `run-${sourceMessageId}`) {
+        session.activeRun.status = unfinishedTasks.length ? 'interrupted' : 'completed'
+        session.activeRun.reason = unfinishedTasks.length
+          ? `仍有 ${unfinishedTasks.length} 个任务未完成，可继续执行。`
+          : undefined
+        session.activeRun.retryable = unfinishedTasks.length ? true : undefined
+        session.activeRun.updatedAt = Date.now()
+      }
 
       const lastMessage = session.messages[session.messages.length - 1]
       if (lastMessage && this.messageCallback) {
@@ -671,10 +771,28 @@ export class ChatService {
       if (this.queryEngine) {
         this.queryEngine.closeDanglingToolCalls()
         session.messages = this.queryEngine.getMessages()
-        this.restoreDisplayedCommand(session.messages, commandResult.content, displayContent)
+        this.restoreDisplayedCommand(
+          session.messages,
+          commandResult.content,
+          displayContent,
+          sourceMessageId
+        )
+        const persistedUser = session.messages.find(message => message.id === sourceMessageId)
+        if (persistedUser) {
+          persistedUser.attachments = attachmentContexts
+          persistedUser.inlineSegments = inlineSegments
+        }
       }
 
       if (error instanceof QueryCancelledError) {
+        requestContext.status = 'cancelled'
+        requestContext.updatedAt = new Date().toISOString()
+        if (session.activeRun?.id === `run-${sourceMessageId}`) {
+          session.activeRun.status = 'cancelled'
+          session.activeRun.reason = error.message
+          session.activeRun.retryable = false
+          session.activeRun.updatedAt = Date.now()
+        }
         this.expirePendingTranscript(session)
         session.updatedAt = Date.now()
         session.messageCount = session.messages.length
@@ -683,6 +801,14 @@ export class ChatService {
       }
 
       // 添加错误消息
+      requestContext.status = 'interrupted'
+      requestContext.updatedAt = new Date().toISOString()
+      if (session.activeRun?.id === `run-${sourceMessageId}`) {
+        session.activeRun.status = 'interrupted'
+        session.activeRun.reason = error instanceof Error ? error.message : '未知错误'
+        session.activeRun.retryable = true
+        session.activeRun.updatedAt = Date.now()
+      }
       const errorMessage: Message = {
         id: this.generateId(),
         role: 'assistant',
@@ -977,9 +1103,18 @@ export class ChatService {
   private restoreDisplayedCommand(
     messages: Message[],
     internalContent: string,
-    displayContent: string
+    displayContent: string,
+    messageId?: string
   ): void {
     if (internalContent === displayContent) return
+
+    if (messageId) {
+      const sourceMessage = messages.find(message => message.id === messageId)
+      if (sourceMessage?.role === 'user') {
+        sourceMessage.content = displayContent
+        return
+      }
+    }
 
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index]
@@ -1015,14 +1150,26 @@ export class ChatService {
     return parts.join('\n\n')
   }
 
-  private buildUserContentBlocks(content: string, attachments: AttachmentContext[]) {
+  private findInterruptedRequestContext(session: Session) {
+    const requestId = session.activeRun?.status === 'interrupted' ? session.activeRun.requestId : ''
+    if (!requestId) return undefined
+    return session.requestContexts?.find(context => context.id === requestId)
+  }
+
+  private buildUserContentBlocks(
+    content: string,
+    attachments: AttachmentContext[],
+    contentIncludesTextAttachments = false
+  ) {
     const blocks: NonNullable<Message['contentBlocks']> = [
       {
         type: 'text',
-        text: this.buildMessageContent(
-          content,
-          attachments.filter(attachment => attachment.kind === 'text')
-        ),
+        text: contentIncludesTextAttachments
+          ? content
+          : this.buildMessageContent(
+              content,
+              attachments.filter(attachment => attachment.kind === 'text')
+            ),
       },
     ]
 
@@ -1173,7 +1320,10 @@ export class ChatService {
       mcpManager: this.mcpManager,
       skillManager: this.skillManager,
       memoryManager: this.memoryManager,
-      onTaskListChange: () => this.taskManager.notifyTaskList(),
+      onTaskListChange: () => {
+        this.syncActiveRunFromTasks(session)
+        this.taskManager.notifyTaskList()
+      },
       permissionMode: this.permissionMode,
       imageProvider: this.providerService.getImageProvider() || undefined,
     })
@@ -1215,6 +1365,22 @@ export class ChatService {
     this.saveSessions()
   }
 
+  private syncActiveRunFromTasks(session: Session): void {
+    if (!session.activeRun || session.activeRun.status !== 'running') return
+    const activeTask = this.taskManager.listTasks().find(task => task.status === 'in_progress')
+    const tasks = this.taskManager.listTasks()
+    session.activeRun.activeTaskId = activeTask?.id
+    session.activeRun.phase = activeTask
+      ? 'implementing'
+      : tasks.length > 0 && tasks.every(task => task.status === 'completed')
+        ? 'reviewing'
+        : 'planning'
+    session.activeRun.updatedAt = Date.now()
+    session.updatedAt = Date.now()
+    // 沿用现有流式脏标记和延迟保存，不增加写盘频率。
+    this.saveSessions()
+  }
+
   private recordPermissionResponse(response: { requestId: string; approved: boolean }): void {
     const session = this.getCurrentSession()
     if (!session?.transcript) return
@@ -1241,7 +1407,7 @@ export class ChatService {
 
     const block = session.transcript.find(
       (item): item is Extract<AgentTranscriptBlock, { type: 'interaction_request' }> =>
-        item.type === 'interaction_request' && item.requestId === response.requestId,
+        item.type === 'interaction_request' && item.requestId === response.requestId
     )
     if (!block) return
 
@@ -1271,6 +1437,14 @@ export class ChatService {
           }
           this.bufferTranscriptDelta(session, 'streaming-assistant', event.text, now, existing)
         }
+        break
+
+      case 'content_discard':
+        this.transcriptDeltaBuffers.delete('streaming-assistant')
+        this.transcriptDeltaFlushAt.delete('streaming-assistant')
+        session.transcript = (session.transcript || []).filter(
+          block => block.id !== 'streaming-assistant'
+        )
         break
 
       case 'tool_use_complete':
@@ -1580,8 +1754,8 @@ export class ChatService {
       'cacheReadTokens',
       'cacheWriteTokens',
     ] as const) {
-      const previousValue = typeof previous?.[key] === 'number' ? previous[key] as number : 0
-      const currentValue = typeof current[key] === 'number' ? current[key] as number : 0
+      const previousValue = typeof previous?.[key] === 'number' ? (previous[key] as number) : 0
+      const currentValue = typeof current[key] === 'number' ? (current[key] as number) : 0
       merged[key] = previousValue + currentValue
     }
     return merged
@@ -1688,6 +1862,12 @@ export class ChatService {
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
   }
+}
+
+function isContinuationMessage(content: string): boolean {
+  return /^(继续|继续执行|继续完成|接着做|接着执行|resume|continue)[。.!！\s]*$/i.test(
+    content.trim()
+  )
 }
 
 const MAX_PERSISTED_TOOL_RESULT_CHARS = 2000

@@ -139,6 +139,8 @@ export interface Session {
   tokenUsage?: TokenUsage
   compactSummary?: string
   attachments?: AttachmentContext[]
+  requestContexts?: RequestContext[]
+  activeRun?: RunState
   // 性能优化：缓存消息数量，避免每次遍历计算
   messageCount?: number
 }
@@ -161,6 +163,42 @@ export interface InlineMessageSegment {
   path?: string
   name?: string
   description?: string
+}
+
+export interface RequestReference {
+  id: string
+  path: string
+  name: string
+  sourceSegmentIndex: number
+}
+
+export interface RequestRequirement {
+  id: string
+  sourceText: string
+  strength: 'explicit'
+  referenceIds: string[]
+}
+
+export interface RequestContext {
+  id: string
+  sourceMessageId: string
+  rawContent: string
+  references: RequestReference[]
+  requirements: RequestRequirement[]
+  status: 'active' | 'completed' | 'interrupted' | 'cancelled'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface RunState {
+  id: string
+  requestId: string
+  status: 'running' | 'interrupted' | 'completed' | 'cancelled'
+  activeTaskId?: string
+  phase: 'planning' | 'implementing' | 'verifying' | 'reviewing'
+  reason?: string
+  retryable?: boolean
+  updatedAt: number
 }
 
 export type UIMessage =
@@ -288,6 +326,7 @@ export type AgentServerEvent =
       parentToolUseId?: string
     }
   | { type: 'content_delta'; text?: string; toolInput?: string }
+  | { type: 'content_discard' }
   | {
       type: 'tool_use_complete'
       toolName: string

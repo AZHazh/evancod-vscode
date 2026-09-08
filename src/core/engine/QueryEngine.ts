@@ -304,12 +304,7 @@ export class QueryEngine {
   > = new Map()
   private interactionWaiters: Map<
     string,
-    (response: {
-      requestId: string
-      answered: boolean
-      answers?: unknown
-      reason?: string
-    }) => void
+    (response: { requestId: string; answered: boolean; answers?: unknown; reason?: string }) => void
   > = new Map()
   private toolUseNames: Map<string, string> = new Map()
   private permissionRequestTools: Map<string, string> = new Map()
@@ -692,7 +687,11 @@ Skill 使用契约：
    * @param images - 可选的图片附件（Phase 3+）
    * @returns Promise<Message> 助手的响应消息
    */
-  async query(content: string, contentBlocks?: ContentBlock[]): Promise<Message> {
+  async query(
+    content: string,
+    contentBlocks?: ContentBlock[],
+    messageId?: string
+  ): Promise<Message> {
     const queryStartedAt = performance.now()
     let lastIteration = 0
     let progressSignalCount = 0
@@ -713,7 +712,7 @@ Skill 使用契约：
       if (!this.apiClient) throw new Error('API client not initialized')
 
       const userMessage: Message = {
-        id: this.generateId(),
+        id: messageId || this.generateId(),
         role: 'user',
         content,
         timestamp: Date.now(),
@@ -744,6 +743,25 @@ Skill 使用契约：
           ?.listTasks()
           .some(task => task.status === 'pending' || task.status === 'in_progress') ??
           false)
+      const enqueueTaskCompletionReview = () => {
+        taskCompletionReviewRequested = true
+        taskContinuationCount++
+        this.config.messages.push({
+          id: this.generateId(),
+          role: 'user',
+          content:
+            '[内部完成复核指令] 任务列表已全部完成，但当前工作流还不能立即结束。' +
+            '检查上一段回答中是否还有“现在验证、接下来编译、最后确认”等尚未执行的承诺；' +
+            '不要直接相信任务提交的完成证据，必须结合实际工作区、引用文件、git diff 和工具结果，' +
+            '逐项核对下面的原始用户要求。实际运行适用的最终编译、测试或构建。' +
+            '若任一要求未满足，调用 task_update 将对应任务退回 in_progress，继续修复并重新验证；' +
+            '全部满足后，对 completion.state=reviewing 的任务使用原证据再次调用 task_update completed，' +
+            '确认复核通过；再调用 task_list 确认状态并给出最终总结。不要只描述将要执行的动作。\n\n' +
+            this.buildTaskReviewContext(),
+          timestamp: Date.now(),
+          internal: true,
+        })
+      }
 
       // 新一轮用户请求：清空上一轮的工具去重缓存
       this.toolOrchestrator?.resetDedup()
@@ -931,6 +949,21 @@ Skill 使用契约：
           ) {
             taskWorkflowActive = true
           }
+          const tasksBeforeTools = this.config.taskManager?.listTasks() || []
+          const discardsTerminalTaskSummary =
+            Boolean(assistantContent) &&
+            taskCompletionReviewRequested &&
+            response.toolCalls.some(toolCall => toolCall.name === 'task_list') &&
+            tasksBeforeTools.length > 0 &&
+            tasksBeforeTools.every(
+              task => task.status === 'completed' && task.completion?.state === 'passed'
+            )
+          if (discardsTerminalTaskSummary) {
+            // task_list 后还会生成正式回答；隐藏工具调用前抢先输出的完整总结。
+            this.flushPendingDeltas()
+            this.onAgentEventCallback?.({ type: 'content_discard' })
+            assistantContent = ''
+          }
           const assistantToolCalls: ToolCall[] = response.toolCalls.map(toolCall => ({
             id: toolCall.id,
             name: toolCall.name,
@@ -1002,13 +1035,32 @@ Skill 使用契约：
             progressSignalCount++
           }
 
+          // 最后一个任务工具完成后立即进入内部复核。若等模型下一轮自然收尾，
+          // 它会先输出一份对用户可见的总结，复核完成后再输出一次，造成双总结。
+          const tasksAfterTools = this.config.taskManager?.listTasks() || []
+          if (
+            taskWorkflowActive &&
+            !taskCompletionReviewRequested &&
+            tasksAfterTools.length > 0 &&
+            tasksAfterTools.every(task => task.status === 'completed')
+          ) {
+            enqueueTaskCompletionReview()
+          }
+
           continue
         }
 
         const unfinishedTasks =
           this.config.taskManager
             ?.listTasks()
-            .filter(task => task.status === 'pending' || task.status === 'in_progress') || []
+            .filter(
+              task =>
+                task.status === 'pending' ||
+                task.status === 'in_progress' ||
+                (taskCompletionReviewRequested &&
+                  task.status === 'completed' &&
+                  task.completion?.state === 'reviewing')
+            ) || []
         if (
           taskWorkflowActive &&
           unfinishedTasks.length > 0 &&
@@ -1058,20 +1110,7 @@ Skill 使用契约：
               timestamp: Date.now(),
             })
           }
-
-          taskCompletionReviewRequested = true
-          taskContinuationCount++
-          this.config.messages.push({
-            id: this.generateId(),
-            role: 'user',
-            content:
-              '[内部完成复核指令] 任务列表已全部完成，但当前工作流还不能立即结束。' +
-              '检查上一段回答中是否还有“现在验证、接下来编译、最后确认”等尚未执行的承诺；' +
-              '实际运行适用的最终编译、测试或构建，调用 task_list 确认所有任务状态，' +
-              '然后再给出最终总结。如果验证失败，继续修复并重新验证；不要只描述将要执行的动作。',
-            timestamp: Date.now(),
-            internal: true,
-          })
+          enqueueTaskCompletionReview()
           continue
         }
 
@@ -1495,6 +1534,30 @@ Skill 使用契约：
     if (toolName === 'mcp') return '调用外部 MCP Server 工具或资源'
     if (toolName === 'skill') return '加载并执行 Skill 提示模板'
     return undefined
+  }
+
+  private buildTaskReviewContext(): string {
+    const tasks = this.config.taskManager?.listTasks() || []
+    if (!tasks.length) return '当前没有结构化任务。'
+
+    return tasks
+      .map(task => {
+        const requirements = (this.config.taskManager?.getRequirementsForTask(task) || [])
+          .map(item => `  - [${item.id}] ${item.sourceText}`)
+          .join('\n')
+        const evidence = (task.completion?.evidence || [])
+          .map(item => `  - [${item.requirementId}] ${item.summary}`)
+          .join('\n')
+        return [
+          `任务 ${task.id}: ${task.subject}`,
+          `完成状态: ${task.completion?.state || 'none'}`,
+          '继承的原始要求:',
+          requirements || '  - 无',
+          '已提交证据（仅作线索，必须自行核查）:',
+          evidence || '  - 无',
+        ].join('\n')
+      })
+      .join('\n\n')
   }
 
   private generateId(): string {

@@ -23,6 +23,13 @@ export interface TaskItem {
   createdAt: string
   updatedAt: string
   metadata?: Record<string, any>
+  requestId?: string
+  requirementIds?: string[]
+  referenceIds?: string[]
+  completion?: {
+    state: 'none' | 'reviewing' | 'passed' | 'failed'
+    issues?: string[]
+  }
 }
 
 export const useTaskStore = defineStore('task', () => {
@@ -42,17 +49,17 @@ export const useTaskStore = defineStore('task', () => {
   })
 
   const inProgressTasks = computed(() => {
-    return tasks.value.filter(t => t.status === 'in_progress')
+    return tasks.value.filter(
+      t => t.status === 'in_progress' || t.completion?.state === 'reviewing'
+    )
   })
 
   const completedTasks = computed(() => {
-    return tasks.value.filter(t => t.status === 'completed')
+    return tasks.value.filter(t => t.status === 'completed' && t.completion?.state !== 'reviewing')
   })
 
   const availableTasks = computed(() => {
-    return tasks.value.filter(
-      t => t.status === 'pending' && t.blockedBy.length === 0
-    )
+    return tasks.value.filter(t => t.status === 'pending' && t.blockedBy.length === 0)
   })
 
   const stats = computed(() => {
@@ -61,7 +68,7 @@ export const useTaskStore = defineStore('task', () => {
       pending: pendingTasks.value.length,
       inProgress: inProgressTasks.value.length,
       completed: completedTasks.value.length,
-      available: availableTasks.value.length
+      available: availableTasks.value.length,
     }
   })
 
@@ -125,7 +132,7 @@ export const useTaskStore = defineStore('task', () => {
     // 发送消息到 Extension
     window.vscode?.postMessage({
       type: 'task.list.request',
-      data: null
+      data: null,
     })
   }
 
@@ -150,6 +157,6 @@ export const useTaskStore = defineStore('task', () => {
     removeTask,
     selectTask,
     getTaskById,
-    fetchTasks
+    fetchTasks,
   }
 })

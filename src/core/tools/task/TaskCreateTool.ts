@@ -28,8 +28,7 @@ import type { TaskManager } from '../../../services/task/TaskManager'
 
 export class TaskCreateTool extends Tool {
   readonly name = 'task_create'
-  readonly description =
-    `创建新任务。用于将复杂任务拆解为多个子任务，并追踪执行进度。可以设置任务依赖关系（blockedBy）。
+  readonly description = `创建新任务。用于将复杂任务拆解为多个子任务，并追踪执行进度。可以设置任务依赖关系（blockedBy）。
 
 使用契约：
 - 复杂、多步骤任务、用户明确要求 todo list、或用户一次给出多个任务时，应主动使用此工具创建结构化任务。
@@ -61,17 +60,17 @@ export class TaskCreateTool extends Tool {
           subject: {
             type: 'string',
             description:
-              '任务简短标题，使用祈使句形式，例如 "创建用户认证模块"、"实现登录 API"、"编写单元测试"'
+              '任务简短标题，使用祈使句形式，例如 "创建用户认证模块"、"实现登录 API"、"编写单元测试"',
           },
           description: {
             type: 'string',
             description:
-              '任务详细描述，包括：需求说明、技术要点、文件路径、验收标准等。要足够详细以便后续执行。'
+              '任务详细描述，包括：需求说明、技术要点、文件路径、验收标准等。要足够详细以便后续执行。',
           },
           activeForm: {
             type: 'string',
             description:
-              '任务进行中时的现在进行时描述，用于 UI 展示，例如 "正在创建用户认证模块"。如果不提供，UI 会使用 subject 字段。'
+              '任务进行中时的现在进行时描述，用于 UI 展示，例如 "正在创建用户认证模块"。如果不提供，UI 会使用 subject 字段。',
           },
           blockedBy: {
             type: 'array',
@@ -79,16 +78,16 @@ export class TaskCreateTool extends Tool {
               '此任务依赖的其他任务 ID 列表。只有当所有依赖任务完成后，此任务才能开始执行。用于表示任务之间的先后顺序。',
             items: {
               type: 'string',
-              description: '任务 ID'
-            }
+              description: '任务 ID',
+            },
           },
           metadata: {
             type: 'object',
-            description: '任意元数据，用于扩展任务信息，例如优先级、标签、预估时间等'
-          }
+            description: '任意元数据，用于扩展任务信息，例如优先级、标签、预估时间等',
+          },
         },
-        required: ['subject', 'description']
-      }
+        required: ['subject', 'description'],
+      },
     }
   }
 
@@ -131,7 +130,7 @@ export class TaskCreateTool extends Tool {
         description: args.description.trim(),
         activeForm: args.activeForm?.trim(),
         blockedBy: args.blockedBy || [],
-        metadata: args.metadata
+        metadata: args.metadata,
       })
 
       // 格式化返回结果
@@ -150,13 +149,19 @@ export class TaskCreateTool extends Tool {
 描述:
 ${task.description}
 
+继承的用户要求:
+${this.taskManager.getRequirementsForTask(task).map(item => `- [${item.id}] ${item.sourceText}`).join('\n') || '- 无'}
+
 提示: 使用 task_update 更新任务状态，使用 task_list 查看所有任务。`
 
       return this.createSuccessResult(content, {
         taskId: task.id,
         status: task.status,
         blockedBy: task.blockedBy,
-        canStart: task.blockedBy.length === 0
+        canStart: task.blockedBy.length === 0,
+        requestId: task.requestId,
+        requirementIds: task.requirementIds,
+        referenceIds: task.referenceIds,
       })
     } catch (error) {
       return this.createErrorResult(error)
@@ -174,7 +179,7 @@ ${task.description}
       pending: '⏳ 待开始',
       in_progress: '🔄 进行中',
       completed: '✅ 已完成',
-      deleted: '🗑️ 已删除'
+      deleted: '🗑️ 已删除',
     }
     return statusMap[status] || status
   }

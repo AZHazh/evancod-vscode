@@ -1,13 +1,18 @@
+Exit code: 0
+Wall time: 2.6 seconds
+Output:
 <template>
   <div class="task-item" :class="statusClass" @click="$emit('select', task.id)">
     <div class="task-header">
       <div class="task-status">
         <component :is="statusIcon" class="status-icon" />
         <span class="task-id">{{ task.id }}</span>
+        <span v-if="task.completion?.state === 'reviewing'" class="review-state">待复核</span>
+        <span v-else-if="task.completion?.state === 'failed'" class="review-state failed">复核未通过</span>
       </div>
       <div class="task-actions">
         <Button v-if="task.status === 'pending' && !isBlocked" size="small" @click.stop="$emit('start', task.id)">开始</Button>
-        <Button v-if="task.status === 'in_progress'" variant="secondary" size="small" @click.stop="$emit('complete', task.id)">完成</Button>
+        <Button v-if="task.status === 'in_progress' && !task.requirementIds?.length" variant="secondary" size="small" @click.stop="$emit('complete', task.id)">完成</Button>
       </div>
     </div>
 
@@ -57,8 +62,9 @@ const props = defineProps<Props>()
 defineEmits<{ select: [taskId: string]; start: [taskId: string]; complete: [taskId: string] }>()
 
 const isBlocked = computed(() => props.task.blockedBy.length > 0)
-const statusClass = computed(() => `status-${props.task.status}`)
+const statusClass = computed(() => props.task.completion?.state === 'reviewing' ? 'status-reviewing' : `status-${props.task.status}`)
 const statusIcon = computed(() => {
+  if (props.task.completion?.state === 'reviewing') return LoaderCircle
   const icons = { pending: Clock, in_progress: LoaderCircle, completed: CheckCircle2, deleted: Trash2 }
   return icons[props.task.status] || Clock
 })
@@ -84,9 +90,11 @@ function formatDate(dateString: string): string {
 .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; }
 .task-status { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .status-icon { width: 16px; height: 16px; color: var(--color-primary); }
-.status-in_progress .status-icon { animation: spin 1s linear infinite; }
+.status-in_progress .status-icon, .status-reviewing .status-icon { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .task-id { font-size: 11px; color: var(--color-text-secondary); font-family: var(--vscode-editor-font-family, monospace); }
+.review-state { font-size: 11px; color: var(--vscode-testing-iconQueued, var(--color-text-secondary)); }
+.review-state.failed { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground)); }
 .task-actions { display: flex; gap: 6px; }
 .task-content { margin-bottom: 8px; }
 .task-subject { font-size: 14px; font-weight: 700; margin: 0 0 4px 0; color: var(--color-text-primary); }

@@ -48,11 +48,11 @@ export class TaskGetTool extends Tool {
         properties: {
           taskId: {
             type: 'string',
-            description: '要查看的任务 ID'
-          }
+            description: '要查看的任务 ID',
+          },
         },
-        required: ['taskId']
-      }
+        required: ['taskId'],
+      },
     }
   }
 
@@ -90,7 +90,7 @@ export class TaskGetTool extends Tool {
       const canStart =
         task.status === 'pending' &&
         task.blockedBy.length === 0 &&
-        task.blockedBy.every((id) => {
+        task.blockedBy.every(id => {
           const dep = this.taskManager.getTask(id)
           return dep && dep.status === 'completed'
         })
@@ -123,6 +123,12 @@ export class TaskGetTool extends Tool {
 描述:
 ${task.description}
 
+继承的用户要求:
+${this.taskManager.getRequirementsForTask(task).map(item => `- [${item.id}] ${item.sourceText}`).join('\n') || '- 无'}
+
+完成复核:
+${task.completion ? JSON.stringify(task.completion, null, 2) : '尚未申请'}
+
 ${blockedByInfo}
 
 ${blocksInfo}${metadataText}
@@ -140,9 +146,14 @@ ${blocksInfo}${metadataText}
           blocks: task.blocks,
           createdAt: task.createdAt,
           updatedAt: task.updatedAt,
-          metadata: task.metadata
+          metadata: task.metadata,
+          requestId: task.requestId,
+          requirementIds: task.requirementIds,
+          referenceIds: task.referenceIds,
+          requirements: this.taskManager.getRequirementsForTask(task),
+          completion: task.completion,
         },
-        canStart
+        canStart,
       })
     } catch (error) {
       return this.createErrorResult(error)
@@ -187,7 +198,7 @@ ${blocksInfo}${metadataText}
       pending: '⏳',
       in_progress: '🔄',
       completed: '✅',
-      deleted: '🗑️'
+      deleted: '🗑️',
     }
     return iconMap[status] || '❓'
   }
@@ -203,7 +214,7 @@ ${blocksInfo}${metadataText}
       pending: '⏳ 待开始',
       in_progress: '🔄 进行中',
       completed: '✅ 已完成',
-      deleted: '🗑️ 已删除'
+      deleted: '🗑️ 已删除',
     }
     return statusMap[status] || status
   }

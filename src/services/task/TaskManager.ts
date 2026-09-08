@@ -22,7 +22,13 @@
 
 import * as vscode from 'vscode'
 import { TaskStore } from '../../tasks/TaskStore'
-import type { TaskItem, TaskStatus, TaskList } from '../../types'
+import type {
+  CompletionEvidence,
+  RequestContext,
+  TaskItem,
+  TaskStatus,
+  TaskList,
+} from '../../types'
 
 // 前向声明，避免循环依赖
 interface IWebviewManager {
@@ -54,6 +60,9 @@ export class TaskManager {
   /** 当前会话 ID，用于按对话隔离任务 */
   private currentSessionId: string | null = null
 
+  /** 当前用户请求；只用于新任务自动继承，不创建独立持久化通道。 */
+  private activeRequestContext?: RequestContext
+
   /**
    * 构造函数
    *
@@ -75,6 +84,7 @@ export class TaskManager {
 
   setCurrentSession(sessionId: string | null): void {
     this.currentSessionId = sessionId
+    this.activeRequestContext = undefined
 
     // 如果设置了新会话，确保该会话有对应的 TaskStore
     if (sessionId && !this.taskStores.has(sessionId)) {
@@ -84,6 +94,20 @@ export class TaskManager {
 
   getCurrentSessionId(): string | null {
     return this.currentSessionId
+  }
+
+  setActiveRequestContext(context: RequestContext | undefined): void {
+    this.activeRequestContext = context
+  }
+
+  getActiveRequestContext(): RequestContext | undefined {
+    return this.activeRequestContext
+  }
+
+  getRequirementsForTask(task: TaskItem) {
+    if (!task.requestId || task.requestId !== this.activeRequestContext?.id) return []
+    const ids = new Set(task.requirementIds || [])
+    return this.activeRequestContext.requirements.filter(item => ids.has(item.id))
   }
 
   /**
@@ -99,8 +123,8 @@ export class TaskManager {
   }
 
   private listCurrentSessionTasks(includeDeleted = true): TaskItem[] {
-    return Array.from(this.tasks.values()).filter((task) =>
-      this.isTaskInCurrentSession(task) && (includeDeleted || task.status !== 'deleted')
+    return Array.from(this.tasks.values()).filter(
+      task => this.isTaskInCurrentSession(task) && (includeDeleted || task.status !== 'deleted')
     )
   }
 
@@ -182,7 +206,11 @@ export class TaskManager {
       blockedBy: params.blockedBy || [],
       createdAt: now,
       updatedAt: now,
-      metadata: params.metadata
+      metadata: params.metadata,
+      requestId: this.activeRequestContext?.id,
+      requirementIds: this.activeRequestContext?.requirements.map(item => item.id) || [],
+      referenceIds: this.activeRequestContext?.references.map(item => item.id) || [],
+      completion: { state: 'none' },
     }
 
     // 保存到内存
@@ -228,6 +256,7 @@ export class TaskManager {
       addBlocks?: string[]
       addBlockedBy?: string[]
       metadata?: Record<string, any>
+      completionEvidence?: CompletionEvidence[]
     }
   ): Promise<TaskItem> {
     const task = this.tasks.get(taskId)
@@ -246,8 +275,47 @@ export class TaskManager {
     }
     if (updates.status !== undefined) {
       // 状态验证
+      const previousStatus = task.status
       this.validateStatusTransition(task.status, updates.status)
+      if (updates.status === 'completed') {
+        const missing = this.findMissingCompletionEvidence(task, updates.completionEvidence)
+        if (missing.length) {
+          task.completion = {
+            state: 'failed',
+            evidence: updates.completionEvidence,
+            issues: [`以下用户要求缺少完成证据: ${missing.join(', ')}`],
+            requestedAt: now,
+          }
+          task.updatedAt = now
+          this.scheduleSave()
+          this.webviewManager?.sendTaskUpdated(task)
+          throw new Error(
+            `Cannot complete task: every inherited user requirement needs completionEvidence. Missing: ${missing.join(', ')}`
+          )
+        }
+      }
       task.status = updates.status
+      if (updates.status === 'completed') {
+        task.completion = {
+          state:
+            previousStatus === 'completed' && task.completion?.state === 'reviewing'
+              ? 'passed'
+              : 'reviewing',
+          evidence: updates.completionEvidence,
+          requestedAt: now,
+          reviewedAt:
+            previousStatus === 'completed' && task.completion?.state === 'reviewing'
+              ? now
+              : undefined,
+        }
+      } else if (updates.status === 'in_progress' && previousStatus === 'completed') {
+        task.completion = {
+          ...task.completion,
+          state: 'failed',
+          issues: ['完成复核未通过，任务已重新打开。'],
+          reviewedAt: now,
+        }
+      }
     }
     if (updates.activeForm !== undefined) {
       task.activeForm = updates.activeForm
@@ -340,7 +408,7 @@ export class TaskManager {
    * @returns 符合条件的任务列表
    */
   listTasksByStatus(status: TaskStatus): TaskItem[] {
-    return this.listCurrentSessionTasks().filter((task) => task.status === status)
+    return this.listCurrentSessionTasks().filter(task => task.status === status)
   }
 
   /**
@@ -350,7 +418,7 @@ export class TaskManager {
    */
   listAvailableTasks(): TaskItem[] {
     return this.listCurrentSessionTasks().filter(
-      (task) => task.status === 'pending' && task.blockedBy.length === 0
+      task => task.status === 'pending' && task.blockedBy.length === 0
     )
   }
 
@@ -379,7 +447,7 @@ export class TaskManager {
     for (const blockedByTaskId of task.blockedBy) {
       const blockedByTask = this.tasks.get(blockedByTaskId)
       if (blockedByTask) {
-        blockedByTask.blocks = blockedByTask.blocks.filter((id) => id !== taskId)
+        blockedByTask.blocks = blockedByTask.blocks.filter(id => id !== taskId)
         blockedByTask.updatedAt = now
       }
     }
@@ -388,7 +456,7 @@ export class TaskManager {
     for (const blockTaskId of task.blocks) {
       const blockTask = this.tasks.get(blockTaskId)
       if (blockTask) {
-        blockTask.blockedBy = blockTask.blockedBy.filter((id) => id !== taskId)
+        blockTask.blockedBy = blockTask.blockedBy.filter(id => id !== taskId)
         blockTask.updatedAt = now
       }
     }
@@ -442,14 +510,30 @@ export class TaskManager {
     const validTransitions: Record<TaskStatus, TaskStatus[]> = {
       pending: ['in_progress', 'deleted'],
       in_progress: ['completed', 'pending', 'deleted'],
-      completed: ['deleted'],
-      deleted: []
+      // 完成复核发现未满足用户要求时，允许退回继续修复。
+      completed: ['in_progress', 'deleted'],
+      deleted: [],
     }
 
     const allowed = validTransitions[from] || []
     if (!allowed.includes(to)) {
       throw new Error(`Invalid status transition: ${from} -> ${to}`)
     }
+  }
+
+  private findMissingCompletionEvidence(
+    task: TaskItem,
+    evidence: CompletionEvidence[] | undefined
+  ): string[] {
+    const requirementIds = task.requirementIds || []
+    if (!requirementIds.length) return []
+
+    const covered = new Set(
+      (evidence || [])
+        .filter(item => item.summary.trim().length > 0)
+        .map(item => item.requirementId)
+    )
+    return requirementIds.filter(id => !covered.has(id))
   }
 
   /**

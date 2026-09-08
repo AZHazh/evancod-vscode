@@ -55,16 +55,16 @@ export class TaskListTool extends Tool {
             type: 'string',
             description:
               '按状态过滤任务。可选值：pending（待开始）、in_progress（进行中）、completed（已完成）。不提供则返回所有任务。',
-            enum: ['pending', 'in_progress', 'completed']
+            enum: ['pending', 'in_progress', 'completed'],
           },
           availableOnly: {
             type: 'boolean',
             description:
-              '是否只显示可立即执行的任务（状态为 pending 且没有依赖阻塞）。设置为 true 可以快速找到下一步可以开始的任务。'
-          }
+              '是否只显示可立即执行的任务（状态为 pending 且没有依赖阻塞）。设置为 true 可以快速找到下一步可以开始的任务。',
+          },
         },
-        required: []
-      }
+        required: [],
+      },
     }
   }
 
@@ -74,10 +74,7 @@ export class TaskListTool extends Tool {
    * @param args - 工具参数
    * @returns 执行结果
    */
-  async execute(args: {
-    status?: TaskStatus
-    availableOnly?: boolean
-  }): Promise<ToolResult> {
+  async execute(args: { status?: TaskStatus; availableOnly?: boolean }): Promise<ToolResult> {
     try {
       // 获取任务列表
       let tasks: TaskItem[]
@@ -94,7 +91,7 @@ export class TaskListTool extends Tool {
         tasks = this.taskManager.listTasksByStatus(args.status)
       } else {
         // 获取所有任务（排除已删除）
-        tasks = this.taskManager.listTasks().filter((task) => task.status !== 'deleted')
+        tasks = this.taskManager.listTasks().filter(task => task.status !== 'deleted')
       }
 
       // 如果没有任务
@@ -108,7 +105,7 @@ export class TaskListTool extends Tool {
           `当前没有${filterText}任务。\n\n提示: 使用 task_create 创建新任务。`,
           {
             totalCount: 0,
-            tasks: []
+            tasks: [],
           }
         )
       }
@@ -119,6 +116,12 @@ export class TaskListTool extends Tool {
       // 格式化任务列表
       const taskLines = tasks.map((task, index) => {
         const statusIcon = this.getStatusIcon(task.status)
+        const reviewInfo =
+          task.completion?.state === 'reviewing'
+            ? '（待复核）'
+            : task.completion?.state === 'failed'
+              ? '（复核未通过）'
+              : ''
         const blockedInfo =
           task.blockedBy.length > 0
             ? ` 🔒 (依赖 ${task.blockedBy.length} 个任务)`
@@ -126,7 +129,7 @@ export class TaskListTool extends Tool {
               ? ' ✨ (可开始)'
               : ''
 
-        return `${index + 1}. ${statusIcon} ${task.subject}${blockedInfo}
+        return `${index + 1}. ${statusIcon} ${task.subject}${reviewInfo}${blockedInfo}
    ID: ${task.id}
    描述: ${this.truncateText(task.description, 100)}
    创建时间: ${task.createdAt}`
@@ -155,14 +158,15 @@ ${taskLines.join('\n\n')}
 
       return this.createSuccessResult(content, {
         totalCount: tasks.length,
-        tasks: tasks.map((task) => ({
+        tasks: tasks.map(task => ({
           id: task.id,
           subject: task.subject,
           status: task.status,
           blockedBy: task.blockedBy,
-          blocks: task.blocks
+          blocks: task.blocks,
+          completionState: task.completion?.state,
         })),
-        stats
+        stats,
       })
     } catch (error) {
       return this.createErrorResult(error)
@@ -182,16 +186,16 @@ ${taskLines.join('\n\n')}
     completed: number
     available: number
   } {
-    const activeTasks = tasks.filter((task) => task.status !== 'deleted')
+    const activeTasks = tasks.filter(task => task.status !== 'deleted')
 
     return {
       total: activeTasks.length,
-      pending: activeTasks.filter((task) => task.status === 'pending').length,
-      inProgress: activeTasks.filter((task) => task.status === 'in_progress').length,
-      completed: activeTasks.filter((task) => task.status === 'completed').length,
+      pending: activeTasks.filter(task => task.status === 'pending').length,
+      inProgress: activeTasks.filter(task => task.status === 'in_progress').length,
+      completed: activeTasks.filter(task => task.status === 'completed').length,
       available: activeTasks.filter(
-        (task) => task.status === 'pending' && task.blockedBy.length === 0
-      ).length
+        task => task.status === 'pending' && task.blockedBy.length === 0
+      ).length,
     }
   }
 
@@ -206,7 +210,7 @@ ${taskLines.join('\n\n')}
       pending: '⏳',
       in_progress: '🔄',
       completed: '✅',
-      deleted: '🗑️'
+      deleted: '🗑️',
     }
     return iconMap[status] || '❓'
   }
@@ -222,7 +226,7 @@ ${taskLines.join('\n\n')}
       pending: '待开始',
       in_progress: '进行中',
       completed: '已完成',
-      deleted: '已删除'
+      deleted: '已删除',
     }
     return statusMap[status] || status
   }

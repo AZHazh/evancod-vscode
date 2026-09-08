@@ -642,6 +642,17 @@ export const useChatStore = defineStore('chat', () => {
         }
         break
 
+      case 'content_discard': {
+        flushStreamingRafs()
+        const index = uiMessages.value.findIndex(
+          message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+        )
+        if (index !== -1) uiMessages.value.splice(index, 1)
+        streamingText.value = ''
+        streamingAssistantIndex = -1
+        break
+      }
+
       case 'tool_use_complete':
         // 关键事件可能在下一帧前到达，先落地最后一批增量，避免文字被清空或错序。
         flushStreamingRafs()
@@ -1198,7 +1209,9 @@ export const useChatStore = defineStore('chat', () => {
     const trimmed = content.trim()
     const isBuiltinCommand = /^\/(clear|clean|new|compact|help)(\s|$)/i.test(trimmed)
 
-    const optimisticId = `optimistic-user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    const messageSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    const optimisticId = `optimistic-user-${messageSuffix}`
+    const clientMessageId = `user-${messageSuffix}`
     const optimisticMessage: UIMessage = {
       id: optimisticId,
       type: 'user_text',
@@ -1221,7 +1234,7 @@ export const useChatStore = defineStore('chat', () => {
 
     vscode.postMessage({
       type: 'chat.send',
-      data: { content, files, inlineSegments },
+      data: { messageId: clientMessageId, content, files, inlineSegments },
     })
   }
 

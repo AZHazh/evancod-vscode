@@ -15,7 +15,14 @@
  * }
  */
 
-import type { Session, Message, Provider, TaskItem, AgentTaskNotification, GeneratedImageRef } from './index'
+import type {
+  Session,
+  Message,
+  Provider,
+  TaskItem,
+  AgentTaskNotification,
+  GeneratedImageRef,
+} from './index'
 
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
 
@@ -28,6 +35,7 @@ export type AgentServerEvent =
       parentToolUseId?: string
     }
   | { type: 'content_delta'; text?: string; toolInput?: string }
+  | { type: 'content_discard' }
   | {
       type: 'tool_use_complete'
       toolName: string
@@ -80,12 +88,29 @@ export type AgentServerEvent =
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'
-      subtype: 'task_started' | 'task_progress' | 'task_notification' | 'compact_started' | 'compact_complete'
+      subtype:
+        | 'task_started'
+        | 'task_progress'
+        | 'task_notification'
+        | 'compact_started'
+        | 'compact_complete'
       message?: string
       data?: AgentTaskNotification | Record<string, unknown>
     }
-  | { type: 'bash_output'; toolUseId: string; stream: 'stdout' | 'stderr'; text: string; taskId?: string }
-  | { type: 'bash_status'; toolUseId: string; status: BashStatus; exitCode?: number | null; taskId?: string }
+  | {
+      type: 'bash_output'
+      toolUseId: string
+      stream: 'stdout' | 'stderr'
+      text: string
+      taskId?: string
+    }
+  | {
+      type: 'bash_status'
+      toolUseId: string
+      status: BashStatus
+      exitCode?: number | null
+      taskId?: string
+    }
 
 /**
  * Extension → Webview 消息类型
@@ -238,6 +263,7 @@ export type WebviewToExtensionMessage =
   | {
       type: 'chat.send'
       data: {
+        messageId?: string
         content: string
         images?: string[]
         files?: string[]

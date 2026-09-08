@@ -246,7 +246,8 @@ export class WebviewManager implements vscode.WebviewViewProvider {
               await this.chatService.sendMessage(
                 message.data.content,
                 message.data.files || message.data.images || [],
-                message.data.inlineSegments || []
+                message.data.inlineSegments || [],
+                message.data.messageId
               )
               // 切换会话期间，旧请求完成后不能把旧消息推回新会话。
               const currentSession = this.chatService.getCurrentSession()

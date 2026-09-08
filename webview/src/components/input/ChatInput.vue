@@ -83,6 +83,9 @@ const skills = ref<SkillEntry[]>([])
 const skillFilter = ref('')
 const skillSelectedIndex = ref(0)
 const skillTriggerStart = ref<number | null>(null)
+let slashTriggerRange: Range | null = null
+let atTriggerRange: Range | null = null
+let skillTriggerRange: Range | null = null
 const isDragActive = ref(false)
 const imageModalOpen = ref(false)
 const imageModalIndex = ref(0)
@@ -128,9 +131,7 @@ const currentOutputTokens = computed(() => usage.value?.lastOutputTokens || 0)
 const usedTokens = computed(
   () => usage.value?.estimatedCurrentTokens || usage.value?.lastPromptTokens || inputTokens.value
 )
-const remainingTokens = computed(() =>
-  Math.max(effectiveContextWindow.value - usedTokens.value, 0)
-)
+const remainingTokens = computed(() => Math.max(effectiveContextWindow.value - usedTokens.value, 0))
 const contextPercent = computed(
   () =>
     usage.value?.percentUsed ??
@@ -194,11 +195,76 @@ const adjustHeight = () => {
   textarea.value.style.height = `${Math.min(textarea.value.scrollHeight, 300)}px`
 }
 
-function editorText() {
-  if (!textarea.value) return ''
-  const clone = textarea.value.cloneNode(true) as HTMLElement
+function plainEditorText(element: HTMLElement) {
+  const clone = element.cloneNode(true) as HTMLElement
   clone.querySelectorAll('[data-token-kind]').forEach(token => token.remove())
   return (clone.innerText || '').replace(/\u00a0/g, ' ')
+}
+
+function editorText() {
+  return textarea.value ? plainEditorText(textarea.value) : ''
+}
+
+function editorCaretOffset() {
+  const editor = textarea.value
+  const selection = window.getSelection()
+  if (!editor || !selection?.rangeCount) return input.value.length
+
+  const caret = selection.getRangeAt(0)
+  if (!caret.collapsed || !editor.contains(caret.commonAncestorContainer)) {
+    return input.value.length
+  }
+
+  const beforeCaret = document.createRange()
+  beforeCaret.selectNodeContents(editor)
+  beforeCaret.setEnd(caret.endContainer, caret.endOffset)
+  const container = document.createElement('div')
+  container.append(beforeCaret.cloneContents())
+  return plainEditorText(container).length
+}
+
+function triggerRangeBeforeCaret(trigger: string) {
+  const editor = textarea.value
+  const selection = window.getSelection()
+  if (!editor || !selection?.rangeCount || !trigger) return null
+
+  const caret = selection.getRangeAt(0)
+  if (!caret.collapsed || !editor.contains(caret.commonAncestorContainer)) return null
+
+  const segments: Array<{ node: Text; start: number; text: string }> = []
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const textNode = node as Text
+    if (textNode.parentElement?.closest('[data-token-kind]')) continue
+
+    let end = textNode.data.length
+    if (textNode === caret.endContainer) {
+      end = caret.endOffset
+    } else {
+      const nodeRange = document.createRange()
+      nodeRange.selectNodeContents(textNode)
+      if (nodeRange.compareBoundaryPoints(Range.END_TO_END, caret) > 0) continue
+    }
+    if (end > 0) segments.push({ node: textNode, start: 0, text: textNode.data.slice(0, end) })
+  }
+
+  const beforeCaret = segments.map(segment => segment.text).join('')
+  if (!beforeCaret.endsWith(trigger)) return null
+
+  const triggerStart = beforeCaret.length - trigger.length
+  let offset = 0
+  for (const segment of segments) {
+    const segmentEnd = offset + segment.text.length
+    if (triggerStart < segmentEnd) {
+      const range = document.createRange()
+      range.setStart(segment.node, segment.start + triggerStart - offset)
+      range.setEnd(caret.endContainer, caret.endOffset)
+      return range
+    }
+    offset = segmentEnd
+  }
+  return null
 }
 
 function syncEditorInput() {
@@ -235,31 +301,32 @@ function syncTokensFromEditor() {
     .filter((item): item is MessageSkill => !!item)
 }
 
-function insertToken(kind: 'file' | 'skill', label: string, id: string, replaceTrigger = '') {
+function insertToken(
+  kind: 'file' | 'skill',
+  label: string,
+  id: string,
+  replaceRange?: Range | null
+) {
   const editor = textarea.value
   if (!editor) return
   const selection = window.getSelection()
   editor.focus()
   const currentRange = selection?.rangeCount ? selection.getRangeAt(0) : null
-  const range = currentRange && editor.contains(currentRange.commonAncestorContainer)
-    ? currentRange
-    : document.createRange()
-  if (!currentRange || !editor.contains(currentRange.commonAncestorContainer)) {
+  const savedRangeIsValid =
+    replaceRange &&
+    editor.contains(replaceRange.startContainer) &&
+    editor.contains(replaceRange.endContainer)
+  const range = savedRangeIsValid
+    ? replaceRange
+    : currentRange && editor.contains(currentRange.commonAncestorContainer)
+      ? currentRange
+      : document.createRange()
+  if (
+    !savedRangeIsValid &&
+    (!currentRange || !editor.contains(currentRange.commonAncestorContainer))
+  ) {
     range.selectNodeContents(editor)
     range.collapse(false)
-  }
-  if (
-    replaceTrigger &&
-    range.collapsed &&
-    range.startContainer.nodeType === Node.TEXT_NODE &&
-    range.startOffset >= replaceTrigger.length
-  ) {
-    const text = range.startContainer.textContent || ''
-    const start = range.startOffset - replaceTrigger.length
-    if (text.slice(start, range.startOffset) === replaceTrigger) {
-      range.setStart(range.startContainer, start)
-      range.deleteContents()
-    }
   }
   const token = document.createElement('span')
   token.className = `inline-token inline-token--${kind}`
@@ -285,34 +352,14 @@ function insertToken(kind: 'file' | 'skill', label: string, id: string, replaceT
   syncEditorInput()
 }
 
-function removeTriggerText(trigger: string) {
+function deleteEditorRange(range: Range | null) {
   const editor = textarea.value
-  if (!editor || !trigger) return
-  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
-  const nodes: Text[] = []
-  let node: Node | null
-  while ((node = walker.nextNode())) nodes.push(node as Text)
-
-  // 触发文本可能因 contenteditable 的选区操作被拆到多个文本节点，
-  // 先按可见文本定位最后一次出现位置，再跨节点删除对应字符。
-  const fullText = nodes.map(textNode => textNode.data).join('')
-  const start = fullText.lastIndexOf(trigger)
-  if (start < 0) return
-
-  let offset = 0
-  let remainingLength = trigger.length
-  for (const textNode of nodes) {
-    const nodeStart = offset
-    const nodeEnd = offset + textNode.data.length
-    offset = nodeEnd
-    if (nodeEnd <= start || nodeStart >= start + trigger.length) continue
-
-    const deleteStart = Math.max(start, nodeStart) - nodeStart
-    const deleteEnd = Math.min(start + trigger.length, nodeEnd) - nodeStart
-    textNode.deleteData(deleteStart, deleteEnd - deleteStart)
-    remainingLength -= deleteEnd - deleteStart
-    if (remainingLength <= 0) break
-  }
+  if (!editor || !range || !editor.contains(range.commonAncestorContainer)) return
+  range.deleteContents()
+  range.collapse(true)
+  const selection = window.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange(range)
 }
 
 function removeToken(token: HTMLElement) {
@@ -381,12 +428,20 @@ function tokenAdjacentToCaret(direction: 'backward' | 'forward') {
   return sibling instanceof HTMLElement && sibling.dataset.tokenKind ? sibling : null
 }
 
-function insertTextAtCaret(text: string) {
+function insertTextAtCaret(text: string, replaceRange?: Range | null) {
   const editor = textarea.value
   if (!editor) return
   const selection = window.getSelection()
-  const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange()
-  if (!selection?.rangeCount) {
+  const savedRangeIsValid =
+    replaceRange &&
+    editor.contains(replaceRange.startContainer) &&
+    editor.contains(replaceRange.endContainer)
+  const range = savedRangeIsValid
+    ? replaceRange
+    : selection?.rangeCount
+      ? selection.getRangeAt(0)
+      : document.createRange()
+  if (!savedRangeIsValid && !selection?.rangeCount) {
     range.selectNodeContents(editor)
     range.collapse(false)
   }
@@ -444,13 +499,14 @@ function serializeEditor() {
 
 function handleInput() {
   adjustHeight()
-  const cursor = input.value.length
+  const cursor = editorCaretOffset()
 
   // /skill-list 需优先于普通斜杠命令检测，否则会被当作普通斜杠命令
   const skillList = findSkillListTrigger(input.value, cursor)
   if (skillList) {
     skillFilter.value = skillList.filter
     skillTriggerStart.value = skillList.start
+    skillTriggerRange = triggerRangeBeforeCaret(input.value.slice(skillList.start, cursor))
     skillSelectedIndex.value = 0
     openPanel.value = 'skill'
     vscode.postMessage({ type: 'skills.request' })
@@ -461,6 +517,7 @@ function handleInput() {
   if (slash) {
     slashFilter.value = slash.filter
     slashTriggerStart.value = slash.start
+    slashTriggerRange = triggerRangeBeforeCaret(input.value.slice(slash.start, cursor))
     slashSelectedIndex.value = 0
     openPanel.value = 'slash'
     return
@@ -470,6 +527,7 @@ function handleInput() {
   if (at) {
     atFilter.value = at.filter
     atTriggerStart.value = at.start
+    atTriggerRange = triggerRangeBeforeCaret(input.value.slice(at.start, cursor))
     atSelectedIndex.value = 0
     openPanel.value = 'at'
     vscode.postMessage({
@@ -481,6 +539,9 @@ function handleInput() {
 
   if (openPanel.value === 'slash' || openPanel.value === 'at' || openPanel.value === 'skill') {
     openPanel.value = null
+    slashTriggerRange = null
+    atTriggerRange = null
+    skillTriggerRange = null
   }
 }
 
@@ -639,11 +700,8 @@ function applySlashCommand(command: SlashCommand) {
   // /skill-list 不作为文本插入，改为打开技能选择弹框
   if (normalized.name === 'skill-list') {
     if (slashTriggerStart.value != null) {
-      const trigger = input.value.slice(slashTriggerStart.value)
-      const before = input.value.slice(0, slashTriggerStart.value)
-      const after = ''
-      input.value = `${before}${after}`
-      removeTriggerText(trigger)
+      deleteEditorRange(slashTriggerRange)
+      syncEditorInput()
       nextTick(() => {
         textarea.value?.focus()
         adjustHeight()
@@ -658,31 +716,18 @@ function applySlashCommand(command: SlashCommand) {
   }
 
   if (slashTriggerStart.value == null) return
-  const cursor = input.value.length
-  const trigger =
-    slashTriggerStart.value == null ? '' : input.value.slice(slashTriggerStart.value, cursor)
-  const before = input.value.slice(0, slashTriggerStart.value)
-  const after = input.value.slice(cursor)
   const inserted = `/${normalized.name} `
-  input.value = `${before}${inserted}${after}`
-  removeTriggerText(trigger)
-  insertTextAtCaret(inserted)
+  insertTextAtCaret(inserted, slashTriggerRange)
+  syncEditorInput()
   openPanel.value = null
+  slashTriggerRange = null
   nextTick(() => {
-    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
 }
 
 function applyFileReference(entry: FileSearchEntry) {
-  if (atTriggerStart.value == null) return
-  const cursor = input.value.length
-  const trigger = input.value.slice(atTriggerStart.value, cursor)
-  const before = input.value.slice(0, atTriggerStart.value)
-  const after = input.value.slice(cursor)
-  input.value = `${before}${after}`
-  removeTriggerText(trigger)
   if (!workspaceReferences.value.some(reference => reference.path === entry.path)) {
     const id = createId()
     workspaceReferences.value.push({
@@ -693,28 +738,21 @@ function applyFileReference(entry: FileSearchEntry) {
       relativePath: entry.relativePath,
     })
     referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
-    insertToken('file', entry.name, id)
+    insertToken('file', entry.name, id, atTriggerRange)
+  } else {
+    deleteEditorRange(atTriggerRange)
+    syncEditorInput()
   }
-  // 插入 token 可能重新定位选区，再做一次 DOM 清理，避免触发路径残留。
-  removeTriggerText(trigger)
-  syncEditorInput()
   openPanel.value = null
+  atTriggerStart.value = null
+  atTriggerRange = null
   nextTick(() => {
-    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
 }
 
 function applySkill(skill: SkillEntry) {
-  const cursor = input.value.length
-  // skillTriggerStart 为空表示通过 + 菜单等入口打开，直接插入到光标处
-  const anchor = skillTriggerStart.value ?? cursor
-  const before = input.value.slice(0, anchor)
-  const after = input.value.slice(cursor)
-  const trigger = input.value.slice(anchor, cursor)
-  input.value = `${before}${after}`
-  removeTriggerText(trigger)
   if (!selectedSkills.value.some(item => item.name === skill.name)) {
     selectedSkills.value.push({
       name: skill.name,
@@ -722,14 +760,15 @@ function applySkill(skill: SkillEntry) {
       trigger: skill.trigger,
     })
     skillRegistry.set(skill.name, selectedSkills.value[selectedSkills.value.length - 1])
-    insertToken('skill', skill.name, skill.name)
+    insertToken('skill', skill.name, skill.name, skillTriggerRange)
+  } else {
+    deleteEditorRange(skillTriggerRange)
+    syncEditorInput()
   }
-  removeTriggerText(trigger)
-  syncEditorInput()
   openPanel.value = null
   skillTriggerStart.value = null
+  skillTriggerRange = null
   nextTick(() => {
-    textarea.value?.focus()
     textarea.value?.focus()
     adjustHeight()
   })
@@ -759,6 +798,8 @@ function openFileReferencePanel() {
   openPanel.value = 'at'
   atFilter.value = ''
   atSelectedIndex.value = 0
+  atTriggerStart.value = null
+  atTriggerRange = null
   vscode.postMessage({ type: 'filesystem.browse', data: {} })
 }
 
@@ -767,6 +808,7 @@ function openSkillListPanel() {
   skillFilter.value = ''
   skillSelectedIndex.value = 0
   skillTriggerStart.value = null
+  skillTriggerRange = null
   vscode.postMessage({ type: 'skills.request' })
 }
 
@@ -1084,8 +1126,10 @@ onUnmounted(() => {
 
       <div v-if="openPanel === 'context'" class="floating-panel context-panel">
         <div class="context-head">
-            <span
-            >上下文<span v-if="usage?.estimated">（估算）</span><br /><strong>{{ modelLabel }}</strong></span
+          <span
+            >上下文<span v-if="usage?.estimated">（估算）</span><br /><strong>{{
+              modelLabel
+            }}</strong></span
           >
           <strong>{{ contextPercent }}%</strong>
         </div>
@@ -1103,28 +1147,50 @@ onUnmounted(() => {
         <div class="meter-row">
           <span>当前 Prompt（含缓存）</span><em>{{ currentPromptTokens.toLocaleString() }}</em>
         </div>
-        <div class="meter"><i :style="{ width: `${Math.min(Math.round((currentPromptTokens / contextWindow) * 100), 100)}%` }" /></div>
+        <div class="meter">
+          <i
+            :style="{
+              width: `${Math.min(Math.round((currentPromptTokens / contextWindow) * 100), 100)}%`,
+            }"
+          />
+        </div>
         <div class="meter-row">
-          <span>Cache read（已含于 Prompt）</span><em>{{ currentCacheReadTokens.toLocaleString() }}</em>
+          <span>Cache read（已含于 Prompt）</span
+          ><em>{{ currentCacheReadTokens.toLocaleString() }}</em>
         </div>
         <div class="meter blue">
-          <i :style="{ width: `${Math.min(Math.round((currentCacheReadTokens / contextWindow) * 100), 100)}%` }" />
+          <i
+            :style="{
+              width: `${Math.min(Math.round((currentCacheReadTokens / contextWindow) * 100), 100)}%`,
+            }"
+          />
         </div>
         <div class="meter-row">
           <span>当前 Cache write</span><em>{{ currentCacheWriteTokens.toLocaleString() }}</em>
         </div>
         <div class="meter blue">
-          <i :style="{ width: `${Math.min(Math.round((currentCacheWriteTokens / contextWindow) * 100), 100)}%` }" />
+          <i
+            :style="{
+              width: `${Math.min(Math.round((currentCacheWriteTokens / contextWindow) * 100), 100)}%`,
+            }"
+          />
         </div>
         <div class="meter-row">
           <span>当前 Output</span><em>{{ currentOutputTokens.toLocaleString() }}</em>
         </div>
         <div class="meter">
-          <i :style="{ width: `${Math.min(Math.round((currentOutputTokens / contextWindow) * 100), 100)}%` }" />
+          <i
+            :style="{
+              width: `${Math.min(Math.round((currentOutputTokens / contextWindow) * 100), 100)}%`,
+            }"
+          />
         </div>
         <div class="meter-row meter-row--cumulative">
           <span>累计 Input / Cache / Output</span>
-          <em>{{ inputTokens.toLocaleString() }} / {{ cacheReadTokens.toLocaleString() }} / {{ outputTokens.toLocaleString() }}</em>
+          <em
+            >{{ inputTokens.toLocaleString() }} / {{ cacheReadTokens.toLocaleString() }} /
+            {{ outputTokens.toLocaleString() }}</em
+          >
         </div>
         <div v-if="cacheWriteTokens" class="meter-row meter-row--cumulative">
           <span>累计 Cache write</span><em>{{ cacheWriteTokens.toLocaleString() }}</em>
@@ -1254,7 +1320,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-right: 5px;
+  margin-right: 2px;
   color: #55b7ff;
 }
 :deep(.inline-token__icon svg) {

@@ -344,7 +344,6 @@ async function copyMessage() {
 .message-skill-token {
   display: inline-flex;
   margin: 0 3px;
-  vertical-align: baseline;
 }
 
 .assistant-message__shell {

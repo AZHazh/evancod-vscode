@@ -28,16 +28,17 @@
 
 import { Tool, ToolDefinition, ToolResult } from '../base/Tool'
 import type { TaskManager } from '../../../services/task/TaskManager'
-import type { TaskStatus } from '../../../types'
+import type { CompletionEvidence, TaskStatus } from '../../../types'
 
 export class TaskUpdateTool extends Tool {
   readonly name = 'task_update'
-  readonly description =
-    `更新任务的状态、内容或依赖关系。用于标记任务进度、修改任务信息、添加任务依赖。
+  readonly description = `更新任务的状态、内容或依赖关系。用于标记任务进度、修改任务信息、添加任务依赖。
 
 使用契约：
 - 开始执行任务前，必须将对应任务标记为 in_progress。
 - 只有工作完全完成时才能标记 completed；测试失败、实现不完整、文件缺失或仍有阻塞时不能标记 completed。
+- 任务继承了用户要求时，标记 completed 必须用 completionEvidence 逐项说明满足方式和证据位置；不得只写“已完成”或“测试通过”。
+- 首次 completed 只提交证据并进入 reviewing；完成复核确认实际满足后，使用相同证据再次提交 completed，才会通过复核。
 - 标记 completed 后，必须调用 task_list 查找下一项可执行任务或新解锁任务。`
 
   /**
@@ -63,49 +64,68 @@ export class TaskUpdateTool extends Tool {
         properties: {
           taskId: {
             type: 'string',
-            description: '要更新的任务 ID'
+            description: '要更新的任务 ID',
           },
           status: {
             type: 'string',
             description:
               '新的任务状态。可选值：pending（待开始）、in_progress（进行中）、completed（已完成）、deleted（已删除）',
-            enum: ['pending', 'in_progress', 'completed', 'deleted']
+            enum: ['pending', 'in_progress', 'completed', 'deleted'],
           },
           subject: {
             type: 'string',
-            description: '新的任务标题（如果需要修改标题）'
+            description: '新的任务标题（如果需要修改标题）',
           },
           description: {
             type: 'string',
-            description: '新的任务描述（如果需要修改描述）'
+            description: '新的任务描述（如果需要修改描述）',
           },
           activeForm: {
             type: 'string',
-            description: '新的进行中描述（如果需要修改）'
+            description: '新的进行中描述（如果需要修改）',
           },
           addBlocks: {
             type: 'array',
             description: '添加被此任务阻塞的任务 ID 列表。这些任务会等待当前任务完成后才能开始。',
             items: {
               type: 'string',
-              description: '任务 ID'
-            }
+              description: '任务 ID',
+            },
           },
           addBlockedBy: {
             type: 'array',
             description: '添加阻塞此任务的任务 ID 列表。当前任务需要等待这些任务完成后才能开始。',
             items: {
               type: 'string',
-              description: '任务 ID'
-            }
+              description: '任务 ID',
+            },
           },
           metadata: {
             type: 'object',
-            description: '更新元数据（会与现有元数据合并）'
-          }
+            description: '更新元数据（会与现有元数据合并）',
+          },
+          completionEvidence: {
+            type: 'array',
+            description:
+              '完成任务时逐项提交的证据。requirementId 必须覆盖任务继承的每个用户要求；summary 说明如何满足，refs 可列出文件路径、工具调用 ID 或测试命令。',
+            items: {
+              type: 'object',
+              description: '单条用户要求的完成证据',
+              properties: {
+                requirementId: { type: 'string', description: '继承的用户要求 ID' },
+                summary: { type: 'string', description: '该要求如何被实际满足' },
+                refs: {
+                  type: 'array',
+                  description: '相关文件路径、工具调用 ID 或验证命令',
+                  items: { type: 'string', description: '证据引用' },
+                },
+              },
+              required: ['requirementId', 'summary'],
+            },
+          },
         },
-        required: ['taskId']
-      }
+        required: ['taskId'],
+      },
     }
   }
 
@@ -124,6 +144,7 @@ export class TaskUpdateTool extends Tool {
     addBlocks?: string[]
     addBlockedBy?: string[]
     metadata?: Record<string, any>
+    completionEvidence?: CompletionEvidence[]
   }): Promise<ToolResult> {
     try {
       // 参数验证
@@ -153,7 +174,7 @@ export class TaskUpdateTool extends Tool {
           `🗑️ 任务已删除\n\n任务 ID: ${existingTask.id}\n标题: ${existingTask.subject}`,
           {
             taskId: existingTask.id,
-            status: 'deleted'
+            status: 'deleted',
           }
         )
       }
@@ -186,7 +207,8 @@ export class TaskUpdateTool extends Tool {
         activeForm: args.activeForm?.trim(),
         addBlocks: args.addBlocks,
         addBlockedBy: args.addBlockedBy,
-        metadata: args.metadata
+        metadata: args.metadata,
+        completionEvidence: args.completionEvidence,
       })
 
       // 格式化返回结果
@@ -218,6 +240,10 @@ export class TaskUpdateTool extends Tool {
         changes.push(`元数据已更新`)
       }
 
+      if (args.completionEvidence?.length) {
+        changes.push(`提交了 ${args.completionEvidence.length} 条完成证据`)
+      }
+
       const changesText = changes.length > 0 ? changes.join('\n- ') : '无变更'
 
       const blockedByInfo =
@@ -242,8 +268,12 @@ export class TaskUpdateTool extends Tool {
 
 提示: 使用 task_list 查看所有任务，使用 task_get 查看任务详情。`
 
-      if (args.status === 'completed') {
-        content += '\n\nTask completed. Call task_list now to find your next available task or see if your work unblocked others.'
+      if (args.status === 'completed' && updatedTask.completion?.state === 'reviewing') {
+        content +=
+          '\n\n完成证据已提交，任务正在等待最终复核。复核必须检查实际工作区、引用文件、差异和验证结果。'
+      } else if (args.status === 'completed') {
+        content +=
+          '\n\nTask completed. Call task_list now to find your next available task or see if your work unblocked others.'
       }
 
       return this.createSuccessResult(content, {
@@ -251,7 +281,8 @@ export class TaskUpdateTool extends Tool {
         status: updatedTask.status,
         blockedBy: updatedTask.blockedBy,
         blocks: updatedTask.blocks,
-        canStart: updatedTask.blockedBy.length === 0 && updatedTask.status === 'pending'
+        canStart: updatedTask.blockedBy.length === 0 && updatedTask.status === 'pending',
+        completionState: updatedTask.completion?.state,
       })
     } catch (error) {
       return this.createErrorResult(error)
@@ -269,7 +300,7 @@ export class TaskUpdateTool extends Tool {
       pending: '⏳ 待开始',
       in_progress: '🔄 进行中',
       completed: '✅ 已完成',
-      deleted: '🗑️ 已删除'
+      deleted: '🗑️ 已删除',
     }
     return statusMap[status] || status
   }
