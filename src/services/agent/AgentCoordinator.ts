@@ -141,6 +141,7 @@ interface RunningAgent {
 }
 
 export class AgentCoordinator {
+  private static readonly AGENT_TIMEOUT_MS = 10 * 60 * 1000
   /** 运行中的 Agent 列表 */
   private runningAgents: Map<string, RunningAgent> = new Map()
 
@@ -247,14 +248,12 @@ export class AgentCoordinator {
       model: config.model,
       messages: [],
       verbose: config.verbose || false,
-      taskManager: this.sharedServices?.taskManager,
-      planModeManager: this.sharedServices?.planModeManager,
-      agentCoordinator: this,
-      mcpManager: this.sharedServices?.mcpManager,
+      // explore/analyze/research 子 Agent 是只读调查者，不能接管主任务或递归派生 Agent。
       skillManager: this.sharedServices?.skillManager,
       memoryManager: this.sharedServices?.memoryManager,
-      onTaskListChange: this.sharedServices?.onTaskListChange,
-      permissionMode: this.sharedServices?.getPermissionMode?.() || 'default',
+      permissionMode: 'default',
+      readOnly: true,
+      maxIterations: 30,
     }
 
     const engine = new QueryEngine(engineConfig)
@@ -298,6 +297,18 @@ export class AgentCoordinator {
           ...event,
           description: `子 Agent「${config.description}」需要用户输入`,
         })
+      } else if (
+        event.type === 'tool_use_complete' ||
+        event.type === 'tool_result'
+      ) {
+        this.webviewManager?.sendAgentEvent({
+          ...event,
+          parentToolUseId: event.parentToolUseId || config.toolUseId,
+        })
+      } else if (event.type === 'bash_output' || event.type === 'bash_status') {
+        this.webviewManager?.sendAgentEvent(event)
+      } else if (event.type === 'permission_response') {
+        this.webviewManager?.sendAgentEvent(event)
       }
     })
 
@@ -360,6 +371,9 @@ export class AgentCoordinator {
     engine: QueryEngine,
     startTime: number
   ): Promise<SubAgentResult> {
+    const timeout = setTimeout(() => {
+      engine.cancel(`子 Agent 执行超过 ${AgentCoordinator.AGENT_TIMEOUT_MS / 60_000} 分钟，已自动停止`)
+    }, AgentCoordinator.AGENT_TIMEOUT_MS)
     try {
       // 构造系统提示词
       const systemPrompt = this.buildSystemPrompt(config.type, config.description)
@@ -399,6 +413,8 @@ export class AgentCoordinator {
         error: error instanceof Error ? error.message : String(error),
         duration
       }
+    } finally {
+      clearTimeout(timeout)
     }
   }
 
@@ -540,8 +556,7 @@ export class AgentCoordinator {
     if (!request) return false
 
     this.permissionRequests.delete(response.requestId)
-    request.engine.handlePermissionResponse(response)
-    return true
+    return request.engine.handlePermissionResponse(response)
   }
 
   handleInteractionResponse(response: {

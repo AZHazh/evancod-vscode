@@ -203,7 +203,7 @@ export type AgentTranscriptBlock =
       description?: string
       timestamp: number
       expired?: boolean
-      responseState?: 'pending' | 'approved' | 'denied'
+      responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
     }
   | {
       id: string

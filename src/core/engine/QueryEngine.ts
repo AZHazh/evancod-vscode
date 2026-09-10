@@ -162,6 +162,9 @@ export interface QueryEngineConfig {
    */
   permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
 
+  /** 子 Agent 只读执行时仅保留读取、搜索和分析工具。 */
+  readOnly?: boolean
+
   /**
    * 推理程度（可选）
    * 用于决定是否启用思考模式及其 budget
@@ -309,6 +312,7 @@ export class QueryEngine {
   private toolUseNames: Map<string, string> = new Map()
   private permissionRequestTools: Map<string, string> = new Map()
   private permissionStartedAt: Map<string, number> = new Map()
+  private permissionTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map()
   private sessionAllowedTools: Set<string> = new Set()
   private bashTool!: BashTool
   private toolExecutor?: ToolExecutor
@@ -485,6 +489,26 @@ export class QueryEngine {
       this.tools.push(new SkillTool(this.config.skillManager))
     }
 
+    if (this.config.readOnly) {
+      const readOnlyTools = new Set([
+        'read_file',
+        'glob',
+        'grep',
+        'find',
+        'list_directory',
+        'lsp',
+        'analyze_ast',
+        'analyze_dependencies',
+        'git_status',
+        'git_diff',
+        'git_log',
+        'web_fetch',
+        'web_search',
+        'skill',
+      ])
+      this.tools = this.tools.filter(tool => readOnlyTools.has(tool.name))
+    }
+
     // if (this.config.verbose) {
     //   console.log(`Initialized ${this.tools.length} tools:`, this.tools.map(t => t.name))
     // }
@@ -620,10 +644,13 @@ Skill 使用契约：
     reason?: string
     updatedInput?: unknown
     rule?: 'once' | 'always'
-  }) {
+  }): boolean {
     const waiter = this.permissionWaiters.get(response.requestId)
-    if (!waiter) return
+    if (!waiter) return false
     this.permissionWaiters.delete(response.requestId)
+    const timeout = this.permissionTimeouts.get(response.requestId)
+    if (timeout) clearTimeout(timeout)
+    this.permissionTimeouts.delete(response.requestId)
     const toolName =
       this.permissionRequestTools.get(response.requestId) ||
       this.toolUseNames.get(response.requestId)
@@ -649,6 +676,7 @@ Skill 使用契约：
           ))
     }
     waiter(response)
+    return true
   }
 
   handleInteractionResponse(response: {
@@ -1306,10 +1334,19 @@ Skill 使用契约：
     this.bashTool?.cancelAll()
 
     for (const [requestId, waiter] of this.permissionWaiters.entries()) {
+      this.onAgentEventCallback?.({
+        type: 'permission_response',
+        requestId,
+        approved: false,
+        reason,
+      })
       waiter({ requestId, approved: false, reason })
     }
     this.permissionWaiters.clear()
+    for (const timeout of this.permissionTimeouts.values()) clearTimeout(timeout)
+    this.permissionTimeouts.clear()
     this.permissionRequestTools.clear()
+    this.permissionStartedAt.clear()
     for (const [requestId, waiter] of this.interactionWaiters.entries()) {
       waiter({ requestId, answered: false, reason })
     }
@@ -1399,6 +1436,10 @@ Skill 使用契约：
     toolUseId: string,
     input: unknown
   ): Promise<{ approved: boolean; reason?: string; updatedInput?: unknown }> {
+    if (this.cancelled || this.abortController.signal.aborted) {
+      return Promise.resolve({ approved: false, reason: this.cancelReason })
+    }
+
     const permissionMode = this.config.permissionMode || 'default'
 
     if (
@@ -1431,15 +1472,6 @@ Skill 使用契约：
     this.permissionStartedAt.set(requestId, performance.now())
     performanceLog('permission.request', { requestId, toolName, toolUseId })
     this.permissionRequestTools.set(requestId, toolName)
-    this.onAgentEventCallback?.({
-      type: 'permission_request',
-      requestId,
-      toolName,
-      toolUseId,
-      input,
-      description: this.getPermissionDescription(toolName),
-    })
-
     return new Promise(resolve => {
       const responder = (response: {
         requestId: string
@@ -1450,6 +1482,11 @@ Skill 使用契约：
       }) => {
         if (response.requestId !== requestId) return
         this.permissionWaiters.delete(requestId)
+        const timeout = this.permissionTimeouts.get(requestId)
+        if (timeout) clearTimeout(timeout)
+        this.permissionTimeouts.delete(requestId)
+        this.permissionRequestTools.delete(requestId)
+        this.permissionStartedAt.delete(requestId)
         resolve({
           approved: response.approved,
           reason: response.reason,
@@ -1464,14 +1501,30 @@ Skill 使用契约：
             this.permissionWaiters.delete(requestId)
             this.permissionRequestTools.delete(requestId)
             this.permissionStartedAt.delete(requestId)
+            this.permissionTimeouts.delete(requestId)
             performanceLog('permission.timeout', { requestId, toolName })
+            this.onAgentEventCallback?.({
+              type: 'permission_response',
+              requestId,
+              approved: false,
+              reason: 'Permission request timed out',
+            })
             resolve({ approved: false, reason: 'Permission request timed out' })
           }
         },
         5 * 60 * 1000
       )
+      this.permissionTimeouts.set(requestId, timeoutId)
 
-      void timeoutId
+      // 先注册 waiter 和超时，再通知 UI，避免快速点击授权时丢失响应。
+      this.onAgentEventCallback?.({
+        type: 'permission_request',
+        requestId,
+        toolName,
+        toolUseId,
+        input,
+        description: this.getPermissionDescription(toolName),
+      })
     })
   }
 

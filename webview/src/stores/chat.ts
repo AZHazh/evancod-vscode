@@ -117,6 +117,7 @@ export const useChatStore = defineStore('chat', () => {
   const activeToolUseId = ref<string | null>(null)
   const activeToolName = ref<string | null>(null)
   const pendingPermission = ref<PermissionRequest | null>(null)
+  let ignorePermissionRequests = false
   const tokenUsage = ref<TokenUsage | null>(null)
   const uiMessages = ref<UIMessage[]>([])
   const pendingOptimisticUserMessageIds = ref(new Set<string>())
@@ -694,6 +695,17 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'permission_request':
+        if (ignorePermissionRequests) {
+          vscode.postMessage({
+            type: 'permission_response',
+            data: {
+              requestId: event.requestId,
+              approved: false,
+              reason: '用户已停止生成',
+            },
+          })
+          break
+        }
         pendingPermission.value = {
           requestId: event.requestId,
           toolName: event.toolName,
@@ -714,6 +726,30 @@ export const useChatStore = defineStore('chat', () => {
           responseState: 'pending',
         })
         break
+
+      case 'permission_response': {
+        const cancelled =
+          !event.approved &&
+          (event.reason?.includes('停止') || event.reason?.includes('失效'))
+        const expired =
+          !event.approved &&
+          (event.reason?.includes('timed out') || event.reason?.includes('超时'))
+        updatePermissionResponseState(
+          event.requestId,
+          event.approved
+            ? 'approved'
+            : expired
+              ? 'expired'
+              : cancelled
+                ? 'cancelled'
+                : 'denied'
+        )
+        if (pendingPermission.value?.requestId === event.requestId) {
+          pendingPermission.value = null
+        }
+        if (!ignorePermissionRequests) chatState.value = 'thinking'
+        break
+      }
 
       case 'interaction_request':
         chatState.value = 'waiting_interaction'
@@ -1169,7 +1205,10 @@ export const useChatStore = defineStore('chat', () => {
     return !!taskLikeMessage && taskLikeMessage.toolName.startsWith('task_')
   }
 
-  function updatePermissionResponseState(requestId: string, responseState: 'approved' | 'denied') {
+  function updatePermissionResponseState(
+    requestId: string,
+    responseState: 'approved' | 'denied' | 'cancelled' | 'expired'
+  ) {
     const index = uiMessages.value.findIndex(
       message => message.type === 'permission_request' && message.requestId === requestId
     )
@@ -1205,6 +1244,7 @@ export const useChatStore = defineStore('chat', () => {
     displayAttachments?: AttachmentContext[],
     inlineSegments: InlineMessageSegment[] = []
   ) {
+    ignorePermissionRequests = false
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
     const isBuiltinCommand = /^\/(clear|clean|new|compact|help)(\s|$)/i.test(trimmed)
@@ -1239,6 +1279,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function stopGeneration() {
+    ignorePermissionRequests = true
     vscode.postMessage({
       type: 'chat.stop',
       data: { sessionId: currentSession.value?.id },
@@ -1251,6 +1292,11 @@ export const useChatStore = defineStore('chat', () => {
     finalizeCurrentAssistantSegment()
     chatState.value = 'idle'
     pendingPermission.value = null
+    for (const message of uiMessages.value) {
+      if (message.type === 'permission_request' && message.responseState === 'pending') {
+        message.responseState = 'cancelled'
+      }
+    }
     streamingText.value = ''
     streamingToolInput.value = ''
     activeToolUseId.value = null
@@ -1294,16 +1340,12 @@ export const useChatStore = defineStore('chat', () => {
     updatedInput?: unknown
     rule?: 'once' | 'always'
   }) {
-    updatePermissionResponseState(response.requestId, response.approved ? 'approved' : 'denied')
-
     const plainResponse = toPlainJsonSafe(response)
     vscode.postMessage({
       type: 'permission_response',
       data: plainResponse,
     })
 
-    pendingPermission.value = null
-    chatState.value = response.approved ? 'thinking' : 'idle'
   }
 
   function sendInteractionResponse(response: {

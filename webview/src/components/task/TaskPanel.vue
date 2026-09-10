@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { Check, ChevronDown, ClipboardList, RefreshCw, X } from 'lucide-vue-next'
+import { Check, ChevronDown, ClipboardList, LoaderCircle, RefreshCw, X } from 'lucide-vue-next'
 import { useTaskStore } from '../../stores/task'
 
 const emit = defineEmits<{ close: [] }>()
@@ -55,8 +55,16 @@ function taskLabel(task: { id: string; subject: string }) {
 
     <div v-if="!collapsed" class="panel-content">
       <div v-if="taskStore.tasks.length > 0" class="task-rows">
-        <div v-for="task in taskStore.tasks" :key="task.id" class="task-row" :class="`status-${task.status}`">
-          <span class="status-dot"><Check v-if="task.status === 'completed'" /></span>
+        <div
+          v-for="task in taskStore.tasks"
+          :key="task.id"
+          class="task-row"
+          :class="[`status-${task.status}`, { 'state-reviewing': task.completion?.state === 'reviewing' }]"
+        >
+          <span class="status-dot">
+            <LoaderCircle v-if="task.completion?.state === 'reviewing'" class="reviewing-icon" />
+            <Check v-else-if="task.status === 'completed'" />
+          </span>
           <span class="task-text">{{ taskLabel(task) }}</span>
         </div>
       </div>
@@ -203,9 +211,17 @@ function taskLabel(task: { id: string; subject: string }) {
   line-height: 1.35;
 }
 
-.task-row.status-completed .task-text {
+.task-row.status-completed:not(.state-reviewing) .task-text {
   text-decoration: line-through;
   opacity: 0.7;
+}
+
+.reviewing-icon {
+  animation: spin 1s linear infinite;
+}
+
+.task-row.state-reviewing .status-dot {
+  background: var(--vscode-charts-yellow, #cca700);
 }
 
 .status-dot {

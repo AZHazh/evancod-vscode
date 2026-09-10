@@ -25,6 +25,7 @@ export class LocalAgentTaskStore {
   private readonly tasksDir: vscode.Uri
   private readonly outputDir: vscode.Uri
   private readonly transcriptsDir: vscode.Uri
+  private readonly transcriptWrites = new Map<string, Promise<void>>()
 
   constructor(context: vscode.ExtensionContext) {
     this.tasksDir = vscode.Uri.joinPath(context.globalStorageUri, 'agent-tasks')
@@ -96,16 +97,30 @@ export class LocalAgentTaskStore {
   async appendTranscript(taskId: string, entry: unknown): Promise<string> {
     await this.ensureDirectories()
     const uri = this.transcriptUri(taskId)
-    let existing = ''
-    try {
-      existing = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf-8')
-    } catch {
-      existing = ''
-    }
+    const previous = this.transcriptWrites.get(taskId) || Promise.resolve()
+    const write = previous
+      .catch(() => undefined)
+      .then(async () => {
+        let existing = ''
+        try {
+          existing = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf-8')
+        } catch {
+          existing = ''
+        }
 
-    const line = `${JSON.stringify(entry)}\n`
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(existing + line, 'utf-8'))
-    return uri.fsPath
+        const line = `${JSON.stringify(entry)}\n`
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(existing + line, 'utf-8'))
+      })
+    this.transcriptWrites.set(taskId, write)
+
+    try {
+      await write
+      return uri.fsPath
+    } finally {
+      if (this.transcriptWrites.get(taskId) === write) {
+        this.transcriptWrites.delete(taskId)
+      }
+    }
   }
 
   private async ensureDirectories(): Promise<void> {

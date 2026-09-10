@@ -882,9 +882,17 @@ export class WebviewManager implements vscode.WebviewViewProvider {
 
       // 子 Agent 有独立的 QueryEngine，先按 requestId 尝试路由；未命中再交给主会话。
       const handledBySubAgent = this.agentCoordinator?.handlePermissionResponse(data) ?? false
-      if (!handledBySubAgent) {
-        this.chatService.handlePermissionResponse(data)
-      }
+      const handled = handledBySubAgent || this.chatService.handlePermissionResponse(data)
+      this.sendAgentEvent(
+        handled
+          ? { type: 'permission_response', ...data }
+          : {
+              type: 'permission_response',
+              ...data,
+              approved: false,
+              reason: '权限请求已失效或所属任务已停止',
+            }
+      )
     } catch (error) {
       console.error('Failed to handle permission response:', error)
     }

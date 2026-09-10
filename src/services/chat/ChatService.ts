@@ -480,9 +480,10 @@ export class ChatService {
     reason?: string
     updatedInput?: unknown
     rule?: 'once' | 'always'
-  }) {
-    this.recordPermissionResponse(response)
-    this.queryEngine?.handlePermissionResponse(response)
+  }): boolean {
+    const handled = this.queryEngine?.handlePermissionResponse(response) ?? false
+    if (handled) this.recordPermissionResponse(response)
+    return handled
   }
 
   handleInteractionResponse(response: {
@@ -509,6 +510,7 @@ export class ChatService {
 
     const activeRequest = this.activeRequest
     await Promise.all([activeRequest?.catch(() => undefined), cancelSubAgents])
+    this.queryEngine = undefined
 
     if (session) {
       this.expirePendingTranscript(session)
@@ -1493,6 +1495,24 @@ export class ChatService {
         })
         break
 
+      case 'permission_response': {
+        const block = session.transcript?.find(
+          (item): item is Extract<AgentTranscriptBlock, { type: 'permission_request' }> =>
+            item.type === 'permission_request' && item.requestId === event.requestId
+        )
+        if (block) {
+          block.responseState = event.approved
+            ? 'approved'
+            : event.reason?.includes('timed out') || event.reason?.includes('超时')
+              ? 'expired'
+              : event.reason?.includes('停止') || event.reason?.includes('失效')
+                ? 'cancelled'
+                : 'denied'
+          block.expired = block.responseState === 'expired'
+        }
+        break
+      }
+
       case 'interaction_request':
         this.appendOrUpdateTranscript(session, {
           id: event.requestId,
@@ -1734,6 +1754,7 @@ export class ChatService {
       }
       if (block.type === 'permission_request' && block.responseState === 'pending') {
         block.expired = true
+        block.responseState = 'cancelled'
       }
       if (block.type === 'interaction_request' && block.responseState === 'pending') {
         block.responseState = 'cancelled'

@@ -250,7 +250,7 @@ export type UIMessage =
       input: unknown
       description?: string
       timestamp: number
-      responseState?: 'pending' | 'approved' | 'denied'
+      responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
     }
   | {
       id: string
@@ -348,6 +348,14 @@ export type AgentServerEvent =
       toolUseId?: string
       input: unknown
       description?: string
+    }
+  | {
+      type: 'permission_response'
+      requestId: string
+      approved: boolean
+      reason?: string
+      updatedInput?: unknown
+      rule?: 'once' | 'always'
     }
   | {
       type: 'interaction_request'

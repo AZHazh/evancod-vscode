@@ -10,7 +10,7 @@ const props = defineProps<{
   toolName: string
   input: unknown
   description?: string
-  responseState?: 'pending' | 'approved' | 'denied'
+  responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
 }>()
 
 const chatStore = useChatStore()
@@ -63,31 +63,40 @@ const toolNameDisplay = computed(() => {
 const systemIdentity = computed(() =>
   (isEditLike.value || isDeleteLike.value) ? `Evancod ${fileActionLabel.value}` : toolNameDisplay.value
 )
-const responseState = ref<'pending' | 'approved' | 'denied'>(props.responseState || 'pending')
+const responseState = ref<'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'>(
+  props.responseState || 'pending'
+)
+const submitting = ref(false)
 watch(
   () => props.responseState,
   value => {
     responseState.value = value || 'pending'
+    if (value && value !== 'pending') submitting.value = false
   }
 )
 const statusText = computed(() => {
   if (responseState.value === 'approved') return '已授权'
   if (responseState.value === 'denied') return '已拒绝'
+  if (responseState.value === 'cancelled') return '已取消'
+  if (responseState.value === 'expired') return '已超时'
   return isEditLike.value ? '等待审批' : 'awaiting approval'
 })
 const statusClass = computed(() => responseState.value)
 function approvePermission() {
-  responseState.value = 'approved'
+  if (submitting.value) return
+  submitting.value = true
   sendPermissionResponse({ requestId: props.requestId, approved: true })
 }
 
 function approveSession() {
-  responseState.value = 'approved'
+  if (submitting.value) return
+  submitting.value = true
   sendPermissionResponse({ requestId: props.requestId, approved: true, rule: 'always' })
 }
 
 function denyPermission() {
-  responseState.value = 'denied'
+  if (submitting.value) return
+  submitting.value = true
   sendPermissionResponse({
     requestId: props.requestId,
     approved: false,
@@ -113,7 +122,7 @@ function denyPermission() {
         />
         <div v-else class="permission-card__icon-wrap" :class="`permission-card__icon-wrap--${responseState}`">
           <CircleCheck v-if="responseState === 'approved'" class="permission-card__header-status-icon" />
-          <CircleX v-else-if="responseState === 'denied'" class="permission-card__header-status-icon" />
+          <CircleX v-else-if="responseState !== 'pending'" class="permission-card__header-status-icon" />
           <span v-else>!</span>
         </div>
         <div class="permission-card__main">
@@ -122,7 +131,7 @@ function denyPermission() {
               >允许 {{ systemIdentity }}{{ filePath ? ` ${filePath.split('/').pop()}?` : '' }}</span
             >
             <span class="permission-card__badge" :class="`permission-card__badge--${statusClass}`">
-              <component :is="responseState === 'denied' ? CircleX : responseState === 'approved' ? CircleCheck : null" v-if="responseState !== 'pending'" class="permission-card__badge-icon" />
+              <component :is="responseState === 'approved' ? CircleCheck : CircleX" v-if="responseState !== 'pending'" class="permission-card__badge-icon" />
               <span v-else class="permission-card__badge-dot" /> {{ statusText }}
             </span>
           </div>
@@ -157,13 +166,13 @@ function denyPermission() {
       </div>
 
       <div v-if="responseState === 'pending'" class="permission-card__actions">
-        <button class="chat-button chat-button--primary" type="button" @click="approvePermission">
+        <button class="chat-button chat-button--primary" type="button" :disabled="submitting" @click="approvePermission">
           <Check class="chat-button__icon" />允许
         </button>
-        <button class="chat-button chat-button--ghost" type="button" @click="approveSession">
+        <button class="chat-button chat-button--ghost" type="button" :disabled="submitting" @click="approveSession">
           <ShieldCheck class="chat-button__icon" />本次会话允许
         </button>
-        <button class="chat-button chat-button--danger" type="button" @click="denyPermission">
+        <button class="chat-button chat-button--danger" type="button" :disabled="submitting" @click="denyPermission">
           <X class="chat-button__icon" />拒绝
         </button>
       </div>
@@ -384,6 +393,14 @@ function denyPermission() {
   border-color: color-mix(in srgb, var(--chat-color-error) 45%, var(--chat-color-border));
 }
 
+.permission-card--cancelled {
+  border-color: color-mix(in srgb, var(--vscode-descriptionForeground) 55%, transparent);
+}
+
+.permission-card--expired {
+  border-color: color-mix(in srgb, var(--vscode-charts-yellow) 65%, transparent);
+}
+
 .permission-card--ask {
   border: 1px solid var(--vscode-panel-border);
 }
@@ -410,6 +427,14 @@ function denyPermission() {
 
 .permission-card__file-icon--denied {
   color: var(--chat-color-error);
+}
+
+.permission-card__file-icon--cancelled {
+  color: var(--vscode-descriptionForeground);
+}
+
+.permission-card__file-icon--expired {
+  color: var(--vscode-charts-yellow);
 }
 
 .permission-card__file-icon--pending {
@@ -501,6 +526,21 @@ function denyPermission() {
 .permission-card__badge--denied {
   background: color-mix(in srgb, var(--chat-color-error) 16%, transparent);
   color: var(--chat-color-error);
+}
+
+.permission-card__badge--cancelled {
+  background: color-mix(in srgb, var(--vscode-descriptionForeground) 14%, transparent);
+  color: var(--vscode-descriptionForeground);
+}
+
+.permission-card__badge--expired {
+  background: color-mix(in srgb, var(--vscode-charts-yellow) 14%, transparent);
+  color: var(--vscode-charts-yellow);
+}
+
+.chat-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .permission-card__badge-icon {
