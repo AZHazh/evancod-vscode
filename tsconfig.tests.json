@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".tmp/out-tests",
+    "rootDir": "src"
+  },
+  "include": ["src/regression-tests/**/*.test.ts"],
+  "exclude": []
+}

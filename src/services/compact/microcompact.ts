@@ -18,6 +18,12 @@ const COMPACTABLE_TOOLS = new Set([
   'lsp',
 ])
 
+const PROTECTED_RESULT_PATTERN =
+  /"success"\s*:\s*false|\b(error|failed|failure|timeout|cancelled)\b|错误|失败|超时|取消/i
+
+const OLD_RESULT_HEAD_CHARS = 1000
+const OLD_RESULT_TAIL_CHARS = 400
+
 /**
  * 估算消息数组的 token 数（粗略：约 4 字符 = 1 token）。
  * 仅用于判断是否需要 microcompact，不追求精确。
@@ -70,15 +76,16 @@ export function microcompact(messages: Message[], keepRecent = 5): Message[] {
   }
 
   // 保留最近 N 个，其余内容替换
-  const toCompact = toolResults.slice(0, -keepRecent)
+  const recentIndexes = new Set(toolResults.slice(-keepRecent).map(item => item.index))
+  const toCompact = toolResults.filter(
+    item => !recentIndexes.has(item.index) && !PROTECTED_RESULT_PATTERN.test(item.message.content || '')
+  )
   const compacted = [...messages]
 
   for (const { index, message } of toCompact) {
     compacted[index] = {
       ...message,
-      // 占位符必须告诉模型「这次调用已经发生过」，否则模型会认为自己还没读过，
-      // 从而重复调用同一个工具，形成死循环。
-      content: `[${message.toolName} 的结果正文已因上下文超限被省略。该调用已成功执行过，不要为了重新获取内容而重复调用；只有确实必须重新查看时才再次调用。]`,
+      content: summarizeOldToolResult(message.toolName || 'tool', message.content || ''),
       // content 被清理时 contentBlocks 也必须一起清理：
       // API 层（convertAnthropicMessages）优先使用 contentBlocks，
       // 若留着旧 blocks，占位符不会生效，压缩也就没有实际省下 token。
@@ -87,6 +94,26 @@ export function microcompact(messages: Message[], keepRecent = 5): Message[] {
   }
 
   return compacted
+}
+
+/** 保留旧结果的关键头尾与恢复说明，避免无信息占位导致模型重复探查。 */
+export function summarizeOldToolResult(toolName: string, content: string): string {
+  if (content.length <= OLD_RESULT_HEAD_CHARS + OLD_RESULT_TAIL_CHARS) {
+    return content
+  }
+
+  return [
+    `[${toolName} 的旧结果已因上下文接近上限而压缩；原调用已成功执行。]`,
+    '如下面摘要不足，可使用原调用参数重新读取；若摘要包含归档路径，优先读取归档文件，不要重新执行昂贵命令。',
+    '',
+    '--- 原结果开头 ---',
+    content.slice(0, OLD_RESULT_HEAD_CHARS),
+    '',
+    '--- 中间已省略 ---',
+    '',
+    '--- 原结果结尾 ---',
+    content.slice(-OLD_RESULT_TAIL_CHARS),
+  ].join('\n')
 }
 
 /**

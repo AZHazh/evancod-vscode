@@ -11,6 +11,8 @@ export interface RunToolsOutcome {
    * QueryEngine 据此判断模型是否陷入探查死循环。
    */
   noProgress: boolean
+  /** 本轮所有工具都失败时提供稳定签名，用于识别重复失败。 */
+  errorSignature?: string
 }
 
 export class ToolOrchestrator {
@@ -38,7 +40,13 @@ export class ToolOrchestrator {
         const content = decision.content
         const contentBlocks = decision.kind === 'replay' ? decision.contentBlocks : undefined
         this.executor.emitCachedResult(toolCall, content)
-        return { toolCallId: toolCall.id, toolName: toolCall.name, content, contentBlocks }
+        return {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content,
+          contentBlocks,
+          isError: false,
+        }
       }
 
       const isSafe = this.isConcurrencySafe(toolCall.name)
@@ -54,7 +62,9 @@ export class ToolOrchestrator {
         if (isSafe) this.releaseSafeSlot()
       }
       performanceLog('tool.execution', { toolName: toolCall.name, toolUseId: toolCall.id, queueMs, durationMs: Math.round(performance.now() - executionStartedAt) })
-      this.deduplicator.record(toolCall, result.content, result.contentBlocks)
+      if (!result.isError) {
+        this.deduplicator.record(toolCall, result.content, result.contentBlocks)
+      }
       return result
     }
 
@@ -76,7 +86,15 @@ export class ToolOrchestrator {
     }
 
     await flushParallelBatch()
-    return { results, noProgress: this.deduplicator.isNoProgress(decisions) }
+    const errorSignature =
+      results.length > 0 && results.every(result => result.isError)
+        ? results.map(result => `${result.toolName}:${result.content}`).join('\n')
+        : undefined
+    return {
+      results,
+      noProgress: this.deduplicator.isNoProgress(decisions),
+      errorSignature,
+    }
   }
 
   /**

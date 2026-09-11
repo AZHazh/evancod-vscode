@@ -71,7 +71,7 @@ watch(
   () => props.responseState,
   value => {
     responseState.value = value || 'pending'
-    if (value && value !== 'pending') submitting.value = false
+    submitting.value = false
   }
 )
 const statusText = computed(() => {

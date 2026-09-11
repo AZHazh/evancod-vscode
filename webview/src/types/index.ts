@@ -373,7 +373,12 @@ export type AgentServerEvent =
       prompt?: string
       image?: GeneratedImageRef
     }
-  | { type: 'message_complete'; usage?: unknown }
+  | {
+      type: 'message_complete'
+      usage?: unknown
+      terminationReason?: string
+      completed?: boolean
+    }
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'

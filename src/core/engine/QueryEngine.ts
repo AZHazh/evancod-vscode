@@ -76,13 +76,18 @@ import {
   SkillTool,
   ImageGenTool,
 } from '../tools'
-import { IFileSystemAdapter, VSCodeFileSystemAdapter } from '../../adapters/FileSystemAdapter'
+import { VSCodeFileSystemAdapter } from '../../adapters/FileSystemAdapter'
 import { MCPConnectionManager } from '../../services/mcp/MCPConnectionManager'
 import { SkillManager } from '../../services/skill/SkillManager'
 import { MemoryManager } from '../../services/memory/MemoryManager'
 import { ToolExecutor } from '../tools/execution/ToolExecutor'
 import { ToolOrchestrator, type RunToolsOutcome } from '../tools/execution/ToolOrchestrator'
 import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
+import {
+  DEFAULT_MAX_ITERATIONS,
+  isSuccessfulTermination,
+  type QueryTerminationReason,
+} from './termination'
 
 /**
  * QueryEngine 配置
@@ -321,6 +326,7 @@ export class QueryEngine {
   private cancelled = false
   private cancelReason = 'Query cancelled'
   private consecutiveCompactFailures = 0
+  private lastTerminationReason: QueryTerminationReason = 'model_completed'
 
   // 性能优化：content_delta / thinking 批量合并
   // 高频事件在微任务队列中累积，每 ~32ms 发送一次合并后的事件，
@@ -513,7 +519,7 @@ export class QueryEngine {
     //   console.log(`Initialized ${this.tools.length} tools:`, this.tools.map(t => t.name))
     // }
 
-    this.toolExecutor = new ToolExecutor(this.tools, this.bashTool, {
+    this.toolExecutor = new ToolExecutor(this.tools, this.bashTool, this.config.cwd, {
       requestPermission: (toolName, toolUseId, input) =>
         this.requestPermissionIfNeeded(toolName, toolUseId, input),
       requestInteraction: (toolName, toolUseId, input) =>
@@ -527,20 +533,12 @@ export class QueryEngine {
   private buildSystemPrompt(): string {
     return `你是 Evancod，一个在 VS Code 插件中运行的软件工程 Agent。
 
-任务工具契约：
-- 对复杂多步骤工作、plan mode、用户明确要求 todo list、或用户一次给出多个任务的请求，主动调用 task_create 创建结构化任务。
-- 编码前先使用读取、搜索和分析工具调查工作区；能从代码、配置、文档、测试或既有模式确认的信息，不要询问用户。
-- 在第一次修改文件前，先检查是否存在高影响未决选择；若存在，先调用 ask_user_question 获取用户决策，再开始编辑。
-- 当继续执行所需的信息无法从工作区获得，或存在多种合理实现/技术选择且选择会实质影响公开 API、数据结构、依赖、兼容性、安全性、性能、用户体验、破坏性操作范围或验收标准时，必须调用 ask_user_question，不得自行假设。
-- 用户要求互相冲突、需求边界不清且不同理解会产生显著不同结果、需要用户提供外部业务规则/环境信息/凭证，或即将进行不可逆操作但范围不明确时，也必须调用 ask_user_question。
-- 对局部、可逆、低风险的实现细节，优先遵循项目既有模式自行决定；用户已明确授权自行选择时不要重复询问。
-- 需要澄清时直接调用 ask_user_question，不要先用普通文本提问。一次集中询问 1-4 个真正阻塞的问题；收到回答后立即结合答案继续原任务。
-- 判断示例：仓库中没有既有约定而 Cookie 与 JWT 会改变认证架构时必须询问；“用什么命名/放哪个相邻目录”可遵循现有代码自行决定；删除或迁移数据但用户未给出范围时必须询问；API 地址可以从配置或环境文件安全确认时先读取，不要询问。
-- 开始执行某个任务前，必须调用 task_update 将该任务标记为 in_progress。
-- 只有工作完全完成时才能将任务标记为 completed；测试失败、实现不完整、文件缺失或仍有阻塞时不能标记 completed。
-- 完成任务后，调用 task_list 查找下一项可执行任务或新解锁任务。
-
-工具执行契约：
+工作契约：
+- 复杂多步骤、plan mode、todo list 或多项请求使用 task_create；执行前用 task_update 标记 in_progress，实际实现和验证完成后才能标记 completed，再用 task_list 检查下一项。
+- 编码前读取、搜索并分析工作区。能从代码、配置、文档、测试或既有模式确认的信息自行确认，不询问用户。
+- 只有缺少外部信息，或选择会实质影响公开 API、数据、依赖、兼容性、安全、性能、用户体验、不可逆操作范围或验收标准时，才调用 ask_user_question 集中询问 1-4 个阻塞问题。
+- 对局部、可逆、低风险细节遵循项目既有模式。用户要求冲突或不同理解会产生显著不同结果时，不得擅自选择。
+- 测试失败、实现不完整、文件缺失或仍有阻塞时，不得声称完成。
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
 - 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。
 - 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${this.buildSkillCatalog()}`
@@ -724,6 +722,7 @@ Skill 使用契约：
     let lastIteration = 0
     let progressSignalCount = 0
     let noProgressTurnCount = 0
+    let terminationReason: QueryTerminationReason = 'model_completed'
     performanceLog('query.start', {
       messageLength: content.length,
       messageCount: this.config.messages.length,
@@ -749,7 +748,7 @@ Skill 使用契约：
       this.config.messages.push(userMessage)
       this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
 
-      const MAX_ITERATIONS = this.config.maxIterations ?? 100
+      const MAX_ITERATIONS = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS
       let iteration = 0
       let finalContent = ''
       let totalUsage: TokenUsage | undefined
@@ -758,8 +757,11 @@ Skill 使用契约：
       let lastTurnHadToolCalls = false
       // 连续「整轮只有重复工具调用」的次数。用于兜底打断探查死循环。
       let consecutiveNoProgressTurns = 0
+      let repeatedErrorTurns = 0
+      let lastErrorSignature = ''
       // 循环是否被死循环断路器主动打断（而非正常闭环或触顶）
       let loopBroken = false
+      let reachedNormalCompletion = false
       let continuationCount = 0
       const MAX_OUTPUT_CONTINUATIONS = 3
       let taskContinuationCount = 0
@@ -943,6 +945,7 @@ Skill 使用契约：
 
           continuationCount++
           if (continuationCount > MAX_OUTPUT_CONTINUATIONS) {
+            terminationReason = 'output_limit'
             throw new Error(
               '模型输出连续 ' +
                 MAX_OUTPUT_CONTINUATIONS +
@@ -1018,7 +1021,7 @@ Skill 使用契约：
           // 从而把本应位于回答前的 thinking 渲染到会话末尾。
           this.flushPendingDeltas()
           const toolsStartedAt = performance.now()
-          const { results: toolResults, noProgress } =
+          const { results: toolResults, noProgress, errorSignature } =
             await this.executeToolCalls(assistantToolCalls)
           performanceLog('query.tools.complete', {
             iteration,
@@ -1056,11 +1059,32 @@ Skill 使用契约：
                 data: { message: '检测到重复探查，已中断循环并要求模型给出结论', success: true },
               })
               loopBroken = true
+              terminationReason = 'no_progress'
               break
             }
           } else {
             consecutiveNoProgressTurns = 0
             progressSignalCount++
+          }
+
+          // 相同的一组工具错误连续出现三轮，说明模型没有根据错误调整参数。
+          // 不拦截单次或不同错误，避免瞬时失败影响正常自我修复。
+          if (errorSignature) {
+            if (errorSignature === lastErrorSignature) {
+              repeatedErrorTurns++
+            } else {
+              lastErrorSignature = errorSignature
+              repeatedErrorTurns = 1
+            }
+            if (repeatedErrorTurns >= 3) {
+              console.warn('Detected repeated identical tool errors, forcing final answer')
+              loopBroken = true
+              terminationReason = 'no_progress'
+              break
+            }
+          } else {
+            repeatedErrorTurns = 0
+            lastErrorSignature = ''
           }
 
           // 最后一个任务工具完成后立即进入内部复核。若等模型下一轮自然收尾，
@@ -1119,6 +1143,7 @@ Skill 使用契约：
         }
 
         if (taskWorkflowActive && unfinishedTasks.length > 0) {
+          terminationReason = 'task_incomplete'
           console.warn(
             'Task continuation limit reached with unfinished tasks:',
             unfinishedTasks.map(task => ({ id: task.id, status: task.status }))
@@ -1143,6 +1168,10 @@ Skill 使用契约：
         }
 
         finalContent = assistantContent
+        if (terminationReason !== 'task_incomplete') {
+          terminationReason = taskWorkflowActive ? 'tasks_completed' : 'model_completed'
+        }
+        reachedNormalCompletion = true
         performanceLog('query.iteration.complete', {
           iteration,
           durationMs: Math.round(performance.now() - iterationStartedAt),
@@ -1188,6 +1217,14 @@ Skill 使用契约：
         console.warn(`Reached maximum iterations (${MAX_ITERATIONS})`)
       }
 
+      if (
+        iteration >= MAX_ITERATIONS &&
+        !reachedNormalCompletion &&
+        terminationReason !== 'no_progress'
+      ) {
+        terminationReason = 'max_iterations'
+      }
+
       this.throwIfCancelled()
       // flush 所有待处理的 delta，确保最终内容在 message_complete 前完整发送
       this.flushPendingDeltas()
@@ -1213,7 +1250,13 @@ Skill 使用契约：
         totalUsage.percentUsed = Math.min(Math.round((currentTokens / effectiveWindow) * 100), 100)
       }
 
-      this.onAgentEventCallback?.({ type: 'message_complete', usage: totalUsage })
+      this.lastTerminationReason = terminationReason
+      this.onAgentEventCallback?.({
+        type: 'message_complete',
+        usage: totalUsage,
+        terminationReason,
+        completed: isSuccessfulTermination(terminationReason),
+      })
       this.onCompleteCallback?.(finalMessage)
       performanceLog('query.complete', {
         iterations: iteration,
@@ -1221,9 +1264,9 @@ Skill 使用契约：
         ...performanceSnapshot(),
       })
       performanceLog('query.termination', {
-        terminationReason: 'completed',
+        terminationReason,
         iteration,
-        completed: true,
+        completed: isSuccessfulTermination(terminationReason),
         progressSignals: progressSignalCount,
         noProgressTurns: noProgressTurnCount,
       })
@@ -1246,8 +1289,12 @@ Skill 使用契约：
           : error instanceof Error
             ? error
             : new Error(String(error))
-      const terminationReason =
-        this.cancelled || this.abortController.signal.aborted ? 'user_cancelled' : 'provider_error'
+      if (this.cancelled || this.abortController.signal.aborted) {
+        terminationReason = 'user_cancelled'
+      } else if (terminationReason !== 'output_limit') {
+        terminationReason = 'provider_error'
+      }
+      this.lastTerminationReason = terminationReason
       performanceLog('query.termination', {
         terminationReason,
         iteration: lastIteration,
@@ -1375,6 +1422,10 @@ Skill 使用契约：
    */
   getMessages(): Message[] {
     return [...this.config.messages]
+  }
+
+  getLastTerminationReason(): QueryTerminationReason {
+    return this.lastTerminationReason
   }
 
   /**

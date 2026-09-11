@@ -3,6 +3,7 @@ import type { ToolCall } from '../../../types'
 import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
 import { BashTool, type BashExecutionContext } from './BashTool'
 import { performanceLog, performanceSnapshot } from '../../../utils/performanceLogger'
+import { prepareToolResultForContext } from './toolResultContext'
 
 export interface ToolPermissionResult {
   approved: boolean
@@ -21,6 +22,7 @@ export interface ToolExecutionResult {
   toolCallId: string
   toolName: string
   content: string
+  isError: boolean
   /**
    * 结构化内容块（可选）。当工具结果含图片时，携带 Anthropic 风格的
    * tool_result blocks（text + image），供 QueryEngine 存入 tool 消息，
@@ -36,6 +38,7 @@ export class ToolExecutor {
   constructor(
     private tools: Tool[],
     private bashTool: BashTool,
+    private cwd: string,
     private callbacks: ToolExecutorCallbacks
   ) {}
 
@@ -88,19 +91,32 @@ export class ToolExecutor {
       // 发送给前端的内容保留完整 metadata（含仅供 Webview 的预览数据，如图片 base64）
       const webviewContent = this.formatToolResultContent(toolResult, { forWebview: true })
       // 回灌给 LLM 的内容剔除 _webviewOnly 与 image（大体积 base64），避免灌入模型上下文
-      const llmContent = this.formatToolResultContent(toolResult, { forWebview: false })
+      const rawLlmContent = this.formatToolResultContent(toolResult, { forWebview: false })
+      const prepared = await prepareToolResultForContext(
+        this.cwd,
+        id,
+        name,
+        rawLlmContent
+      )
+      const llmContent = prepared.content
       // 若结果含图片，构造 vision block：文本占位 + image block，让模型真正"看见"图片
       const contentBlocks = this.buildVisionBlocks(toolResult, llmContent)
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success })
       this.callbacks.notifyTaskListChange(name)
       performanceLog('tool.complete', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), resultBytes: llmContent.length, ...performanceSnapshot() })
-      return { toolCallId: id, toolName: name, content: llmContent, contentBlocks }
+      return {
+        toolCallId: id,
+        toolName: name,
+        content: llmContent,
+        contentBlocks,
+        isError: !toolResult.success,
+      }
     } catch (error) {
       const content = `Error: ${error instanceof Error ? error.message : '未知错误'}`
       performanceLog('tool.error', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
       this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true })
       this.callbacks.notifyTaskListChange(name)
-      return { toolCallId: id, toolName: name, content }
+      return { toolCallId: id, toolName: name, content, isError: true }
     } finally {
       this.activeToolUseIds.delete(id)
       this.cancellationWaiters.delete(id)
@@ -170,7 +186,7 @@ export class ToolExecutor {
   private emitErrorResult(toolUseId: string, toolName: string, error: string): ToolExecutionResult {
     const content = JSON.stringify({ success: false, error })
     this.callbacks.emitEvent({ type: 'tool_result', toolUseId, content, isError: true })
-    return { toolCallId: toolUseId, toolName, content }
+    return { toolCallId: toolUseId, toolName, content, isError: true }
   }
 
   private resolveExecutionInput(toolName: string, input: unknown, updatedInput: unknown): unknown {
@@ -215,13 +231,20 @@ export class ToolExecutor {
       // image 已由 buildVisionBlocks 单独转为 vision block，前端预览走 _webviewOnly.previews，
       // 两条通道都不需要 metadata.image 的裸 base64，一律剔除避免重复的大体积数据。
       if (metadata.image !== undefined) {
-        const { image, ...rest } = metadata
-        metadata = rest
+        metadata = { ...metadata }
+        delete metadata.image
       }
       // 回灌 LLM 时额外剔除 _webviewOnly（仅供前端展示的大体积数据，如图片 base64）
       if (!options?.forWebview && metadata._webviewOnly !== undefined) {
-        const { _webviewOnly, ...rest } = metadata
-        metadata = rest
+        metadata = { ...metadata }
+        delete metadata._webviewOnly
+      }
+      // Bash 的 stdout/stderr 已完整存在于 content；再次放进 metadata 会把同一份
+      // 大输出回灌两遍。Webview 仍保留原 metadata，模型侧只去掉这两个重复字段。
+      if (!options?.forWebview && (metadata.stdout !== undefined || metadata.stderr !== undefined)) {
+        metadata = { ...metadata }
+        delete metadata.stdout
+        delete metadata.stderr
       }
       return JSON.stringify({
         success: toolResult.success,

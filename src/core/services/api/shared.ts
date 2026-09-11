@@ -98,8 +98,13 @@ export function normalizeOpenAIUsage(usage: any): TokenUsage | undefined {
       inputTokens: usage.prompt_tokens ?? usage.input_tokens,
       outputTokens: usage.completion_tokens ?? usage.output_tokens,
       cacheReadTokens:
-        usage.prompt_tokens_details?.cached_tokens ?? usage.input_token_details?.cached_tokens,
-      cacheWriteTokens: usage.cache_creation_input_tokens ?? usage.cache_write_input_tokens,
+        usage.prompt_tokens_details?.cached_tokens ??
+        usage.input_tokens_details?.cached_tokens ??
+        usage.input_token_details?.cached_tokens,
+      cacheWriteTokens:
+        usage.cache_creation_input_tokens ??
+        usage.cache_write_input_tokens ??
+        usage.input_tokens_details?.cache_write_tokens,
     },
     true
   )

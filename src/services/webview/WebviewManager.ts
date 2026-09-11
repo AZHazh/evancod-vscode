@@ -27,6 +27,11 @@ import { TaskManager } from '../task/TaskManager'
 import { PlanModeManager } from '../plan/PlanModeManager'
 import { AgentCoordinator } from '../agent/AgentCoordinator'
 import type { AgentServerEvent } from '../../types/messages'
+import { performanceLog } from '../../utils/performanceLogger'
+import {
+  PermissionResponseCache,
+  type PermissionResponseData,
+} from './PermissionResponseCache'
 
 /**
  * 会改变"当前激活 Provider 快照"的消息类型。
@@ -71,6 +76,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
    * 改为纯内存 Map 后，查找和执行都是同步的，去除所有 async/await 和序列化。
    */
   private permissionCallbacks = new Map<string, (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => void>()
+  private permissionResponseCache = new PermissionResponseCache()
 
   /**
    * 构造函数 - 依赖注入
@@ -871,8 +877,23 @@ export class WebviewManager implements vscode.WebviewViewProvider {
   /**
    * 处理 Agent 取消
    */
-  private handlePermissionResponse(data: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }): void {
+  private handlePermissionResponse(data: PermissionResponseData): void {
     try {
+      performanceLog('permission.webview_response.received', {
+        requestId: data.requestId,
+        approved: data.approved,
+      })
+
+      const cachedResponse = this.permissionResponseCache.get(data.requestId)
+      if (cachedResponse) {
+        performanceLog('permission.webview_response.replayed', {
+          requestId: data.requestId,
+          approved: cachedResponse.approved,
+        })
+        this.sendAgentEvent({ type: 'permission_response', ...cachedResponse })
+        return
+      }
+
       // 性能优化：从内存 Map 同步查找回调，不再经过 globalState 异步读写
       const callback = this.permissionCallbacks.get(data.requestId)
       if (callback) {
@@ -883,16 +904,15 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       // 子 Agent 有独立的 QueryEngine，先按 requestId 尝试路由；未命中再交给主会话。
       const handledBySubAgent = this.agentCoordinator?.handlePermissionResponse(data) ?? false
       const handled = handledBySubAgent || this.chatService.handlePermissionResponse(data)
-      this.sendAgentEvent(
-        handled
-          ? { type: 'permission_response', ...data }
-          : {
-              type: 'permission_response',
-              ...data,
-              approved: false,
-              reason: '权限请求已失效或所属任务已停止',
-            }
-      )
+      const response: PermissionResponseData = handled
+        ? data
+        : {
+            ...data,
+            approved: false,
+            reason: '权限请求已失效或所属任务已停止',
+          }
+      if (handled) this.permissionResponseCache.set(response)
+      this.sendAgentEvent({ type: 'permission_response', ...response })
     } catch (error) {
       console.error('Failed to handle permission response:', error)
     }

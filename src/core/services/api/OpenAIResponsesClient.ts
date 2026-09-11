@@ -35,6 +35,7 @@ export class OpenAIResponsesClient implements ApiClient {
   async sendMessageStream(messages: Message[], onStream: StreamCallback, tools?: any[], options?: ApiClientOptions): Promise<ApiClientResponse> {
     // 已吐出正文或图片增量后不再重连，避免内容重复
     let streamedContent = false
+    let reasoningSummaryEnabled = true
 
     const attempt = async (): Promise<ApiClientResponse> => {
     throwIfAborted(options?.signal)
@@ -63,7 +64,10 @@ export class OpenAIResponsesClient implements ApiClient {
       effortLevel: this.config.effortLevel,
     })
     if (reasoningEffort) {
-      requestBody.reasoning = { effort: reasoningEffort }
+      requestBody.reasoning = {
+        effort: reasoningEffort,
+        ...(reasoningSummaryEnabled ? { summary: 'auto' } : {}),
+      }
       console.log(`[OpenAIResponsesClient] Reasoning effort enabled: ${reasoningEffort}`)
     } else {
       console.log(
@@ -129,7 +133,7 @@ export class OpenAIResponsesClient implements ApiClient {
       pendingImageMime = 'image/png'
     }
 
-    while (true) {
+    for (;;) {
       const { value, done } = await reader.read()
       throwIfAborted(options?.signal)
       if (done) break
@@ -180,6 +184,15 @@ export class OpenAIResponsesClient implements ApiClient {
           const message =
             event.response?.error?.message || event.error?.message || event.message || 'Responses 流执行失败'
           throw new Error(message)
+        }
+
+        if (type === 'response.reasoning_summary_text.delta') {
+          const delta = typeof event.delta === 'string' ? event.delta : ''
+          if (delta) {
+            streamedContent = true
+            onStream(delta, 'thinking')
+          }
+          continue
         }
 
         // === 工具调用：function_call 生命周期 ===
@@ -313,7 +326,28 @@ export class OpenAIResponsesClient implements ApiClient {
     }
     }
 
-    return withStreamRetry(attempt, { signal: options?.signal, hasStreamedContent: () => streamedContent })
+    try {
+      return await withStreamRetry(attempt, {
+        signal: options?.signal,
+        hasStreamedContent: () => streamedContent,
+      })
+    } catch (error) {
+      // 一些兼容中转支持 effort，却尚未支持 summary，且既可能返回 HTTP 400，
+      // 也可能在 HTTP 200 的 SSE 中发送 response.failed。尚未输出内容时可安全降级。
+      if (
+        reasoningSummaryEnabled &&
+        !streamedContent &&
+        isUnsupportedReasoningSummaryError(error)
+      ) {
+        reasoningSummaryEnabled = false
+        console.warn('[OpenAIResponsesClient] 上游不支持 reasoning.summary，已降级重试')
+        return withStreamRetry(attempt, {
+          signal: options?.signal,
+          hasStreamedContent: () => streamedContent,
+        })
+      }
+      throw error
+    }
   }
 
   async testConnection(): Promise<boolean> {
@@ -355,6 +389,14 @@ export class OpenAIResponsesClient implements ApiClient {
 
     return response
   }
+}
+
+function isUnsupportedReasoningSummaryError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    /reasoning[._ ]?summary/i.test(message) &&
+    /unsupported|unknown|unrecognized|invalid|not permitted|extra fields?/i.test(message)
+  )
 }
 
 function convertResponsesInput(messages: Message[]): string {

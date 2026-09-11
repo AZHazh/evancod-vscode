@@ -120,6 +120,23 @@ export function formatRequestContract(context: RequestContext | undefined): stri
   ].join('\n')
 }
 
+/** 简单请求直接使用原文；只有多要求、引用或恢复场景才重复注入结构化契约。 */
+export function shouldIncludeRequestContract(
+  context: RequestContext | undefined,
+  options?: { continuation?: boolean }
+): boolean {
+  if (!context) return false
+  if (options?.continuation || context.references.length > 0) return true
+
+  const source = context.requirements.map(item => item.sourceText).join('\n').trim()
+  if (source.length >= 500) return true
+
+  const listedRequirements = source.match(/(?:^|\n)\s*(?:[-*]|\d+[.、)])\s*\S/g) || []
+  if (listedRequirements.length >= 2) return true
+
+  return /同时|以及|并且|分别|多(?:个|项|处|文件)|重构|迁移|完整实现/.test(source)
+}
+
 function samePath(left: string, right: string): boolean {
   return left.replace(/\\/g, '/').toLowerCase() === right.replace(/\\/g, '/').toLowerCase()
 }

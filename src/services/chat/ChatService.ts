@@ -32,6 +32,7 @@ import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
 import { QueryCancelledError, QueryEngine } from '../../core/engine/QueryEngine'
+import { isSuccessfulTermination } from '../../core/engine/termination'
 import {
   readImageAsBase64,
   saveGeneratedImages,
@@ -47,6 +48,7 @@ import {
   composeUserPrompt,
   createRequestContext,
   formatRequestContract,
+  shouldIncludeRequestContract,
 } from './UserPromptComposer'
 
 /**
@@ -645,7 +647,11 @@ export class ChatService {
       phase: 'planning',
       updatedAt: Date.now(),
     }
-    const requestContract = formatRequestContract(requestContext)
+    const requestContract = shouldIncludeRequestContract(requestContext, {
+      continuation: Boolean(interruptedContext),
+    })
+      ? formatRequestContract(requestContext)
+      : ''
     const recoveryInstruction = interruptedContext
       ? '这是对上次中断请求的继续执行。先检查工作区和未完成任务的实际状态，不要重复已完成步骤。'
       : ''
@@ -722,6 +728,7 @@ export class ChatService {
 
       // 4. 调用 QueryEngine 发送消息
       await this.queryEngine!.query(messageContent, userContentBlocks, sourceMessageId)
+      const terminationReason = this.queryEngine!.getLastTerminationReason()
 
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
       session.messages = this.queryEngine!.getMessages()
@@ -747,14 +754,17 @@ export class ChatService {
               task.status === 'in_progress' ||
               task.completion?.state === 'reviewing')
         )
-      requestContext.status = unfinishedTasks.length ? 'interrupted' : 'completed'
+      const completed = unfinishedTasks.length === 0 && isSuccessfulTermination(terminationReason)
+      requestContext.status = completed ? 'completed' : 'interrupted'
       requestContext.updatedAt = new Date().toISOString()
       if (session.activeRun?.id === `run-${sourceMessageId}`) {
-        session.activeRun.status = unfinishedTasks.length ? 'interrupted' : 'completed'
-        session.activeRun.reason = unfinishedTasks.length
-          ? `仍有 ${unfinishedTasks.length} 个任务未完成，可继续执行。`
-          : undefined
-        session.activeRun.retryable = unfinishedTasks.length ? true : undefined
+        session.activeRun.status = completed ? 'completed' : 'interrupted'
+        session.activeRun.reason = completed
+          ? undefined
+          : unfinishedTasks.length
+            ? `仍有 ${unfinishedTasks.length} 个任务未完成，可继续执行。`
+            : `任务因 ${terminationReason} 停止，可继续执行。`
+        session.activeRun.retryable = completed ? undefined : true
         session.activeRun.updatedAt = Date.now()
       }
 

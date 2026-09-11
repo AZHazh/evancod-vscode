@@ -117,6 +117,21 @@ export const useChatStore = defineStore('chat', () => {
   const activeToolUseId = ref<string | null>(null)
   const activeToolName = ref<string | null>(null)
   const pendingPermission = ref<PermissionRequest | null>(null)
+  const permissionResponseTimers = new Map<string, number>()
+  const pendingPermissionResponses = new Map<
+    string,
+    {
+      response: {
+        requestId: string
+        approved: boolean
+        reason?: string
+        updatedInput?: unknown
+        rule?: 'once' | 'always'
+      }
+      request?: PermissionRequest
+      retryIndex: number
+    }
+  >()
   let ignorePermissionRequests = false
   const tokenUsage = ref<TokenUsage | null>(null)
   const uiMessages = ref<UIMessage[]>([])
@@ -245,12 +260,14 @@ export const useChatStore = defineStore('chat', () => {
 
     switch (message.type) {
       case 'session.restored':
+        clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         sessions.value = message.data.sessions
         syncUiMessagesFromSession()
         break
 
       case 'session.created':
+        clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         sessions.value.push(message.data.session)
         syncUiMessagesFromSession()
@@ -728,6 +745,7 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'permission_response': {
+        clearPermissionResponseRetry(event.requestId)
         const cancelled =
           !event.approved &&
           (event.reason?.includes('停止') || event.reason?.includes('失效'))
@@ -1207,7 +1225,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function updatePermissionResponseState(
     requestId: string,
-    responseState: 'approved' | 'denied' | 'cancelled' | 'expired'
+    responseState: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
   ) {
     const index = uiMessages.value.findIndex(
       message => message.type === 'permission_request' && message.requestId === requestId
@@ -1280,6 +1298,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function stopGeneration() {
     ignorePermissionRequests = true
+    clearAllPermissionResponseRetries()
     vscode.postMessage({
       type: 'chat.stop',
       data: { sessionId: currentSession.value?.id },
@@ -1340,12 +1359,75 @@ export const useChatStore = defineStore('chat', () => {
     updatedInput?: unknown
     rule?: 'once' | 'always'
   }) {
+    clearPermissionResponseRetry(response.requestId)
+    const request =
+      pendingPermission.value?.requestId === response.requestId
+        ? { ...pendingPermission.value }
+        : undefined
+    pendingPermissionResponses.set(response.requestId, {
+      response,
+      request,
+      retryIndex: 0,
+    })
+    updatePermissionResponseState(response.requestId, response.approved ? 'approved' : 'denied')
+    if (pendingPermission.value?.requestId === response.requestId) {
+      pendingPermission.value = null
+    }
+    chatState.value = response.approved ? 'thinking' : 'idle'
+    postPermissionResponse(response)
+    schedulePermissionResponseRetry(response.requestId)
+  }
+
+  function postPermissionResponse(response: {
+    requestId: string
+    approved: boolean
+    reason?: string
+    updatedInput?: unknown
+    rule?: 'once' | 'always'
+  }) {
     const plainResponse = toPlainJsonSafe(response)
     vscode.postMessage({
       type: 'permission_response',
       data: plainResponse,
     })
+  }
 
+  function schedulePermissionResponseRetry(requestId: string) {
+    const pending = pendingPermissionResponses.get(requestId)
+    if (!pending) return
+
+    const retryDelays = [750, 1500, 3000]
+    if (pending.retryIndex >= retryDelays.length) {
+      pendingPermissionResponses.delete(requestId)
+      updatePermissionResponseState(requestId, 'pending')
+      if (pending.request) pendingPermission.value = pending.request
+      chatState.value = 'waiting_permission'
+      return
+    }
+
+    const delay = retryDelays[pending.retryIndex]
+    const timer = window.setTimeout(() => {
+      permissionResponseTimers.delete(requestId)
+      const current = pendingPermissionResponses.get(requestId)
+      if (!current) return
+      current.retryIndex += 1
+      postPermissionResponse(current.response)
+      schedulePermissionResponseRetry(requestId)
+    }, delay)
+    permissionResponseTimers.set(requestId, timer)
+  }
+
+  function clearPermissionResponseRetry(requestId: string) {
+    const timer = permissionResponseTimers.get(requestId)
+    if (timer !== undefined) window.clearTimeout(timer)
+    permissionResponseTimers.delete(requestId)
+    pendingPermissionResponses.delete(requestId)
+  }
+
+  function clearAllPermissionResponseRetries() {
+    for (const timer of permissionResponseTimers.values()) window.clearTimeout(timer)
+    permissionResponseTimers.clear()
+    pendingPermissionResponses.clear()
   }
 
   function sendInteractionResponse(response: {
