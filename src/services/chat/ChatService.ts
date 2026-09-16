@@ -64,6 +64,7 @@ const TEXT_ATTACHMENT_LIMIT = 120_000
 export class ChatService {
   private transcriptDeltaBuffers = new Map<string, string>()
   private transcriptDeltaFlushAt = new Map<string, number>()
+  private activeThinkingBlockId: string | undefined
   /**
    * 会话列表（存储在内存中）
    * 优势：
@@ -93,6 +94,8 @@ export class ChatService {
   private persistenceDirtyWhileStreaming = false
   private activeRequest?: Promise<void>
   private requestQueue: Promise<void> = Promise.resolve()
+  private activeRequestController?: AbortController
+  private directGenerationController?: AbortController
 
   /**
    * QueryEngine 实例
@@ -507,15 +510,37 @@ export class ChatService {
 
   async stopGeneration(): Promise<Session | null> {
     const session = this.getCurrentSession()
-    this.queryEngine?.cancel('用户停止生成')
-    const cancelSubAgents = this.agentCoordinator.cancelAllAgents('用户停止生成')
-
+    const cancelledEngine = this.queryEngine
     const activeRequest = this.activeRequest
-    await Promise.all([activeRequest?.catch(() => undefined), cancelSubAgents])
-    this.queryEngine = undefined
+    cancelledEngine?.cancel('用户停止生成')
+    this.activeRequestController?.abort('用户停止生成')
+    this.directGenerationController?.abort('用户停止生成')
+    void this.agentCoordinator.cancelAllAgents('用户停止生成').catch(error => {
+      console.error('Failed to finish cancelling sub agents:', error)
+    })
+
+    // 停止必须立即响应。请求与子 Agent 的持久化收尾留在后台完成，不能阻塞
+    // chat.stop 的响应；否则不可中断的第三方工具会让 UI 一直显示运行中。
+    const releaseCancelledEngine = () => {
+      if (this.queryEngine === cancelledEngine) this.queryEngine = undefined
+    }
+    void activeRequest?.then(releaseCancelledEngine, releaseCancelledEngine)
 
     if (session) {
       this.expirePendingTranscript(session)
+      if (session.activeRun?.status === 'running') {
+        session.activeRun.status = 'cancelled'
+        session.activeRun.reason = '用户停止生成'
+        session.activeRun.retryable = false
+        session.activeRun.updatedAt = Date.now()
+        const requestContext = session.requestContexts?.find(
+          context => context.id === session.activeRun?.requestId
+        )
+        if (requestContext) {
+          requestContext.status = 'cancelled'
+          requestContext.updatedAt = new Date().toISOString()
+        }
+      }
       session.updatedAt = Date.now()
       this.saveSessions(true)
     }
@@ -573,21 +598,33 @@ export class ChatService {
     messageId?: string
   ): Promise<void> {
     const previousRequest = this.activeRequest
+    const requestController = new AbortController()
     const request = this.requestQueue
       .catch(() => undefined)
       .then(async () => {
         if (previousRequest) {
           await previousRequest.catch(() => undefined)
         }
-        await this.runMessage(content, attachments, inlineSegments, messageId)
+        if (requestController.signal.aborted) return
+        await this.runMessage(
+          content,
+          attachments,
+          inlineSegments,
+          messageId,
+          requestController.signal
+        )
       })
     this.requestQueue = request
     this.activeRequest = request
+    this.activeRequestController = requestController
     try {
       await request
     } finally {
       if (this.activeRequest === request) {
         this.activeRequest = undefined
+      }
+      if (this.activeRequestController === requestController) {
+        this.activeRequestController = undefined
       }
     }
   }
@@ -596,7 +633,8 @@ export class ChatService {
     content: string,
     attachments: (string | AttachmentContext)[] = [],
     inlineSegments: InlineMessageSegment[] = [],
-    messageId?: string
+    messageId?: string,
+    requestSignal?: AbortSignal
   ): Promise<void> {
     // 1. 验证会话
     const session = this.getCurrentSession()
@@ -607,6 +645,7 @@ export class ChatService {
     // Memory 虽在扩展启动后后台加载，但首个 Query 必须等待它就绪，
     // 避免用户刚启动就提问时漏掉项目记忆。
     await this.memoryManager.initialize()
+    if (requestSignal?.aborted) return
 
     const commandResult = await this.resolveSlashCommand(content, session)
     if (commandResult.handled) {
@@ -615,6 +654,7 @@ export class ChatService {
     }
 
     const attachmentContexts = await this.resolveAttachments(attachments)
+    if (requestSignal?.aborted) return
     const interruptedContext = isContinuationMessage(commandResult.content)
       ? this.findInterruptedRequestContext(session)
       : undefined
@@ -668,6 +708,7 @@ export class ChatService {
     if (!isDirectImageGen && !this.queryEngine) {
       await this.initializeQueryEngine()
     }
+    if (requestSignal?.aborted) return
 
     // 记录是否为本会话第一条用户消息（用于用首条消息内容作为会话标题）
     const isFirstUserMessage = session.messages.length === 0
@@ -715,7 +756,20 @@ export class ChatService {
     try {
       // openai_image 格式 Provider —— 直接走图片生成路径
       if (isDirectImageGen && activeProvider) {
-        await this.handleDirectImageGeneration(commandResult.content, session, activeProvider)
+        const controller = new AbortController()
+        this.directGenerationController = controller
+        try {
+          await this.handleDirectImageGeneration(
+            commandResult.content,
+            session,
+            activeProvider,
+            controller.signal
+          )
+        } finally {
+          if (this.directGenerationController === controller) {
+            this.directGenerationController = undefined
+          }
+        }
         requestContext.status = 'completed'
         requestContext.updatedAt = new Date().toISOString()
         if (session.activeRun?.id === `run-${sourceMessageId}`) {
@@ -727,11 +781,21 @@ export class ChatService {
       }
 
       // 4. 调用 QueryEngine 发送消息
-      await this.queryEngine!.query(messageContent, userContentBlocks, sourceMessageId)
-      const terminationReason = this.queryEngine!.getLastTerminationReason()
+      const engine = this.queryEngine!
+      const cancelEngine = () => engine.cancel('用户停止生成')
+      if (requestSignal?.aborted) {
+        throw new QueryCancelledError('用户停止生成')
+      }
+      requestSignal?.addEventListener('abort', cancelEngine, { once: true })
+      try {
+        await engine.query(messageContent, userContentBlocks, sourceMessageId)
+      } finally {
+        requestSignal?.removeEventListener('abort', cancelEngine)
+      }
+      const terminationReason = engine.getLastTerminationReason()
 
       // 5. 用 QueryEngine 的完整消息历史同步会话，保留 toolCalls/tool results
-      session.messages = this.queryEngine!.getMessages()
+      session.messages = engine.getMessages()
       this.restoreDisplayedCommand(
         session.messages,
         commandResult.content,
@@ -869,12 +933,11 @@ export class ChatService {
   private async handleDirectImageGeneration(
     prompt: string,
     session: Session,
-    provider: Provider
+    provider: Provider,
+    signal: AbortSignal
   ): Promise<void> {
     const imageId = `imggen-direct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const model = provider.models.main || 'gpt-image-2'
-    const now = Date.now()
-
     // 1. 发送骨架屏事件
     const startEvent = {
       type: 'image_generation' as const,
@@ -912,6 +975,7 @@ export class ChatService {
           Authorization: `Bearer ${provider.apiKey}`,
         },
         body: JSON.stringify(body),
+        signal,
       })
 
       if (!response.ok) {
@@ -933,9 +997,11 @@ export class ChatService {
       for (const item of items) {
         const b64 = typeof item?.b64_json === 'string' && item.b64_json ? item.b64_json : undefined
         const remoteUrl = typeof item?.url === 'string' && item.url ? item.url : undefined
-        base64 = remoteUrl ? await downloadAsBase64(remoteUrl) : b64
+        base64 = remoteUrl ? await downloadAsBase64(remoteUrl, signal) : b64
         if (base64) break
       }
+
+      if (signal.aborted) throw new QueryCancelledError('用户停止生成')
 
       if (!base64) {
         throw new Error('图片下载失败或接口未返回有效图片数据')
@@ -949,6 +1015,7 @@ export class ChatService {
       )
       const savedPath = saved.length > 0 ? saved[0].path : undefined
       const name = saved.length > 0 ? saved[0].name : undefined
+      if (signal.aborted) throw new QueryCancelledError('用户停止生成')
 
       // 2. 发送完成事件（图片展示）
       const completeEvent = {
@@ -961,6 +1028,9 @@ export class ChatService {
       this.recordAgentEvent(completeEvent)
       this.agentEventCallback?.(completeEvent)
     } catch (error) {
+      if (signal.aborted) {
+        throw new QueryCancelledError('用户停止生成')
+      }
       console.error('[ChatService] handleDirectImageGeneration error:', error)
       // 生成失败：发送一条 assistant 错误消息
       const errorMessage: Message = {
@@ -1319,7 +1389,7 @@ export class ChatService {
     }
 
     // 创建 QueryEngine
-    this.queryEngine = new QueryEngine({
+    const engine = new QueryEngine({
       cwd: session.workDir,
       provider,
       model: this.getCurrentModel(),
@@ -1339,27 +1409,32 @@ export class ChatService {
       permissionMode: this.permissionMode,
       imageProvider: this.providerService.getImageProvider() || undefined,
     })
+    this.queryEngine = engine
 
     // 设置流式回调
-    this.queryEngine.onMessage((delta, isComplete) => {
+    engine.onMessage((delta, isComplete) => {
+      if (this.queryEngine !== engine) return
       if (this.streamCallback) {
         this.streamCallback(delta, isComplete)
       }
     })
 
-    this.queryEngine.onAgentEvent((event: AgentServerEvent) => {
+    engine.onAgentEvent((event: AgentServerEvent) => {
+      if (this.queryEngine !== engine) return
       const recordedEvent = this.recordAgentEvent(event)
       this.agentEventCallback?.(recordedEvent)
     })
 
     // 设置完成回调
-    this.queryEngine.onComplete(message => {
+    engine.onComplete(_message => {
+      if (this.queryEngine !== engine) return
       // 可以在这里做一些清理工作
       console.log('Query completed')
     })
 
     // 设置错误回调
-    this.queryEngine.onError(error => {
+    engine.onError(error => {
+      if (this.queryEngine !== engine) return
       console.error('QueryEngine error:', error)
     })
   }
@@ -1439,15 +1514,22 @@ export class ChatService {
     switch (event.type) {
       case 'content_delta':
         if (typeof event.text === 'string') {
-          // 首次收到最终回答文本时，finalize 当前 thinking 段（如果有）
+          // 正文和思考交错时，每次正文开始都结束当前 thinking 段。
+          if (this.activeThinkingBlockId) {
+            this.finalizeCurrentThinkingSegment(session)
+          }
           const existing = session.transcript?.find(
             (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
               block.type === 'assistant_text' && block.id === 'streaming-assistant'
           )
-          if (!existing) {
-            this.finalizeCurrentThinkingSegment(session)
-          }
-          this.bufferTranscriptDelta(session, 'streaming-assistant', event.text, now, existing)
+          this.bufferTranscriptDelta(
+            session,
+            'streaming-assistant',
+            event.text,
+            now,
+            existing,
+            'assistant_text'
+          )
         }
         break
 
@@ -1538,11 +1620,13 @@ export class ChatService {
         break
 
       case 'thinking': {
+        const blockId = event.blockId || 'streaming-thinking'
+        this.activeThinkingBlockId = blockId
         const existing = session.transcript?.find(
           (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
-            block.type === 'thinking' && block.id === 'streaming-thinking'
+            block.type === 'thinking' && block.id === blockId
         )
-        this.bufferTranscriptDelta(session, 'streaming-thinking', event.text, now, existing)
+        this.bufferTranscriptDelta(session, blockId, event.text, now, existing, 'thinking')
         break
       }
 
@@ -1644,7 +1728,8 @@ export class ChatService {
     id: string,
     delta: string,
     timestamp: number,
-    existing?: Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }>
+    existing: Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }> | undefined,
+    blockType: 'assistant_text' | 'thinking'
   ): void {
     const pending = `${this.transcriptDeltaBuffers.get(id) || ''}${delta}`
     const lastFlush = this.transcriptDeltaFlushAt.get(id) || 0
@@ -1658,10 +1743,10 @@ export class ChatService {
     this.transcriptDeltaFlushAt.set(id, timestamp)
     this.appendOrUpdateTranscript(session, {
       id,
-      type: id === 'streaming-thinking' ? 'thinking' : 'assistant_text',
+      type: blockType,
       content: `${existing?.content || ''}${pending}`,
       timestamp: existing?.timestamp || timestamp,
-      ...(id === 'streaming-assistant' ? { model: this.getCurrentModel() } : {}),
+      ...(blockType === 'assistant_text' ? { model: this.getCurrentModel() } : {}),
     } as AgentTranscriptBlock)
   }
 
@@ -1709,12 +1794,20 @@ export class ChatService {
   }
 
   private finalizeCurrentThinkingSegment(session: Session): void {
-    this.flushTranscriptDelta(session, 'streaming-thinking')
+    const blockId = this.activeThinkingBlockId || 'streaming-thinking'
+    this.activeThinkingBlockId = undefined
+    this.flushTranscriptDelta(session, blockId)
+    this.transcriptDeltaFlushAt.delete(blockId)
     const streamingThinking = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
-        block.type === 'thinking' && block.id === 'streaming-thinking'
+        block.type === 'thinking' && block.id === blockId
     )
-    if (streamingThinking && streamingThinking.content.trim()) {
+    // 旧协议没有 blockId，仍需把固定临时 ID 定型；新协议的 ID 从首个 delta 起就稳定。
+    if (
+      blockId === 'streaming-thinking' &&
+      streamingThinking &&
+      streamingThinking.content.trim()
+    ) {
       streamingThinking.id = this.generateId()
     }
   }
@@ -1735,7 +1828,6 @@ export class ChatService {
 
   private finalizeStreamingTranscript(session: Session): void {
     this.flushTranscriptDelta(session, 'streaming-assistant')
-    this.flushTranscriptDelta(session, 'streaming-thinking')
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
         block.type === 'assistant_text' && block.id === 'streaming-assistant'

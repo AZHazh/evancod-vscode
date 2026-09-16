@@ -196,7 +196,10 @@ const RESULT_MAX_CHARS = 4000
 const resultFullText = computed(() =>
   typeof props.result === 'string' ? props.result : JSON.stringify(props.result, null, 2)
 )
-const resultExpanded = ref(false)
+const resultExpanded = computed({
+  get: () => chatStore.isExpandedState(`tool:${props.toolUseId}:full-result`),
+  set: value => chatStore.setExpandedState(`tool:${props.toolUseId}:full-result`, value),
+})
 const resultTruncated = computed(() => resultFullText.value.length > RESULT_MAX_CHARS)
 const resultDisplayText = computed(() =>
   !resultTruncated.value || resultExpanded.value
@@ -208,8 +211,11 @@ const resultDisplayText = computed(() =>
 const resultErrorSummary = computed(() =>
   props.resultError ? summarizeError(props.result) : undefined
 )
-// 有主旨时，原始文本默认折叠（点“查看详情”才展开）；无主旨则直接展示（截断的）原文
-const rawResultCollapsed = ref(true)
+// 有主旨时原始文本默认折叠；状态放在 Store 中以跨越虚拟列表组件回收。
+const rawResultExpanded = computed({
+  get: () => chatStore.isExpandedState(`tool:${props.toolUseId}:raw-result`),
+  set: value => chatStore.setExpandedState(`tool:${props.toolUseId}:raw-result`, value),
+})
 
 const hasResult = computed(() => {
   return (
@@ -796,16 +802,16 @@ function downloadImage(image: GeneratedImage) {
             <button
               class="tool-result-toggle"
               type="button"
-              @click.stop="rawResultCollapsed = !rawResultCollapsed"
+              @click.stop="rawResultExpanded = !rawResultExpanded"
             >
-              {{ rawResultCollapsed ? '查看详情' : '收起' }}
+              {{ rawResultExpanded ? '收起' : '查看详情' }}
             </button>
           </div>
-          <pre v-if="!rawResultCollapsed" class="tool-result-content">{{ resultDisplayText
+          <pre v-if="rawResultExpanded" class="tool-result-content">{{ resultDisplayText
             }}<span v-if="resultTruncated && !resultExpanded" class="tool-result-ellipsis">
 … 已截断 {{ resultFullText.length - RESULT_MAX_CHARS }} 字符</span></pre>
           <button
-            v-if="!rawResultCollapsed && resultTruncated"
+            v-if="rawResultExpanded && resultTruncated"
             class="tool-result-toggle tool-result-toggle--block"
             type="button"
             @click.stop="resultExpanded = !resultExpanded"

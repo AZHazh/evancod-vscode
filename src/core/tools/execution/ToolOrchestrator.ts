@@ -23,7 +23,8 @@ export class ToolOrchestrator {
 
   constructor(
     private tools: Tool[],
-    private executor: ToolExecutor
+    private executor: ToolExecutor,
+    private isCancelled: () => boolean = () => false
   ) {}
 
   async runTools(toolCalls: ToolCall[]): Promise<RunToolsOutcome> {
@@ -32,6 +33,7 @@ export class ToolOrchestrator {
     let parallelBatch: ToolCall[] = []
 
     const runOne = async (toolCall: ToolCall): Promise<ToolExecutionResult> => {
+      this.throwIfCancelled()
       const decision = this.deduplicator.inspect(toolCall)
       decisions.push(decision)
 
@@ -57,6 +59,7 @@ export class ToolOrchestrator {
       let result: ToolExecutionResult
       const executionStartedAt = performance.now()
       try {
+        this.throwIfCancelled()
         result = await this.executor.runToolUse(toolCall)
       } finally {
         if (isSafe) this.releaseSafeSlot()
@@ -102,6 +105,12 @@ export class ToolOrchestrator {
    */
   resetDedup(): void {
     this.deduplicator.reset()
+  }
+
+  private throwIfCancelled(): void {
+    if (this.isCancelled()) {
+      throw new Error('Query cancelled')
+    }
   }
 
   private isConcurrencySafe(toolName: string): boolean {

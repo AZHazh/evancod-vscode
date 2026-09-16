@@ -336,8 +336,13 @@ export class QueryEngine {
    * 按上游到达顺序保存增量。正文和思考不能拆成两个独立缓冲区，
    * 否则 flush 时固定的发送顺序会把同一轮的 thinking/text 重新排序。
    */
-  private pendingDeltas: Array<{ type: 'content_delta' | 'thinking'; text: string }> = []
+  private pendingDeltas: Array<{
+    type: 'content_delta' | 'thinking'
+    text: string
+    blockId?: string
+  }> = []
   private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined
+  private activeThinkingBlockId: string | undefined
 
   /**
    * 立即 flush 所有待处理的 delta 事件，保证顺序：在发送关键事件前先 flush。
@@ -353,7 +358,11 @@ export class QueryEngine {
       if (delta.type === 'content_delta') {
         this.onAgentEventCallback?.({ type: 'content_delta', text: delta.text })
       } else {
-        this.onAgentEventCallback?.({ type: 'thinking', text: delta.text })
+        this.onAgentEventCallback?.({
+          type: 'thinking',
+          text: delta.text,
+          blockId: delta.blockId,
+        })
       }
     }
   }
@@ -362,6 +371,7 @@ export class QueryEngine {
    * 累积 content_delta，32ms 后批量发送。
    */
   private emitContentDelta(text: string): void {
+    this.activeThinkingBlockId = undefined
     this.enqueueDelta('content_delta', text)
     this.onMessageCallback?.(text, false)
   }
@@ -370,17 +380,22 @@ export class QueryEngine {
    * 累积 thinking delta，32ms 后批量发送。
    */
   private emitThinkingDelta(text: string): void {
-    this.enqueueDelta('thinking', text)
+    this.activeThinkingBlockId ||= `thinking-${this.generateId()}`
+    this.enqueueDelta('thinking', text, this.activeThinkingBlockId)
   }
 
-  private enqueueDelta(type: 'content_delta' | 'thinking', text: string): void {
+  private enqueueDelta(
+    type: 'content_delta' | 'thinking',
+    text: string,
+    blockId?: string
+  ): void {
     if (!text) return
 
     const last = this.pendingDeltas[this.pendingDeltas.length - 1]
-    if (last?.type === type) {
+    if (last?.type === type && last.blockId === blockId) {
       last.text += text
     } else {
-      this.pendingDeltas.push({ type, text })
+      this.pendingDeltas.push({ type, text, blockId })
     }
 
     if (!this.deltaFlushTimer) {
@@ -527,7 +542,11 @@ export class QueryEngine {
       emitEvent: event => this.onAgentEventCallback?.(event),
       notifyTaskListChange: toolName => this.notifyTaskListChange(toolName),
     })
-    this.toolOrchestrator = new ToolOrchestrator(this.tools, this.toolExecutor)
+    this.toolOrchestrator = new ToolOrchestrator(
+      this.tools,
+      this.toolExecutor,
+      () => this.cancelled || this.abortController.signal.aborted
+    )
   }
 
   private buildSystemPrompt(): string {
@@ -732,6 +751,7 @@ Skill 使用契约：
       // 重置 abort 状态，允许新的 query
       this.cancelled = false
       this.abortController = new AbortController()
+      this.activeThinkingBlockId = undefined
 
       this.onAgentEventCallback?.({ type: 'status', state: 'running', verb: 'query' })
 
@@ -1020,6 +1040,7 @@ Skill 使用契约：
           // 响应的正文和思考增量，避免 32ms 缓冲在工具事件之后才到达，
           // 从而把本应位于回答前的 thinking 渲染到会话末尾。
           this.flushPendingDeltas()
+          this.activeThinkingBlockId = undefined
           const toolsStartedAt = performance.now()
           const { results: toolResults, noProgress, errorSignature } =
             await this.executeToolCalls(assistantToolCalls)
@@ -1228,6 +1249,7 @@ Skill 使用契约：
       this.throwIfCancelled()
       // flush 所有待处理的 delta，确保最终内容在 message_complete 前完整发送
       this.flushPendingDeltas()
+      this.activeThinkingBlockId = undefined
       const finalMessage: Message = {
         id: this.generateId(),
         role: 'assistant',
@@ -1272,6 +1294,9 @@ Skill 使用契约：
       })
       return finalMessage
     } catch (error) {
+      // 错误/取消也要先交付已收到的最后一批增量，避免思考段停留在临时状态。
+      this.flushPendingDeltas()
+      this.activeThinkingBlockId = undefined
       performanceLog('query.error', {
         durationMs: Math.round(performance.now() - queryStartedAt),
         error: error instanceof Error ? error.message : String(error),
@@ -1376,6 +1401,7 @@ Skill 使用契约：
     this.cancelReason = reason
     // flush 残留 delta，避免取消后定时器仍然触发
     this.flushPendingDeltas()
+    this.activeThinkingBlockId = undefined
     this.abortController.abort()
     this.toolExecutor?.cancelAll()
     this.bashTool?.cancelAll()
@@ -1444,6 +1470,7 @@ Skill 使用契约：
    * @returns Promise<ToolResult[]> 工具执行结果
    */
   private async executeToolCalls(toolCalls: ToolCall[]): Promise<RunToolsOutcome> {
+    this.throwIfCancelled()
     if (!this.toolOrchestrator) {
       throw new Error('Tool orchestrator not initialized')
     }

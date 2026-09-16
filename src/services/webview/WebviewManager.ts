@@ -485,7 +485,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
           pendingEvents.push({ ...event })
         }
       } else if (event.type === 'thinking') {
-        if (last?.type === 'thinking') {
+        if (last?.type === 'thinking' && last.blockId === event.blockId) {
           last.text += event.text
         } else {
           pendingEvents.push({ ...event })

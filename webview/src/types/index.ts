@@ -365,7 +365,7 @@ export type AgentServerEvent =
       input: unknown
       description?: string
     }
-  | { type: 'thinking'; text: string }
+  | { type: 'thinking'; text: string; blockId?: string }
   | {
       type: 'image_generation'
       imageId: string

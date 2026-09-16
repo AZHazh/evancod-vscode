@@ -159,7 +159,27 @@ function isRetryableStreamError(error: unknown): boolean {
   return false
 }
 
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      const error = new Error('Query cancelled')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, ms)
+
+    if (signal?.aborted) {
+      abort()
+    } else {
+      signal?.addEventListener('abort', abort, { once: true })
+    }
+  })
+}
 
 export function isOutputLimitStopReason(reason?: string): boolean {
   if (!reason) return false
@@ -202,8 +222,7 @@ export async function withStreamRetry(
         `[StreamRetry] 流式请求失败（第 ${i + 1}/${STREAM_MAX_RETRIES} 次），${delay}ms 后重试：`,
         error instanceof Error ? error.message : error
       )
-      await sleep(delay)
-      throwIfAborted(opts.signal)
+      await sleep(delay, opts.signal)
     }
   }
 

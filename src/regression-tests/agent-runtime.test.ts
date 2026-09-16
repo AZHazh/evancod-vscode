@@ -6,6 +6,7 @@ import * as path from 'node:path'
 import { normalizeOpenAIUsage } from '../core/services/api/shared'
 import { OpenAIResponsesClient } from '../core/services/api/OpenAIResponsesClient'
 import { prepareToolResultForContext } from '../core/tools/execution/toolResultContext'
+import { ToolOrchestrator } from '../core/tools/execution/ToolOrchestrator'
 import { microcompact } from '../services/compact/microcompact'
 import {
   composeUserPrompt,
@@ -104,6 +105,110 @@ describe('Agent runtime regression invariants', () => {
     ])
     assert.equal(response.usage?.cacheReadTokens, 80)
     assert.equal(response.incomplete, false)
+  })
+
+  it('aborts an in-flight model request without waiting for another stream event', async () => {
+    globalThis.fetch = async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        if (signal?.aborted) {
+          reject(new DOMException('The operation was aborted', 'AbortError'))
+          return
+        }
+        signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('The operation was aborted', 'AbortError')),
+          { once: true }
+        )
+      })
+
+    const provider: Provider = {
+      id: 'abort-test',
+      name: 'abort-test',
+      type: 'custom',
+      apiFormat: 'openai_responses',
+      baseUrl: 'https://example.test',
+      apiKey: 'test',
+      models: { main: 'gpt-5', sonnet: '', opus: '', haiku: '' },
+      createdAt: new Date(0).toISOString(),
+    }
+    const client = new OpenAIResponsesClient({ provider, model: 'gpt-5' })
+    const controller = new AbortController()
+    const request = client.sendMessageStream([], () => undefined, [], {
+      signal: controller.signal,
+    })
+
+    controller.abort()
+
+    await assert.rejects(request, error => {
+      assert.ok(error instanceof Error)
+      return error.name === 'AbortError'
+    })
+  })
+
+  it('aborts immediately while a failed stream is waiting to retry', async () => {
+    let markFetchStarted: (() => void) | undefined
+    const fetchStarted = new Promise<void>(resolve => {
+      markFetchStarted = resolve
+    })
+    globalThis.fetch = async () => {
+      markFetchStarted?.()
+      throw new TypeError('fetch failed')
+    }
+
+    const provider: Provider = {
+      id: 'retry-abort-test',
+      name: 'retry-abort-test',
+      type: 'custom',
+      apiFormat: 'openai_responses',
+      baseUrl: 'https://example.test',
+      apiKey: 'test',
+      models: { main: 'gpt-5', sonnet: '', opus: '', haiku: '' },
+      createdAt: new Date(0).toISOString(),
+    }
+    const client = new OpenAIResponsesClient({ provider, model: 'gpt-5' })
+    const controller = new AbortController()
+    const request = client.sendMessageStream([], () => undefined, [], {
+      signal: controller.signal,
+    })
+
+    await fetchStarted
+    await new Promise<void>(resolve => setImmediate(resolve))
+    controller.abort()
+
+    let timeout: NodeJS.Timeout | undefined
+    try {
+      await Promise.race([
+        assert.rejects(request, /Query cancelled/),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('取消未立即打断流重试等待')), 250)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  })
+
+  it('does not start another tool after the run is cancelled', async () => {
+    let executionCount = 0
+    const tool = { name: 'read_file', isConcurrencySafe: true }
+    const executor = {
+      runToolUse: async () => {
+        executionCount++
+        throw new Error('should not execute')
+      },
+    }
+    const orchestrator = new ToolOrchestrator(
+      [tool] as any,
+      executor as any,
+      () => true
+    )
+
+    await assert.rejects(
+      orchestrator.runTools([{ id: 'call-1', name: 'read_file', input: { path: 'x' } }]),
+      /Query cancelled/
+    )
+    assert.equal(executionCount, 0)
   })
 
   it('archives oversized tool results and keeps an exact recovery copy', async () => {

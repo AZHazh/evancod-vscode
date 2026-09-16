@@ -93,15 +93,15 @@ const imageModalIndex = ref(0)
 const permissionOptions = [
   {
     value: 'default',
-    label: '询问权限',
+    label: '询问',
     desc: 'CLI 请求时确认文件编辑和高风险命令',
     icon: ShieldCheck,
   },
-  { value: 'acceptEdits', label: '自动接受编辑', desc: 'Evancod 无需询问即可写入磁盘', icon: Zap },
-  { value: 'plan', label: '计划模式', desc: '仅架构和推理，不操作文件', icon: Bot },
+  { value: 'acceptEdits', label: '自动编辑', desc: 'Evancod 无需询问即可写入磁盘', icon: Zap },
+  { value: 'plan', label: '计划', desc: '仅架构和推理，不操作文件', icon: Bot },
   {
     value: 'bypassPermissions',
-    label: '跳过权限',
+    label: '跳过',
     desc: '对 Shell 和文件系统的完整工具访问',
     icon: Hammer,
   },
@@ -992,15 +992,15 @@ onUnmounted(() => {
             <Plus />
           </button>
 
-          <button
+          <span
             class="pill-trigger permission-trigger"
             :class="{ active: openPanel === 'permission' }"
             @click="togglePanel('permission')"
           >
             <component :is="currentPermission.icon" />
-            {{ currentPermission.label }}
-            <ChevronDown />
-          </button>
+            <!-- {{ currentPermission.label }} -->
+            <!-- <ChevronDown /> -->
+          </span>
         </div>
 
         <div class="controls-right">
@@ -1296,7 +1296,7 @@ onUnmounted(() => {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 10px 12px;
+    padding: 3px 12px;
     border-top: 1px solid color-mix(in srgb, var(--color-border) 64%, transparent);
     background: color-mix(in srgb, var(--color-surface) 54%, transparent);
     border-radius: 0 0 18px 18px;
@@ -1352,17 +1352,28 @@ onUnmounted(() => {
 
 .pill-trigger,
 .context-pill {
-  height: 38px;
+  height: 30px;
   padding: 0 13px;
-  font-size: 13px;
+  font-size: 10px;
   background: color-mix(in srgb, var(--color-surface-container) 74%, transparent);
 
   span {
     color: var(--color-text-secondary);
-    font-size: 12px;
+    font-size: 10px;
+  }
+  svg {
+    width: 12px;
+    height: 12px;
   }
 }
-
+.permission-trigger {
+  padding: 0;
+  background: transparent;
+  svg {
+    width: 12px;
+    height: 12px;
+  }
+}
 .active {
   border-color: var(--vscode-focusBorder);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder) 50%, transparent);

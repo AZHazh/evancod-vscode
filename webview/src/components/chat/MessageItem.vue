@@ -221,9 +221,10 @@ async function copyMessage() {
 
     <ThinkingBlock
       v-else-if="message.type === 'thinking'"
+      :message-id="message.id"
       :content="message.content"
       :timestamp="message.timestamp"
-      :is-active="message.id === 'streaming-thinking'"
+      :is-active="message.id === chatStore.activeThinkingMessageId"
     />
 
     <AgentCard
@@ -255,6 +256,7 @@ async function copyMessage() {
 
     <ToolResultBlock
       v-else-if="message.type === 'tool_result' && message.isError"
+      :message-id="message.id"
       :content="message.content"
       :is-error="message.isError"
     />

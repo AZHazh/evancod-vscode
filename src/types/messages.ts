@@ -74,7 +74,7 @@ export type AgentServerEvent =
       updatedInput?: unknown
       rule?: 'once' | 'always'
     }
-  | { type: 'thinking'; text: string }
+  | { type: 'thinking'; text: string; blockId?: string }
   | {
       type: 'image_generation'
       /** 用于骨架→成图 upsert 的稳定 ID */

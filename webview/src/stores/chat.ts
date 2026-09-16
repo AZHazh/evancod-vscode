@@ -133,15 +133,18 @@ export const useChatStore = defineStore('chat', () => {
     }
   >()
   let ignorePermissionRequests = false
+  let stopRequested = false
   const tokenUsage = ref<TokenUsage | null>(null)
   const uiMessages = ref<UIMessage[]>([])
   const pendingOptimisticUserMessageIds = ref(new Set<string>())
   const agentTaskNotifications = ref<
     Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>
   >({})
-  // 虚拟列表可能回收消息组件，交互状态不能只保存在组件实例中。
-  const toolCallExpanded = ref<Record<string, boolean>>({})
+  // 虚拟列表会回收消息组件，所有可展开区域都按稳定 ID 保存在会话级状态中。
+  // Record 的单键读写是 O(1)，不会随流式 token 到达扫描消息数组。
+  const expandedStateById = ref<Record<string, boolean>>({})
   const openAgentResultToolUseId = ref<string | null>(null)
+  const activeThinkingMessageId = ref<string | null>(null)
   const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
   // ===== 性能优化：流式更新 rAF 批量合并 =====
@@ -331,8 +334,9 @@ export const useChatStore = defineStore('chat', () => {
     if (!currentSession.value) {
       uiMessages.value = []
       agentTaskNotifications.value = {}
-      toolCallExpanded.value = {}
+      expandedStateById.value = {}
       openAgentResultToolUseId.value = null
+      activeThinkingMessageId.value = null
       tokenUsage.value = null
       return
     }
@@ -340,8 +344,9 @@ export const useChatStore = defineStore('chat', () => {
     // 会话切换/新建时不能沿用上一个会话的运行态；同会话增量更新才保留它们。
     if (!preserveRuntime) {
       agentTaskNotifications.value = {}
-      toolCallExpanded.value = {}
+      expandedStateById.value = {}
       openAgentResultToolUseId.value = null
+      activeThinkingMessageId.value = null
       const model = currentSession.value.runtimeConfig?.model || providerStore.currentModel
       const contextWindow =
         providerStore.activeProvider?.modelContextWindows?.[model] ||
@@ -422,13 +427,17 @@ export const useChatStore = defineStore('chat', () => {
       if (isStreaming) {
         const streamingMessages = uiMessages.value.filter(
           m =>
+            (m.type === 'thinking' && m.id === activeThinkingMessageId.value) ||
             m.id === 'streaming-thinking' ||
             m.id === 'streaming-assistant' ||
             (m.type === 'tool_use' && m.isPending && m.partialInput)
         )
         // 移除 transcript 中可能存在的同类型旧消息，用流式临时消息替换
         rebuiltMessages = rebuiltMessages.filter(
-          m => m.id !== 'streaming-thinking' && m.id !== 'streaming-assistant'
+          m =>
+            m.id !== activeThinkingMessageId.value &&
+            m.id !== 'streaming-thinking' &&
+            m.id !== 'streaming-assistant'
         )
         rebuiltMessages.push(...streamingMessages)
       }
@@ -616,10 +625,14 @@ export const useChatStore = defineStore('chat', () => {
       currentSession.value.messages.push(message)
     }
 
-    syncUiMessagesFromSession()
+    syncUiMessagesFromSession(true)
   }
 
   function handleAgentEvent(event: AgentServerEvent) {
+    // 点击停止后，本轮中已经在 postMessage 队列里的迟到事件无权重新激活 UI。
+    // 下一次明确发送消息时才开启新的事件生命周期。
+    if (stopRequested) return
+
     switch (event.type) {
       case 'content_start':
         if (event.blockType === 'text') {
@@ -634,11 +647,9 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'content_delta':
         if (typeof event.text === 'string') {
-          // 首次收到最终回答时，finalize 当前 thinking 段
-          const existingAssistant = uiMessages.value.find(
-            m => m.type === 'assistant_text' && m.id === 'streaming-assistant'
-          )
-          if (!existingAssistant) {
+          // 正文到达即结束当前 thinking 段。先落地同一帧内尚未渲染的思考增量，
+          // 保证稳定 blockId 对应的内容和展开状态都完整保留。
+          if (activeThinkingMessageId.value) {
             if (thinkingBlockRaf) {
               window.cancelAnimationFrame(thinkingBlockRaf)
               thinkingBlockRaf = 0
@@ -787,6 +798,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'thinking':
         chatState.value = 'thinking'
         // 性能优化：thinking 增量高频，rAF 合并，每帧最多 upsert 一次
+        activeThinkingMessageId.value = event.blockId || 'streaming-thinking'
         scheduleThinkingBlockUpdate(event.text)
         break
 
@@ -836,6 +848,11 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'status':
+        if (event.state === 'idle' || event.state === 'stopped') {
+          flushStreamingRafs()
+          finalizeCurrentThinkingSegment()
+          finalizeCurrentAssistantSegment()
+        }
         chatState.value = event.state as any
         // 出错等导致回到 idle 时，同样兜底复位压缩状态
         if (event.state === 'idle' && compactionStatus.value === 'compacting') {
@@ -880,16 +897,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function upsertThinkingBlock(text: string) {
+    const messageId = activeThinkingMessageId.value || 'streaming-thinking'
     const len = uiMessages.value.length
     let idx = streamingThinkingIndex
     if (
       idx < 0 ||
       idx >= len ||
       uiMessages.value[idx]?.type !== 'thinking' ||
-      (uiMessages.value[idx] as any)?.id !== 'streaming-thinking'
+      (uiMessages.value[idx] as any)?.id !== messageId
     ) {
       idx = uiMessages.value.findIndex(
-        message => message.type === 'thinking' && message.id === 'streaming-thinking'
+        message => message.type === 'thinking' && message.id === messageId
       )
     }
     streamingThinkingIndex = idx
@@ -897,7 +915,7 @@ export const useChatStore = defineStore('chat', () => {
     const existing = idx === -1 ? null : uiMessages.value[idx]
     if (idx === -1) {
       uiMessages.value.push({
-        id: 'streaming-thinking',
+        id: messageId,
         type: 'thinking',
         content: text,
         timestamp: Date.now(),
@@ -912,27 +930,30 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function finalizeCurrentThinkingSegment() {
+    const activeId = activeThinkingMessageId.value
+    activeThinkingMessageId.value = null
+    streamingThinkingIndex = -1
+    if (!activeId || activeId !== 'streaming-thinking') return
+
+    // 兼容未携带 blockId 的旧协议：迁移临时 ID 及其交互状态。
     const existingIndex = uiMessages.value.findIndex(
       message => message.type === 'thinking' && message.id === 'streaming-thinking'
     )
     if (existingIndex === -1) {
-      streamingThinkingIndex = -1
       return
     }
 
     const existing = uiMessages.value[existingIndex]
     if (existing.type !== 'thinking' || !existing.content.trim()) {
-      streamingThinkingIndex = -1
       return
     }
 
-    // 给当前 thinking 段分配永久 ID，下次 thinking 事件将创建新块
+    const finalizedId = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    moveExpandedState(`thinking:${activeId}`, `thinking:${finalizedId}`)
     uiMessages.value.splice(existingIndex, 1, {
       ...existing,
-      id: `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: finalizedId,
     })
-    // 缓存失效：finalize 后 streaming-thinking 块已改名，下次需重新查找
-    streamingThinkingIndex = -1
   }
 
   function finalizeCurrentAssistantSegment() {
@@ -1263,6 +1284,7 @@ export const useChatStore = defineStore('chat', () => {
     inlineSegments: InlineMessageSegment[] = []
   ) {
     ignorePermissionRequests = false
+    stopRequested = false
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
     const isBuiltinCommand = /^\/(clear|clean|new|compact|help)(\s|$)/i.test(trimmed)
@@ -1298,6 +1320,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function stopGeneration() {
     ignorePermissionRequests = true
+    stopRequested = true
     clearAllPermissionResponseRetries()
     vscode.postMessage({
       type: 'chat.stop',
@@ -1320,6 +1343,7 @@ export const useChatStore = defineStore('chat', () => {
     streamingToolInput.value = ''
     activeToolUseId.value = null
     activeToolName.value = null
+    activeThinkingMessageId.value = null
   }
 
   function openSession(sessionId: string) {
@@ -1344,12 +1368,27 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function isToolCallExpanded(toolUseId: string, defaultValue = false) {
-    const value = toolCallExpanded.value[toolUseId]
-    return value === undefined ? defaultValue : value
+    return isExpandedState(`tool:${toolUseId}:card`, defaultValue)
   }
 
   function setToolCallExpanded(toolUseId: string, expanded: boolean) {
-    toolCallExpanded.value[toolUseId] = expanded
+    setExpandedState(`tool:${toolUseId}:card`, expanded)
+  }
+
+  function isExpandedState(stateId: string, defaultValue = false) {
+    const value = expandedStateById.value[stateId]
+    return value === undefined ? defaultValue : value
+  }
+
+  function setExpandedState(stateId: string, expanded: boolean) {
+    expandedStateById.value[stateId] = expanded
+  }
+
+  function moveExpandedState(fromStateId: string, toStateId: string) {
+    const value = expandedStateById.value[fromStateId]
+    if (value === undefined || fromStateId === toStateId) return
+    expandedStateById.value[toStateId] = value
+    delete expandedStateById.value[fromStateId]
   }
 
   function sendPermissionResponse(response: {
@@ -1456,8 +1495,9 @@ export const useChatStore = defineStore('chat', () => {
     messages,
     uiMessages,
     agentTaskNotifications,
-    toolCallExpanded,
+    expandedStateById,
     openAgentResultToolUseId,
+    activeThinkingMessageId,
     chatState,
     streamingText,
     streamingToolInput,
@@ -1475,6 +1515,8 @@ export const useChatStore = defineStore('chat', () => {
     cancelBash,
     isToolCallExpanded,
     setToolCallExpanded,
+    isExpandedState,
+    setExpandedState,
     sendPermissionResponse,
     sendInteractionResponse,
     upsertPlanApprovalMessage,

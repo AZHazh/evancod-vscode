@@ -2,9 +2,11 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer.vue'
 import { formatElapsed } from '@/utils/formatElapsed'
+import { useChatStore } from '@/stores/chat'
 
 const props = withDefaults(
   defineProps<{
+    messageId: string
     content: string
     timestamp: number
     isActive?: boolean
@@ -14,7 +16,11 @@ const props = withDefaults(
   }
 )
 
-const expanded = ref(false)
+const chatStore = useChatStore()
+const expanded = computed({
+  get: () => chatStore.isExpandedState(`thinking:${props.messageId}`),
+  set: value => chatStore.setExpandedState(`thinking:${props.messageId}`, value),
+})
 const now = ref(Date.now())
 let timer: number | null = null
 

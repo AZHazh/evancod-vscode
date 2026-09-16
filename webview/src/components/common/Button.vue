@@ -7,7 +7,11 @@
   >
     <svg v-if="loading" class="loading-spinner" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle class="spinner-track" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-      <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+      <path
+        class="spinner-path"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+      />
     </svg>
     <span v-else-if="$slots.icon || icon" class="button-icon" aria-hidden="true">
       <slot name="icon">{{ icon }}</slot>
@@ -31,11 +35,13 @@ const props = withDefaults(defineProps<Props>(), {
   variant: 'primary',
   size: 'medium',
   disabled: false,
-  loading: false
+  loading: false,
 })
 
 const slots = useSlots()
-const iconOnly = computed(() => !slots.default && (Boolean(slots.icon) || Boolean(props.icon) || props.loading))
+const iconOnly = computed(
+  () => !slots.default && (Boolean(slots.icon) || Boolean(props.icon) || props.loading)
+)
 
 const emit = defineEmits<{
   click: [event: MouseEvent]
@@ -124,9 +130,9 @@ function handleClick(event: MouseEvent) {
 }
 
 .size-medium {
-  min-height: 34px;
-  padding: 7px 14px;
-  font-size: 13px;
+  min-height: 28px;
+  padding: 5px 14px;
+  font-size: 10px;
 }
 
 .size-large {
@@ -179,8 +185,8 @@ function handleClick(event: MouseEvent) {
 }
 
 .button-icon :deep(svg) {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   stroke-width: 1.9;
 }
 

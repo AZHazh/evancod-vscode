@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { summarizeError, extractErrorText } from '@/utils/errorSummary'
+import { useChatStore } from '@/stores/chat'
 
 const props = defineProps<{
+  messageId: string
   content: unknown
   isError: boolean
 }>()
@@ -22,7 +24,11 @@ const fullText = computed(() =>
 )
 
 // 有主旨时，原始日志默认折叠（用户排查才展开）；无主旨时直接展示（截断）
-const expanded = ref(false)
+const chatStore = useChatStore()
+const expanded = computed({
+  get: () => chatStore.isExpandedState(`tool-result:${props.messageId}`),
+  set: value => chatStore.setExpandedState(`tool-result:${props.messageId}`, value),
+})
 const hasSummary = computed(() => Boolean(errorSummary.value))
 const showRaw = computed(() => !hasSummary.value || expanded.value)
 

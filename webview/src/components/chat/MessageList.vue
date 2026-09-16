@@ -135,7 +135,7 @@ const enhancedMessages = computed(() => {
 const showThinkingIndicator = computed(() => {
   // 如果消息列表中已有活跃的 thinking 块，不显示底部指示器（避免重复）
   const hasActiveThinking = enhancedMessages.value.some(
-    message => message.type === 'thinking' && message.id === 'streaming-thinking'
+    message => message.type === 'thinking' && message.id === chatStore.activeThinkingMessageId
   )
   if (hasActiveThinking) return false
 
@@ -158,7 +158,7 @@ const thinkingElapsedSeconds = computed(() =>
 const formattedThinkingElapsed = computed(() => formatElapsed(thinkingElapsedSeconds.value))
 const thinkingTokenCount = computed(() => {
   const activeThinking = enhancedMessages.value.find(
-    message => message.type === 'thinking' && message.id === 'streaming-thinking',
+    message => message.type === 'thinking' && message.id === chatStore.activeThinkingMessageId,
   )
   return activeThinking?.type === 'thinking' ? estimateTokenCount(activeThinking.content) : 0
 })

@@ -20,10 +20,13 @@ export function buildOpenAIImageUrl(baseUrl: string): string {
  * 下载远程图片并转为 base64。
  * 失败时返回 undefined（调用方决定降级）。
  */
-export async function downloadAsBase64(url: string): Promise<string | undefined> {
+export async function downloadAsBase64(
+  url: string,
+  signal?: AbortSignal
+): Promise<string | undefined> {
   try {
     console.log('[imageUtils] downloadAsBase64 start:', url.slice(0, 100))
-    const res = await fetch(url)
+    const res = await fetch(url, { signal })
     if (!res.ok) {
       console.warn('[imageUtils] downloadAsBase64 failed, status:', res.status)
       return undefined
@@ -32,6 +35,7 @@ export async function downloadAsBase64(url: string): Promise<string | undefined>
     console.log('[imageUtils] downloadAsBase64 success, size:', buf.length, 'bytes')
     return buf.toString('base64')
   } catch (err) {
+    if (signal?.aborted) throw err
     console.error('[imageUtils] downloadAsBase64 error:', err)
     return undefined
   }
