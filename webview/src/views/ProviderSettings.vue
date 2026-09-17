@@ -14,7 +14,12 @@ interface Provider {
   presetId?: string
   apiFormat: 'anthropic' | 'openai_chat' | 'openai_responses' | 'openai_image'
   runtimeKind?: 'anthropic_compatible' | 'openai_oauth'
-  authStrategy?: 'api_key' | 'auth_token' | 'auth_token_empty_api_key' | 'dual_same_token' | 'dual_dummy'
+  authStrategy?:
+    | 'api_key'
+    | 'auth_token'
+    | 'auth_token_empty_api_key'
+    | 'dual_same_token'
+    | 'dual_dummy'
   baseUrl?: string
   apiKey: string
   models: {
@@ -190,29 +195,59 @@ function handleModalClose() {
             </div>
           </div>
           <div class="provider-details">
-            <div class="detail-item"><span class="label">主模型</span><span class="value">{{ provider.models.main }}</span></div>
-            <div class="detail-item"><span class="label">Sonnet</span><span class="value">{{ provider.models.sonnet }}</span></div>
-            <div class="detail-item"><span class="label">Opus</span><span class="value">{{ provider.models.opus }}</span></div>
-            <div class="detail-item"><span class="label">Haiku</span><span class="value">{{ provider.models.haiku }}</span></div>
+            <div class="detail-item">
+              <span class="label">主模型</span><span class="value">{{ provider.models.main }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="label">Sonnet</span
+              ><span class="value">{{ provider.models.sonnet }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="label">Opus</span><span class="value">{{ provider.models.opus }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="label">Haiku</span><span class="value">{{ provider.models.haiku }}</span>
+            </div>
           </div>
         </div>
 
         <div class="provider-actions">
-          <Button v-if="provider.id !== activeProviderId" variant="primary" size="small" @click="handleActivateProvider(provider.id)">
+          <Button
+            v-if="provider.id !== activeProviderId"
+            class="privider-btn"
+            variant="secondary"
+            size="small"
+            @click="handleActivateProvider(provider.id)"
+          >
             <template #icon><Play /></template>
-            激活
+            <!-- 激活 -->
           </Button>
-          <Button variant="secondary" size="small" @click="handleTestProvider(provider.id)">
+          <Button
+            variant="secondary"
+            size="small"
+            class="privider-btn"
+            @click="handleTestProvider(provider.id)"
+          >
             <template #icon><RefreshCw /></template>
-            测试
+            <!-- 测试 -->
           </Button>
-          <Button variant="secondary" size="small" @click="handleEditProvider(provider)">
+          <Button
+            variant="secondary"
+            size="small"
+            class="privider-btn"
+            @click="handleEditProvider(provider)"
+          >
             <template #icon><Pencil /></template>
-            编辑
+            <!-- 编辑 -->
           </Button>
-          <Button variant="danger" size="small" @click="handleDeleteProvider(provider.id)">
+          <Button
+            variant="secondary"
+            size="small"
+            class="privider-btn"
+            @click="handleDeleteProvider(provider.id)"
+          >
             <template #icon><Trash2 /></template>
-            删除
+            <!-- 删除 -->
           </Button>
         </div>
       </div>
@@ -293,6 +328,7 @@ function handleModalClose() {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
+  position: relative;
 }
 
 .provider-item.is-active {
@@ -319,7 +355,9 @@ function handleModalClose() {
   gap: 8px;
   flex-wrap: wrap;
 }
-
+.title-row {
+  width: 60%;
+}
 .provider-header h3 {
   margin: 0;
   font-size: 16px;
@@ -365,9 +403,12 @@ function handleModalClose() {
 }
 
 .provider-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--spacing-sm);
+  // display: flex;
+  // flex-wrap: wrap;
+  // gap: var(--spacing-sm);
+  position: absolute;
+  top: var(--spacing-md);
+  right: var(--spacing-md);
 }
 
 .empty-state {
@@ -401,5 +442,9 @@ function handleModalClose() {
   font-size: 14px;
   line-height: 1.6;
   color: var(--color-text-primary);
+}
+.privider-btn {
+  background-color: transparent;
+  border: none;
 }
 </style>

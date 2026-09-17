@@ -348,7 +348,7 @@ watch(
   border-radius: var(--radius-xl);
   max-width: 760px;
   width: 92%;
-  max-height: 90vh;
+  max-height: 70vh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-dropdown);
