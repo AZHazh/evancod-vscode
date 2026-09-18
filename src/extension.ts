@@ -21,6 +21,13 @@ import { AgentCoordinator } from './services/agent/AgentCoordinator'
 import { MCPConnectionManager } from './services/mcp/MCPConnectionManager'
 import { SkillManager } from './services/skill/SkillManager'
 import { MemoryManager } from './services/memory/MemoryManager'
+import { VSCodeStorageAdapter } from './adapters/StorageAdapter'
+import { createBuiltinToolRegistry } from './core/tools/registry/BuiltinToolRegistry'
+import { createBuiltinAgentRegistry } from './services/agent/AgentRegistry'
+import { ToolProfileService } from './services/tools/ToolProfileService'
+import { AgentDefinitionStore } from './services/agent/AgentDefinitionStore'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { initializePerformanceLogger, performanceLog, performanceMeasure } from './utils/performanceLogger'
 
 // 使用模块级变量（而非全局变量）保存服务实例
@@ -35,6 +42,8 @@ let agentCoordinator: AgentCoordinator
 let mcpManager: MCPConnectionManager
 let skillManager: SkillManager
 let memoryManager: MemoryManager
+let toolProfileService: ToolProfileService
+let agentDefinitionStore: AgentDefinitionStore
 
 /**
  * 插件激活入口
@@ -119,8 +128,22 @@ export async function activate(context: vscode.ExtensionContext) {
     providerService = new ProviderService(context)
     taskManager = new TaskManager(context)
     planModeManager = new PlanModeManager(context)
-    agentCoordinator = new AgentCoordinator(context)
-    mcpManager = new MCPConnectionManager(context)
+    const toolRegistry = createBuiltinToolRegistry()
+    toolProfileService = new ToolProfileService(new VSCodeStorageAdapter(context), toolRegistry)
+    const agentRegistry = createBuiltinAgentRegistry()
+    agentDefinitionStore = new AgentDefinitionStore(
+      agentRegistry,
+      path.join(os.homedir(), '.evancod', 'agents'),
+      vscode.workspace.workspaceFolders?.[0]
+        ? path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.evancod', 'agents')
+        : undefined
+    )
+    await performanceMeasure('startup.agentRegistry.load', () => agentDefinitionStore.initialize())
+    agentCoordinator = new AgentCoordinator(context, {
+      agentRegistry,
+      toolProfileService,
+    })
+    mcpManager = new MCPConnectionManager(context, toolRegistry)
     skillManager = new SkillManager(context)
     memoryManager = new MemoryManager(context)
     await performanceMeasure('startup.provider.initialize', () => providerService.initialize())
@@ -135,7 +158,8 @@ export async function activate(context: vscode.ExtensionContext) {
       agentCoordinator,
       mcpManager,
       skillManager,
-      memoryManager
+      memoryManager,
+      toolProfileService
     )
     await performanceMeasure('startup.chat.initialize', () => chatService.initialize())
 
@@ -146,7 +170,9 @@ export async function activate(context: vscode.ExtensionContext) {
       providerService,
       taskManager,
       planModeManager,
-      agentCoordinator
+      agentCoordinator,
+      toolProfileService,
+      agentDefinitionStore
     )
 
     context.subscriptions.push(

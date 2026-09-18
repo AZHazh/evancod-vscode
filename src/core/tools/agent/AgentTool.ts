@@ -68,9 +68,13 @@ export class AgentTool extends Tool {
    * @returns Anthropic 工具定义
    */
   getDefinition(): ToolDefinition {
+    const definitions = this.coordinator.listAgentDefinitions()
+    const definitionSummary = definitions
+      .map(definition => `${definition.id}（${definition.name}：${definition.description}）`)
+      .join('；')
     return {
       name: this.name,
-      description: this.description,
+      description: `${this.description}\n可用 Agent：${definitionSummary}`,
       input_schema: {
         type: 'object',
         properties: {
@@ -86,16 +90,13 @@ export class AgentTool extends Tool {
           },
           subagent_type: {
             type: 'string',
-            description: `子 Agent 类型：
-- explore: 探索型 Agent，用于查找文件、理解代码库结构。
-- analyze: 分析型 Agent，用于深入分析代码、依赖关系。
-- research: 研究型 Agent，用于查找文档、最佳实践。`,
-            enum: ['explore', 'analyze', 'research']
+            description: '已启用的子 Agent 定义 ID。',
+            enum: definitions.map(definition => definition.id)
           },
           type: {
             type: 'string',
             description: '兼容旧字段。等同于 subagent_type。',
-            enum: ['explore', 'analyze', 'research']
+            enum: definitions.map(definition => definition.id)
           },
           model: {
             type: 'string',
@@ -154,10 +155,10 @@ export class AgentTool extends Tool {
   }, context?: { toolUseId?: string }): Promise<ToolResult> {
     try {
       const agentType = args.subagent_type || args.type || 'explore'
+      const definition = this.coordinator.getAgentDefinition(agentType)
 
-      const validTypes: AgentType[] = ['explore', 'analyze', 'research']
-      if (!validTypes.includes(agentType)) {
-        return this.createErrorResult(`无效的 subagent_type: ${agentType}，必须是 explore, analyze 或 research`)
+      if (!definition?.enabled) {
+        return this.createErrorResult(`无效或未启用的 subagent_type: ${agentType}`)
       }
 
       if (!args.description || args.description.trim().length === 0) {
@@ -168,8 +169,10 @@ export class AgentTool extends Tool {
         return this.createErrorResult('prompt 不能为空')
       }
 
-      const mode: ExecutionMode = args.run_in_background ? 'background' : args.mode || 'foreground'
-      const isolation = args.isolation || 'none'
+      const mode: ExecutionMode = args.run_in_background
+        ? 'background'
+        : args.mode || definition.defaultMode || 'foreground'
+      const isolation = args.isolation || definition.isolation
       const validModes: ExecutionMode[] = ['foreground', 'background']
       if (!validModes.includes(mode)) {
         return this.createErrorResult(`无效的 mode: ${mode}，必须是 foreground 或 background`)
@@ -218,15 +221,24 @@ ${result.success ? result.summary : result.error}
 
 ${result.fullOutput && result.summary !== result.fullOutput.trim() ? '提示: 以上是面向主 Agent 的语义摘要，完整输出已单独保存并可在 Agent 详情中查看。' : ''}`
 
-        return this.createSuccessResult(content, {
+        const metadata = {
           agentId: result.id,
           type: agentType,
           mode: 'foreground',
           isolation,
           success: result.success,
           summary: result.summary,
-          duration: result.duration
-        })
+          duration: result.duration,
+        }
+        if (!result.success) {
+          return {
+            success: false,
+            error: `${content}\n\n用户明确指定该 Agent 时，不得由主 Agent 自行替代执行；应说明失败原因并询问是否重试。`,
+            metadata,
+          }
+        }
+
+        return this.createSuccessResult(content, metadata)
       } else {
         // 后台模式：返回 Agent ID
         if (typeof result !== 'string') {
@@ -266,7 +278,7 @@ Agent ID: ${result}
    * @returns 图标
    */
   private getTypeIcon(type: AgentType): string {
-    const icons: Record<AgentType, string> = {
+    const icons: Record<string, string> = {
       explore: '🔍',
       analyze: '🔬',
       research: '📚'

@@ -9,16 +9,18 @@ import ChatInput from '@/components/input/ChatInput.vue'
 import TaskPanel from '@/components/task/TaskPanel.vue'
 import Modal from '@/components/common/Modal.vue'
 import NewApiSyncModal from '@/components/provider/NewApiSyncModal.vue'
-import ProviderSettings from './ProviderSettings.vue'
+import SettingsView from './SettingsView.vue'
 import { useProviderStore } from '@/stores/provider'
 import { useVSCode } from '@/composables/useVSCode'
+import type { SettingsSection } from '@/components/settings/SettingsMenu.vue'
 
 const chatStore = useChatStore()
 const taskStore = useTaskStore()
 const providerStore = useProviderStore()
 const vscode = useVSCode()
 const showNewApiSyncModal = ref(false)
-const showProviderSettings = ref(false)
+const showSettings = ref(false)
+const settingsSection = ref<SettingsSection>('providers')
 const taskPanelDismissed = ref(false)
 const newApiPreview = ref<any>(null)
 
@@ -30,9 +32,15 @@ function handleSyncNewApi() {
   vscode.postMessage({ type: 'newapi.sync.start' })
 }
 
-function handleOpenProviders() {
+function handleOpenSettings() {
   providerStore.loadProviders()
-  showProviderSettings.value = true
+  settingsSection.value = 'providers'
+  showSettings.value = true
+}
+
+function openAgentWizard() {
+  settingsSection.value = 'create-agent'
+  showSettings.value = true
 }
 
 function handleUiMessage(event: MessageEvent) {
@@ -40,6 +48,8 @@ function handleUiMessage(event: MessageEvent) {
   if (message.type === 'newapi.sync.preview') {
     newApiPreview.value = message.data
     showNewApiSyncModal.value = true
+  } else if (message.type === 'settings.open' && message.data?.section === 'create-agent') {
+    openAgentWizard()
   }
 }
 
@@ -52,18 +62,20 @@ onMounted(() => {
   chatStore.initialize()
   providerStore.initialize()
   window.addEventListener('message', handleUiMessage)
+  window.addEventListener('evancod:open-agent-wizard', openAgentWizard)
   // 请求初始任务列表
   taskStore.fetchTasks()
 })
 
 onUnmounted(() => {
   window.removeEventListener('message', handleUiMessage)
+  window.removeEventListener('evancod:open-agent-wizard', openAgentWizard)
 })
 </script>
 
 <template>
   <div class="chat-view">
-    <TopBar @sync-new-api="handleSyncNewApi" @open-providers="handleOpenProviders" />
+    <TopBar @sync-new-api="handleSyncNewApi" @open-settings="handleOpenSettings" />
     <MessageList />
 
     <!-- Task 面板（对话区内，输入框上方，可关闭） -->
@@ -72,8 +84,8 @@ onUnmounted(() => {
     <CompactionStatus />
     <ChatInput />
 
-    <Modal v-model="showProviderSettings" title="服务商管理" size="large" :show-footer="false">
-      <ProviderSettings />
+    <Modal v-model="showSettings" title="设置" size="large" :show-footer="false">
+      <SettingsView :initial-section="settingsSection" />
     </Modal>
 
     <NewApiSyncModal

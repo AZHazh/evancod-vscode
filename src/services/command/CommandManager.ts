@@ -272,6 +272,18 @@ export class CommandManager {
       }),
     })
 
+    this.register({
+      name: 'create-agent',
+      description: '打开自定义子 Agent 创建向导',
+      usage: '/create-agent',
+      execute: async () => ({
+        success: true,
+        message: '',
+        sendToAI: false,
+        metadata: { action: 'create-agent' },
+      }),
+    })
+
     // /init 命令
     this.register({
       name: 'init',

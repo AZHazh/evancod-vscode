@@ -37,6 +37,14 @@ import type { PlanModeManager } from '../plan/PlanModeManager'
 import type { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import type { SkillManager } from '../skill/SkillManager'
 import type { MemoryManager } from '../memory/MemoryManager'
+import {
+  createBuiltinAgentRegistry,
+  type AgentDefinition,
+  type AgentRegistry,
+} from './AgentRegistry'
+import { createBuiltinToolRegistry } from '../../core/tools/registry/BuiltinToolRegistry'
+import { RuntimeProfileResolver } from '../../core/engine/RuntimeProfileResolver'
+import type { ToolProfileService } from '../tools/ToolProfileService'
 
 // 前向声明，避免循环依赖
 interface IWebviewManager {
@@ -48,7 +56,7 @@ interface IWebviewManager {
 /**
  * 子 Agent 类型
  */
-export type AgentType = 'explore' | 'analyze' | 'research'
+export type AgentType = string
 
 /**
  * 子 Agent 执行模式
@@ -141,7 +149,8 @@ interface RunningAgent {
 }
 
 export class AgentCoordinator {
-  private static readonly AGENT_TIMEOUT_MS = 10 * 60 * 1000
+  private static readonly AGENT_MAX_RUNTIME_MS = 30 * 60 * 1000
+  private static readonly AGENT_INACTIVITY_TIMEOUT_MS = 6 * 60 * 1000
   /** 运行中的 Agent 列表 */
   private runningAgents: Map<string, RunningAgent> = new Map()
 
@@ -154,6 +163,8 @@ export class AgentCoordinator {
   private readonly taskStore: LocalAgentTaskStore
   private readonly taskNotificationQueue = new TaskNotificationQueue()
   private readonly worktreeManager = new AgentWorktreeManager()
+  private readonly agentRegistry: AgentRegistry
+  private readonly toolProfileService?: ToolProfileService
   private readonly permissionRequests = new Map<
     string,
     { agentId: string; engine: QueryEngine }
@@ -177,8 +188,16 @@ export class AgentCoordinator {
    *
    * @param context - VSCode Extension Context
    */
-  constructor(private context: vscode.ExtensionContext) {
+  constructor(
+    private context: vscode.ExtensionContext,
+    options?: {
+      agentRegistry?: AgentRegistry
+      toolProfileService?: ToolProfileService
+    }
+  ) {
     this.taskStore = new LocalAgentTaskStore(context)
+    this.agentRegistry = options?.agentRegistry || createBuiltinAgentRegistry()
+    this.toolProfileService = options?.toolProfileService
   }
 
   /**
@@ -236,24 +255,37 @@ export class AgentCoordinator {
    * @returns 子 Agent 结果（前台模式）或 Agent ID（后台模式）
    */
   async startAgent(config: SubAgentConfig): Promise<SubAgentResult | string> {
+    const definition = this.agentRegistry.get(config.type)
+    if (!definition) throw new Error(`未找到 Agent 定义: ${config.type}`)
+    if (!definition.enabled) throw new Error(`Agent 已禁用: ${config.type}`)
+
     const worktree = config.isolation === 'worktree'
       ? await this.worktreeManager.prepare({ agentId: config.id, cwd: config.cwd })
       : undefined
     const effectiveCwd = worktree?.worktreePath || config.cwd
 
+    const runtimeProfile = this.toolProfileService
+      ? this.toolProfileService.resolve(definition)
+      : new RuntimeProfileResolver(createBuiltinToolRegistry()).resolve({ agent: definition })
+    for (const warning of runtimeProfile.warnings) {
+      console.warn(`[AgentCoordinator] ${warning}`)
+    }
+
     // 创建 QueryEngine
     const engineConfig: QueryEngineConfig = {
       cwd: effectiveCwd,
       provider: config.provider,
-      model: config.model,
+      model: definition.model || config.model,
       messages: [],
       verbose: config.verbose || false,
-      // explore/analyze/research 子 Agent 是只读调查者，不能接管主任务或递归派生 Agent。
       skillManager: this.sharedServices?.skillManager,
       memoryManager: this.sharedServices?.memoryManager,
-      permissionMode: 'default',
-      readOnly: true,
-      maxIterations: 30,
+      permissionMode: this.getEffectivePermissionMode(definition.permissionMode),
+      readOnly: definition.readOnly,
+      effortLevel: definition.effortLevel,
+      maxIterations: definition.maxIterations,
+      toolSnapshot: runtimeProfile.toolSnapshot,
+      systemPrompt: this.buildSystemPrompt(definition, config.description),
     }
 
     const engine = new QueryEngine(engineConfig)
@@ -275,6 +307,7 @@ export class AgentCoordinator {
       updatedAt: startedAt,
     })
 
+    const activity = { touch: () => undefined }
     const emitSubAgentEvent = async (event: AgentServerEvent) => {
       await this.taskStore.appendTranscript(config.id, {
         timestamp: new Date().toISOString(),
@@ -282,6 +315,7 @@ export class AgentCoordinator {
       })
     }
     engine.onAgentEvent(event => {
+      activity.touch()
       void emitSubAgentEvent(event)
       if (event.type === 'permission_request') {
         this.permissionRequests.set(event.requestId, { agentId: config.id, engine })
@@ -313,7 +347,7 @@ export class AgentCoordinator {
     })
 
     // 创建执行 Promise
-    const promise = this.executeAgent(config, engine, startTime)
+    const promise = this.executeAgent(config, engine, startTime, activity)
 
     // 保存到运行中列表
     const runningAgent: RunningAgent = {
@@ -369,17 +403,38 @@ export class AgentCoordinator {
   private async executeAgent(
     config: SubAgentConfig,
     engine: QueryEngine,
-    startTime: number
+    startTime: number,
+    activity: { touch: () => void }
   ): Promise<SubAgentResult> {
-    const timeout = setTimeout(() => {
-      engine.cancel(`子 Agent 执行超过 ${AgentCoordinator.AGENT_TIMEOUT_MS / 60_000} 分钟，已自动停止`)
-    }, AgentCoordinator.AGENT_TIMEOUT_MS)
+    let timeoutReason: string | undefined
+    let inactivityTimeout: NodeJS.Timeout | undefined
+    const cancelForTimeout = (reason: string) => {
+      timeoutReason = reason
+      engine.cancel(reason)
+    }
+    const resetInactivityTimeout = () => {
+      clearTimeout(inactivityTimeout)
+      inactivityTimeout = setTimeout(
+        () =>
+          cancelForTimeout(
+            `子 Agent 连续 ${AgentCoordinator.AGENT_INACTIVITY_TIMEOUT_MS / 60_000} 分钟没有活动，已自动停止`
+          ),
+        AgentCoordinator.AGENT_INACTIVITY_TIMEOUT_MS
+      )
+    }
+    activity.touch = resetInactivityTimeout
+    resetInactivityTimeout()
+    const runtimeTimeout = setTimeout(
+      () =>
+        cancelForTimeout(
+          `子 Agent 执行超过 ${AgentCoordinator.AGENT_MAX_RUNTIME_MS / 60_000} 分钟，已自动停止`
+        ),
+      AgentCoordinator.AGENT_MAX_RUNTIME_MS
+    )
     try {
-      // 构造系统提示词
-      const systemPrompt = this.buildSystemPrompt(config.type, config.description)
-
       // 执行查询
-      const message = await engine.query(`${systemPrompt}\n\n${config.prompt}`, [])
+      const message = await engine.query(config.prompt, [])
+      resetInactivityTimeout()
 
       // 为主 Agent 生成一份保留结论与证据的语义摘要。完整输出仍单独保存，
       // 避免为了节省上下文而把关键结论简单截掉，导致主 Agent 重复调查。
@@ -395,6 +450,15 @@ export class AgentCoordinator {
       }
     } catch (error) {
       const duration = Date.now() - startTime
+      if (timeoutReason) {
+        return {
+          id: config.id,
+          success: false,
+          summary: 'Agent 执行超时',
+          error: timeoutReason,
+          duration,
+        }
+      }
       if (error instanceof QueryCancelledError || engine.isCancelled()) {
         return {
           id: config.id,
@@ -414,8 +478,22 @@ export class AgentCoordinator {
         duration
       }
     } finally {
-      clearTimeout(timeout)
+      activity.touch = () => undefined
+      clearTimeout(inactivityTimeout)
+      clearTimeout(runtimeTimeout)
     }
+  }
+
+  listAgentDefinitions(): readonly Readonly<AgentDefinition>[] {
+    return this.agentRegistry.list()
+  }
+
+  hasAgentDefinition(id: string): boolean {
+    return Boolean(this.agentRegistry.get(id)?.enabled)
+  }
+
+  getAgentDefinition(id: string): Readonly<AgentDefinition> | undefined {
+    return this.agentRegistry.get(id)
   }
 
   private async finalizeAgent(config: SubAgentConfig, result: SubAgentResult): Promise<void> {
@@ -641,31 +719,33 @@ export class AgentCoordinator {
    * @param description - Agent 描述
    * @returns 系统提示词
    */
-  private buildSystemPrompt(type: AgentType, description: string): string {
-    const basePrompt = `你是一个专门的子 Agent，负责执行特定的任务。\n\n任务描述：${description}\n\n`
+  private buildSystemPrompt(
+    definition: Readonly<AgentDefinition>,
+    description: string
+  ): string {
+    const basePrompt = `你是一个专门的子 Agent，负责执行特定的任务。
 
-    const typePrompts: Record<AgentType, string> = {
-      explore: `你的角色是探索型 Agent。
-- 使用文件搜索工具（glob、grep、find）查找相关文件
-- 使用文件读取工具（read_file）查看文件内容
-- 分析代码库结构和组织方式
-- 找出关键文件和模块
-- 总结发现的内容`,
+任务描述：${description}
 
-      analyze: `你的角色是分析型 Agent。
-- 使用代码分析工具（analyze_ast、analyze_dependencies）分析代码
-- 理解代码结构、依赖关系、设计模式
-- 识别潜在问题和改进点
-- 提供分析报告`,
+执行约束：
+- 信息足以回答后立即给出最终结果，不要继续扩大调查范围。
+- 工具已完整返回某个文件时，不要为了重新定位内容而分段重复读取该文件。
+- 只有工具结果明确标记为截断时，才继续读取缺失部分。
+- 遇到模型或工具异常时基于已有证据收尾，不要无限重试。
 
-      research: `你的角色是研究型 Agent。
-- 查找相关文档和最佳实践
-- 理解技术概念和实现方式
-- 提供建议和指导
-- 总结研究发现`
+`
+    return basePrompt + definition.systemPrompt
+  }
+
+  private getEffectivePermissionMode(agentMode: PermissionMode): PermissionMode {
+    const sessionMode = this.sharedServices?.getPermissionMode?.() || 'default'
+    const rank: Record<PermissionMode, number> = {
+      plan: 0,
+      default: 1,
+      acceptEdits: 2,
+      bypassPermissions: 3,
     }
-
-    return basePrompt + typePrompts[type]
+    return rank[agentMode] <= rank[sessionMode] ? agentMode : sessionMode
   }
 
   /**

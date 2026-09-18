@@ -32,6 +32,13 @@ import {
   PermissionResponseCache,
   type PermissionResponseData,
 } from './PermissionResponseCache'
+import type { ToolProfileScope, ToolProfileService } from '../tools/ToolProfileService'
+import type {
+  AgentDefinitionInput,
+  AgentDefinitionScope,
+  AgentDefinitionStore,
+} from '../agent/AgentDefinitionStore'
+import { createApiClient } from '../../core/services/api'
 
 /**
  * 会改变"当前激活 Provider 快照"的消息类型。
@@ -94,7 +101,9 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     private providerService: ProviderService,
     private taskManager?: TaskManager,
     private planModeManager?: PlanModeManager,
-    private agentCoordinator?: AgentCoordinator
+    private agentCoordinator?: AgentCoordinator,
+    private toolProfileService?: ToolProfileService,
+    private agentDefinitionStore?: AgentDefinitionStore
   ) {}
 
   /**
@@ -246,6 +255,15 @@ export class WebviewManager implements vscode.WebviewViewProvider {
           }
 
           case 'chat.send': {
+            if (
+              typeof message.data?.content === 'string' &&
+              /^\/(?:create-agent|create\s+agent|creat\s+agent)$/i.test(
+                message.data.content.trim()
+              )
+            ) {
+              this.postMessage({ type: 'settings.open', data: { section: 'create-agent' } })
+              break
+            }
             // 处理用户发送消息
             const requestSessionId = this.chatService.getCurrentSession()?.id
             try {
@@ -309,6 +327,59 @@ export class WebviewManager implements vscode.WebviewViewProvider {
           case 'runtime.reset':
             this.chatService.resetRuntime()
             this.postRuntimeState()
+            break
+
+          case 'tools.registry.list.request':
+          case 'tool-preferences.load.request':
+            this.postToolProfileState(message.data?.scope)
+            break
+
+          case 'tool-preferences.save.request':
+            await this.handleToolProfileSave(message.data)
+            break
+
+          case 'tool-preferences.reset.request':
+            await this.handleToolProfileReset(message.data?.scope)
+            break
+
+          case 'agent.registry.list.request':
+            this.postAgentDefinitions()
+            break
+
+          case 'agent.definition.validate.request':
+            this.handleAgentDefinitionValidate(message.data)
+            break
+
+          case 'agent.draft.generate.request':
+            await this.handleAgentDraftGenerate(message.data)
+            break
+
+          case 'agent.definition.save.request':
+            await this.handleAgentDefinitionSave(message.data)
+            break
+
+          case 'agent.definition.delete.request':
+            await this.handleAgentDefinitionDelete(message.data)
+            break
+
+          case 'mcp.servers.list.request':
+            this.postMcpServers()
+            break
+
+          case 'mcp.server.refresh.request':
+            await this.handleMcpRefresh(message.data?.name)
+            break
+
+          case 'mcp.server.save.request':
+            await this.handleMcpSave(message.data)
+            break
+
+          case 'mcp.server.enable.request':
+            await this.handleMcpEnable(message.data)
+            break
+
+          case 'mcp.server.delete.request':
+            await this.handleMcpDelete(message.data?.name)
             break
 
           case 'file.pick':
@@ -521,6 +592,255 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       flushPending()
       this.sendAgentEvent(event)
     })
+  }
+
+  private postToolProfileState(scope: unknown): void {
+    if (!this.toolProfileService) return
+    const selectedScope: ToolProfileScope = scope === 'global' ? 'global' : 'workspace'
+    this.postMessage({
+      type: 'tool-preferences.state',
+      data: this.toolProfileService.getState(selectedScope),
+    })
+  }
+
+  private async handleToolProfileSave(data: {
+    scope?: unknown
+    enabledTools?: unknown
+  }): Promise<void> {
+    if (!this.toolProfileService) return
+    const scope: ToolProfileScope = data?.scope === 'global' ? 'global' : 'workspace'
+    if (!Array.isArray(data?.enabledTools) || !data.enabledTools.every(id => typeof id === 'string')) {
+      this.postMessage({
+        type: 'tool-preferences.error',
+        data: { message: '工具偏好格式无效' },
+      })
+      return
+    }
+
+    const state = await this.toolProfileService.save(scope, data.enabledTools)
+    this.chatService.invalidateEngine()
+    this.postMessage({ type: 'tool-preferences.state', data: state })
+    this.postMessage({
+      type: 'tool-preferences.saved',
+      data: { scope, message: '工具偏好已保存，将从下一次请求开始生效' },
+    })
+  }
+
+  private async handleToolProfileReset(scopeValue: unknown): Promise<void> {
+    if (!this.toolProfileService) return
+    const scope: ToolProfileScope = scopeValue === 'global' ? 'global' : 'workspace'
+    const state = await this.toolProfileService.reset(scope)
+    this.chatService.invalidateEngine()
+    this.postMessage({ type: 'tool-preferences.state', data: state })
+    this.postMessage({
+      type: 'tool-preferences.saved',
+      data: { scope, message: '已恢复该范围的默认工具偏好' },
+    })
+  }
+
+  private postAgentDefinitions(): void {
+    this.postMessage({
+      type: 'agent.registry.list.response',
+      data: {
+        definitions: this.agentDefinitionStore?.list() || [],
+        warnings: this.agentDefinitionStore?.getWarnings() || [],
+      },
+    })
+  }
+
+  private handleAgentDefinitionValidate(data: {
+    definition?: AgentDefinitionInput
+    scope?: AgentDefinitionScope
+  }): void {
+    if (!this.agentDefinitionStore || !data?.definition) return
+    const source = data.scope === 'workspace' ? 'workspace' : 'global'
+    this.postMessage({
+      type: 'agent.definition.validate.response',
+      data: this.agentDefinitionStore.validate(data.definition, source),
+    })
+  }
+
+  private async handleAgentDraftGenerate(data: { answers?: Record<string, unknown> }): Promise<void> {
+    const provider = this.providerService.getActiveProvider()
+    if (!provider) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: { message: '请先配置并激活服务商' },
+      })
+      return
+    }
+
+    try {
+      const answers = data?.answers || {}
+      const model =
+        typeof answers.model === 'string' && answers.model.trim()
+          ? answers.model.trim()
+          : provider.models.main
+      const client = createApiClient({
+        provider,
+        model,
+        maxTokens: 1800,
+        temperature: 0.2,
+        effortLevel: 'low',
+        systemPrompt: `你负责把用户填写的子 Agent 向导整理为 JSON 草稿。
+只输出一个 JSON 对象，不使用 Markdown。仅输出 id、name、description、systemPrompt 四个字段。
+id 必须是小写字母、数字、点、下划线或连字符，且以字母或数字开头。
+systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求和约束，不得声明绕过权限。`,
+      })
+      const output = await client.sendMessage([
+        {
+          id: `agent-draft-${Date.now()}`,
+          role: 'user',
+          content: JSON.stringify(answers, null, 2),
+          timestamp: Date.now(),
+        },
+      ])
+      const match = output.match(/\{[\s\S]*\}/)
+      if (!match) throw new Error('模型未返回有效 JSON 草稿')
+      const draft = JSON.parse(match[0]) as Record<string, unknown>
+      this.postMessage({ type: 'agent.draft.generate.response', data: { draft } })
+    } catch (error) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
+  }
+
+  private async handleAgentDefinitionSave(data: {
+    definition?: AgentDefinitionInput
+    scope?: AgentDefinitionScope
+    requestId?: string
+  }): Promise<void> {
+    if (!this.agentDefinitionStore) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: {
+          message: 'Agent 定义存储服务尚未初始化',
+          requestId: data?.requestId,
+          operation: 'save',
+        },
+      })
+      return
+    }
+    if (!data?.definition) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: {
+          message: '保存请求缺少 Agent 定义',
+          requestId: data?.requestId,
+          operation: 'save',
+        },
+      })
+      return
+    }
+    try {
+      const scope = data.scope === 'workspace' ? 'workspace' : 'global'
+      const definition = await this.agentDefinitionStore.save(data.definition, scope)
+      this.postMessage({
+        type: 'agent.definition.save.response',
+        data: { definition, requestId: data.requestId },
+      })
+      this.postAgentDefinitions()
+    } catch (error) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: {
+          message: error instanceof Error ? error.message : String(error),
+          requestId: data.requestId,
+          operation: 'save',
+        },
+      })
+    }
+  }
+
+  private async handleAgentDefinitionDelete(data: {
+    id?: string
+    scope?: AgentDefinitionScope
+  }): Promise<void> {
+    if (!this.agentDefinitionStore || !data?.id) return
+    try {
+      const scope = data.scope === 'workspace' ? 'workspace' : 'global'
+      await this.agentDefinitionStore.delete(data.id, scope)
+      this.postMessage({ type: 'agent.definition.delete.response', data: { id: data.id, scope } })
+      this.postAgentDefinitions()
+    } catch (error) {
+      this.postMessage({
+        type: 'agent.definition.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
+  }
+
+  private postMcpServers(): void {
+    const servers = this.chatService.getMcpManager().getServerInfoList().map(server => ({
+      ...server,
+      config: {
+        ...server.config,
+        env: server.config.env
+          ? Object.fromEntries(Object.keys(server.config.env).map(key => [key, '********']))
+          : undefined,
+      },
+    }))
+    this.postMessage({
+      type: 'mcp.servers.list.response',
+      data: { servers, configError: this.chatService.getMcpManager().getConfigError() },
+    })
+  }
+
+  private async handleMcpRefresh(name: unknown): Promise<void> {
+    if (typeof name !== 'string') return
+    try {
+      await this.chatService.getMcpManager().refreshServer(name)
+      this.chatService.invalidateEngine()
+      this.postMcpServers()
+    } catch (error) {
+      this.postMessage({
+        type: 'mcp.server.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
+  }
+
+  private async handleMcpSave(data: any): Promise<void> {
+    try {
+      await this.chatService.getMcpManager().saveServer(data)
+      this.chatService.invalidateEngine()
+      this.postMcpServers()
+    } catch (error) {
+      this.postMessage({
+        type: 'mcp.server.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
+  }
+
+  private async handleMcpEnable(data: { name?: unknown; enabled?: unknown }): Promise<void> {
+    if (typeof data?.name !== 'string' || typeof data.enabled !== 'boolean') return
+    try {
+      await this.chatService.getMcpManager().setServerEnabled(data.name, data.enabled)
+      this.chatService.invalidateEngine()
+      this.postMcpServers()
+    } catch (error) {
+      this.postMessage({
+        type: 'mcp.server.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
+  }
+
+  private async handleMcpDelete(name: unknown): Promise<void> {
+    if (typeof name !== 'string') return
+    try {
+      await this.chatService.getMcpManager().deleteServer(name)
+      this.chatService.invalidateEngine()
+      this.postMcpServers()
+    } catch (error) {
+      this.postMessage({
+        type: 'mcp.server.error',
+        data: { message: error instanceof Error ? error.message : String(error) },
+      })
+    }
   }
 
   /**

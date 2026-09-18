@@ -39,6 +39,10 @@ const agentDescription = computed(() => {
   return props.description || (inputRecord.value?.description as string) || '执行子任务'
 })
 
+const agentType = computed(() => {
+  return (inputRecord.value?.subagent_type || inputRecord.value?.type || 'explore') as string
+})
+
 const agentPrompt = computed(() => {
   return (inputRecord.value?.prompt as string) || ''
 })
@@ -140,6 +144,7 @@ const enhancedChildToolCalls = computed(() => {
         <div class="agent-card__info">
           <div class="agent-card__title">
             <span class="agent-card__label">Agent</span>
+            <code class="agent-card__type">{{ agentType }}</code>
             <span class="agent-card__name">{{ agentDescription }}</span>
           </div>
           <div class="agent-card__subtitle">
@@ -358,7 +363,21 @@ const enhancedChildToolCalls = computed(() => {
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
+}
+
+.agent-card__type {
+  overflow: hidden;
+  max-width: 120px;
+  padding: 2px 5px;
+  border: 1px solid var(--chat-color-border);
+  border-radius: 4px;
+  color: var(--chat-color-text-secondary);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-card__name {

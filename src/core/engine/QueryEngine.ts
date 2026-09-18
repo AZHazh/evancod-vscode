@@ -47,35 +47,7 @@ import {
 import { closeDanglingToolCalls as repairDanglingToolCalls } from '../services/api/toolMessageSanitizer'
 import { compactConversation } from '../../services/compact/compact'
 import { shouldAutoCompact } from '../../services/compact/autoCompact'
-import {
-  Tool,
-  FileReadTool,
-  FileEditTool,
-  FileWriteTool,
-  GlobTool,
-  GrepTool,
-  BashTool,
-  ListDirectoryTool,
-  FindTool,
-  CopyFileTool,
-  MoveFileTool,
-  DeleteFileTool,
-  TaskCreateTool,
-  TaskUpdateTool,
-  TaskListTool,
-  TaskGetTool,
-  EnterPlanModeTool,
-  ExitPlanModeTool,
-  AskUserQuestionTool,
-  AgentTool,
-  LSPTool,
-  WebFetchTool,
-  WebSearchTool,
-  NotebookEditTool,
-  MCPTool,
-  SkillTool,
-  ImageGenTool,
-} from '../tools'
+import { Tool, BashTool } from '../tools'
 import { VSCodeFileSystemAdapter } from '../../adapters/FileSystemAdapter'
 import { MCPConnectionManager } from '../../services/mcp/MCPConnectionManager'
 import { SkillManager } from '../../services/skill/SkillManager'
@@ -88,6 +60,10 @@ import {
   isSuccessfulTermination,
   type QueryTerminationReason,
 } from './termination'
+import { createBuiltinToolRegistry } from '../tools/registry/BuiltinToolRegistry'
+import type { ToolRegistrySnapshot } from '../tools/registry/ToolRegistry'
+import type { ToolCapability, ToolSource } from '../tools/registry/ToolRegistry'
+import { RuntimeProfileResolver } from './RuntimeProfileResolver'
 
 /**
  * QueryEngine 配置
@@ -169,6 +145,12 @@ export interface QueryEngineConfig {
 
   /** 子 Agent 只读执行时仅保留读取、搜索和分析工具。 */
   readOnly?: boolean
+
+  /** 本次运行固定使用的工具注册快照。未提供时启用全部可用内置工具。 */
+  toolSnapshot?: ToolRegistrySnapshot
+
+  /** 追加到 Evancod 基础系统提示词后的角色或运行约束。 */
+  systemPrompt?: string
 
   /**
    * 推理程度（可选）
@@ -286,6 +268,10 @@ export class QueryEngine {
    * Phase 2 Week 3: 工具系统
    */
   private tools: Tool[] = []
+  private toolPolicies = new Map<
+    string,
+    { capabilities: readonly ToolCapability[]; source: ToolSource }
+  >()
 
   /**
    * 文件系统适配器
@@ -428,107 +414,40 @@ export class QueryEngine {
    * Phase 6.5: 添加 LSP、Web、Notebook 工具
    */
   private initializeTools() {
-    // 初始化文件系统适配器
     this.fs = new VSCodeFileSystemAdapter()
-    this.bashTool = new BashTool(this.config.cwd)
-
-    // 初始化所有工具
-    this.tools = [
-      // 基础文件操作（Phase 2 Week 3）
-      new FileReadTool(this.config.cwd, this.fs),
-      new FileEditTool(this.config.cwd, this.fs),
-      new FileWriteTool(this.config.cwd, this.fs),
-
-      // 搜索工具（Phase 2 Week 3）
-      new GlobTool(this.config.cwd, this.fs),
-      new GrepTool(this.config.cwd, this.fs),
-
-      // 命令执行（Phase 2 Week 3）
-      this.bashTool,
-
-      // 高级文件操作（Phase 4 Week 1）
-      new ListDirectoryTool(this.config.cwd, this.fs),
-      new FindTool(this.config.cwd, this.fs),
-      new CopyFileTool(this.config.cwd, this.fs),
-      new MoveFileTool(this.config.cwd, this.fs),
-      new DeleteFileTool(this.config.cwd, this.fs),
-
-      // LSP 工具（Phase 6.5）
-      new LSPTool(),
-
-      // Web 工具（Phase 6.5）
-      new WebFetchTool(),
-      new WebSearchTool(),
-
-      // Notebook 工具（Phase 6.5）
-      new NotebookEditTool(),
-
-      // 图像生成工具（使用当前服务商凭证调用图像 API）
-      new ImageGenTool(this.config.cwd, this.config.provider, this.config.imageProvider),
-    ]
-
-    // 添加 Task 工具（如果提供了 TaskManager）
-    if (this.config.taskManager) {
-      this.tools.push(
-        new TaskCreateTool(this.config.taskManager),
-        new TaskUpdateTool(this.config.taskManager),
-        new TaskListTool(this.config.taskManager),
-        new TaskGetTool(this.config.taskManager)
-      )
+    const registry = createBuiltinToolRegistry()
+    const snapshot =
+      this.config.toolSnapshot ||
+      new RuntimeProfileResolver(registry).resolve({ readOnly: this.config.readOnly }).toolSnapshot
+    const instantiated = snapshot.instantiate({
+      cwd: this.config.cwd,
+      provider: this.config.provider,
+      model: this.config.model,
+      fileSystem: this.fs,
+      imageProvider: this.config.imageProvider,
+      taskManager: this.config.taskManager,
+      planModeManager: this.config.planModeManager,
+      agentCoordinator: this.config.agentCoordinator,
+      mcpManager: this.config.mcpManager,
+      skillManager: this.config.skillManager,
+    })
+    this.toolPolicies = new Map(
+      snapshot
+        .list()
+        .map(registration => [
+          registration.name,
+          { capabilities: registration.capabilities, source: registration.source },
+        ])
+    )
+    this.tools = instantiated.tools
+    for (const warning of instantiated.warnings) {
+      if (this.config.verbose) console.warn(`[QueryEngine] ${warning}`)
     }
 
-    // 添加 Plan Mode 工具（如果提供了 PlanModeManager）
-    if (this.config.planModeManager) {
-      this.tools.push(
-        new EnterPlanModeTool(this.config.planModeManager),
-        new ExitPlanModeTool(this.config.planModeManager)
-      )
-    }
-
-    // 添加 AskUserQuestion 工具
-    this.tools.push(new AskUserQuestionTool())
-
-    // 添加 Agent 工具（如果提供了 AgentCoordinator）
-    if (this.config.agentCoordinator) {
-      this.tools.push(
-        new AgentTool(
-          this.config.agentCoordinator,
-          this.config.cwd,
-          this.config.provider,
-          this.config.model
-        )
-      )
-    }
-
-    // 添加 MCP 工具（如果提供了 MCPConnectionManager）
-    if (this.config.mcpManager) {
-      this.tools.push(new MCPTool(this.config.mcpManager))
-    }
-
-    // 添加 Skill 工具（如果提供了 SkillManager）
-    if (this.config.skillManager) {
-      this.tools.push(new SkillTool(this.config.skillManager))
-    }
-
-    if (this.config.readOnly) {
-      const readOnlyTools = new Set([
-        'read_file',
-        'glob',
-        'grep',
-        'find',
-        'list_directory',
-        'lsp',
-        'analyze_ast',
-        'analyze_dependencies',
-        'git_status',
-        'git_diff',
-        'git_log',
-        'web_fetch',
-        'web_search',
-        'skill',
-      ])
-      this.tools = this.tools.filter(tool => readOnlyTools.has(tool.name))
-    }
+    // ToolExecutor 需要 Bash 实例处理取消；快照未启用 Bash 时使用不暴露给模型的实例。
+    this.bashTool =
+      this.tools.find((tool): tool is BashTool => tool instanceof BashTool) ||
+      new BashTool(this.config.cwd)
 
     // if (this.config.verbose) {
     //   console.log(`Initialized ${this.tools.length} tools:`, this.tools.map(t => t.name))
@@ -550,6 +469,7 @@ export class QueryEngine {
   }
 
   private buildSystemPrompt(): string {
+    const injectedPrompt = this.config.systemPrompt?.trim()
     return `你是 Evancod，一个在 VS Code 插件中运行的软件工程 Agent。
 
 工作契约：
@@ -560,7 +480,10 @@ export class QueryEngine {
 - 测试失败、实现不完整、文件缺失或仍有阻塞时，不得声称完成。
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
 - 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。
-- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${this.buildSkillCatalog()}`
+- 用户明确指定某个子 Agent 时，必须把对应定义 ID 传给 subagent_type；该 Agent 失败或超时后不得自行替代执行，应说明原因并询问是否重试。
+- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${this.buildSkillCatalog()}${
+      injectedPrompt ? `\n\n当前角色与附加约束：\n${injectedPrompt}` : ''
+    }`
   }
 
   /**
@@ -784,6 +707,8 @@ Skill 使用契约：
       let reachedNormalCompletion = false
       let continuationCount = 0
       const MAX_OUTPUT_CONTINUATIONS = 3
+      let consecutiveEmptyResponses = 0
+      const MAX_EMPTY_RESPONSES = 3
       let taskContinuationCount = 0
       const MAX_TASK_CONTINUATIONS = 8
       let taskCompletionReviewRequested = false
@@ -990,6 +915,26 @@ Skill 使用契约：
         }
 
         continuationCount = 0
+
+        if (!response.toolCalls?.length && !assistantContent.trim()) {
+          consecutiveEmptyResponses++
+          if (consecutiveEmptyResponses > MAX_EMPTY_RESPONSES) {
+            throw new Error(`模型连续 ${MAX_EMPTY_RESPONSES + 1} 次返回空响应，已停止本次执行`)
+          }
+          if (consecutiveEmptyResponses === 1) {
+            this.config.messages.push({
+              id: this.generateId(),
+              role: 'user',
+              content:
+                '[内部恢复指令] 上一轮模型返回了空响应。请基于已有工具结果继续任务；' +
+                '若信息已经足够，立即输出最终结论，不要重复读取已完整返回的文件。',
+              timestamp: Date.now(),
+              internal: true,
+            })
+          }
+          continue
+        }
+        consecutiveEmptyResponses = 0
 
         if (response.toolCalls?.length) {
           lastTurnHadToolCalls = true
@@ -1531,15 +1476,19 @@ Skill 使用契约：
       return Promise.resolve({ approved: true })
     }
 
-    const isEditTool = ['edit_file', 'write_file'].includes(toolName)
-    const isDangerousTool = ['bash', 'delete_file', 'move_file', 'copy_file'].includes(toolName)
+    const policy = this.toolPolicies.get(toolName)
+    const capabilities = new Set(policy?.capabilities || [])
+    const isWriteTool = capabilities.has('write')
+    const isExecutionTool = capabilities.has('execute')
+    const isNetworkTool = capabilities.has('network')
+    const isDangerousFileTool = ['delete_file', 'move_file', 'copy_file'].includes(toolName)
     let requiresApproval = false
     if (permissionMode === 'plan') {
       requiresApproval = false
     } else if (permissionMode === 'acceptEdits') {
-      requiresApproval = isDangerousTool
+      requiresApproval = isExecutionTool || isNetworkTool || isDangerousFileTool
     } else {
-      requiresApproval = isEditTool || isDangerousTool
+      requiresApproval = isWriteTool || isExecutionTool || isNetworkTool
     }
 
     if (!requiresApproval) {

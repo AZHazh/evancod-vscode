@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { History, Plus, RefreshCw, ServerCog } from 'lucide-vue-next'
+import { History, Plus, RefreshCw, Settings } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import Button from '@/components/common/Button.vue'
 import HistorySessionPopover from './HistorySessionPopover.vue'
@@ -11,7 +11,7 @@ const historyWrap = ref<HTMLElement>()
 
 const emit = defineEmits<{
   syncNewApi: []
-  openProviders: []
+  openSettings: []
 }>()
 
 const handleNewSession = () => {
@@ -22,8 +22,8 @@ const handleSync = () => {
   emit('syncNewApi')
 }
 
-const handleOpenProviders = () => {
-  emit('openProviders')
+const handleOpenSettings = () => {
+  emit('openSettings')
 }
 
 function toggleHistory() {
@@ -62,9 +62,9 @@ onUnmounted(() => document.removeEventListener('mousedown', handleDocumentClick)
         同步中转
       </Button>
 
-      <Button variant="secondary" size="small" @click="handleOpenProviders">
-        <template #icon><ServerCog /></template>
-        服务商
+      <Button variant="secondary" size="small" @click="handleOpenSettings">
+        <template #icon><Settings /></template>
+        设置
       </Button>
     </div>
 

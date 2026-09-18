@@ -10,6 +10,7 @@ export const FALLBACK_SLASH_COMMANDS: SlashCommand[] = [
   { name: 'history', description: '查看 Git 提交历史', argumentHint: '[数量]' },
   { name: 'context', description: '查看上下文使用情况' },
   { name: 'skill-list', description: '浏览并选择可用技能', argumentHint: '[关键字]' },
+  { name: 'create-agent', description: '创建自定义子 Agent' },
 ]
 
 export function normalizeSlashCommand(command: SlashCommand): SlashCommand {

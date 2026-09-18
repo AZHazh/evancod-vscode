@@ -44,6 +44,7 @@ import { SessionPersistenceService } from '../persistence/SessionPersistenceServ
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
 import { createApiClient } from '../../core/services/api'
 import { compactConversation } from '../compact/compact'
+import type { ToolProfileService } from '../tools/ToolProfileService'
 import {
   composeUserPrompt,
   createRequestContext,
@@ -137,7 +138,8 @@ export class ChatService {
     private agentCoordinator: AgentCoordinator,
     private mcpManager: MCPConnectionManager,
     private skillManager: SkillManager,
-    private memoryManager: MemoryManager
+    private memoryManager: MemoryManager,
+    private toolProfileService?: ToolProfileService
   ) {
     this.persistence = new SessionPersistenceService(context)
   }
@@ -569,6 +571,10 @@ export class ChatService {
    */
   invalidateEngine(): void {
     this.queryEngine = undefined
+  }
+
+  getMcpManager(): MCPConnectionManager {
+    return this.mcpManager
   }
 
   /**
@@ -1388,6 +1394,11 @@ export class ChatService {
       throw new Error('No active session')
     }
 
+    const toolProfile = this.toolProfileService?.resolve()
+    for (const warning of toolProfile?.warnings || []) {
+      console.warn(`[ChatService] ${warning}`)
+    }
+
     // 创建 QueryEngine
     const engine = new QueryEngine({
       cwd: session.workDir,
@@ -1408,6 +1419,7 @@ export class ChatService {
       },
       permissionMode: this.permissionMode,
       imageProvider: this.providerService.getImageProvider() || undefined,
+      toolSnapshot: toolProfile?.toolSnapshot,
     })
     this.queryEngine = engine
 

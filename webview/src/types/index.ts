@@ -52,6 +52,24 @@ export interface SkillEntry {
   source: 'global' | 'workspace'
 }
 
+export interface AgentDefinition {
+  id: string
+  name: string
+  description: string
+  systemPrompt: string
+  model?: string
+  effortLevel?: 'low' | 'medium' | 'high' | 'max'
+  enabledTools: string[]
+  enabledSkills?: string[]
+  readOnly: boolean
+  permissionMode: 'default' | 'acceptEdits' | 'plan'
+  maxIterations: number
+  isolation: 'none' | 'worktree'
+  defaultMode?: 'foreground' | 'background'
+  enabled: boolean
+  source: 'builtin' | 'global' | 'workspace'
+}
+
 export interface SessionListItem {
   id: string
   title: string

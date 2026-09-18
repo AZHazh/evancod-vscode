@@ -562,6 +562,14 @@ function handleSend() {
     return
 
   const content = text
+  if (/^\/(?:create-agent|create\s+agent|creat\s+agent)$/i.test(content)) {
+    window.dispatchEvent(new CustomEvent('evancod:open-agent-wizard'))
+    input.value = ''
+    if (textarea.value) textarea.value.innerHTML = ''
+    openPanel.value = null
+    nextTick(adjustHeight)
+    return
+  }
   const files = [
     ...attachments.value.map(composerAttachmentToPayload),
     ...workspaceReferences.value.map(workspaceReferenceToPayload),
