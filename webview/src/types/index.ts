@@ -57,6 +57,7 @@ export interface AgentDefinition {
   name: string
   description: string
   systemPrompt: string
+  modelTier?: 'main' | 'sonnet' | 'opus' | 'haiku'
   model?: string
   effortLevel?: 'low' | 'medium' | 'high' | 'max'
   enabledTools: string[]

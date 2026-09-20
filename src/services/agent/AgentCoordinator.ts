@@ -41,6 +41,7 @@ import {
   createBuiltinAgentRegistry,
   type AgentDefinition,
   type AgentRegistry,
+  resolveAgentModel,
 } from './AgentRegistry'
 import { createBuiltinToolRegistry } from '../../core/tools/registry/BuiltinToolRegistry'
 import { RuntimeProfileResolver } from '../../core/engine/RuntimeProfileResolver'
@@ -271,11 +272,13 @@ export class AgentCoordinator {
       console.warn(`[AgentCoordinator] ${warning}`)
     }
 
+    const effectiveModel = resolveAgentModel(definition, config.provider, config.model)
+
     // 创建 QueryEngine
     const engineConfig: QueryEngineConfig = {
       cwd: effectiveCwd,
       provider: config.provider,
-      model: definition.model || config.model,
+      model: effectiveModel,
       messages: [],
       verbose: config.verbose || false,
       skillManager: this.sharedServices?.skillManager,
@@ -301,7 +304,7 @@ export class AgentCoordinator {
       description: config.description,
       prompt: config.prompt,
       cwd: effectiveCwd,
-      model: config.model,
+      model: effectiveModel,
       status: 'running',
       startedAt,
       updatedAt: startedAt,

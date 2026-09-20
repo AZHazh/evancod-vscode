@@ -22,7 +22,11 @@ import { Tool, type ToolDefinition, type ToolResult } from '../core/tools/base/T
 import { ToolRegistry } from '../core/tools/registry/ToolRegistry'
 import { AgentTool } from '../core/tools/agent/AgentTool'
 import { RuntimeProfileResolver } from '../core/engine/RuntimeProfileResolver'
-import { AgentRegistry, type AgentDefinition } from '../services/agent/AgentRegistry'
+import {
+  AgentRegistry,
+  resolveAgentModel,
+  type AgentDefinition,
+} from '../services/agent/AgentRegistry'
 import { MockStorageAdapter } from '../adapters/StorageAdapter'
 import { ToolProfileService } from '../services/tools/ToolProfileService'
 import { AgentDefinitionStore } from '../services/agent/AgentDefinitionStore'
@@ -173,6 +177,35 @@ describe('Agent runtime regression invariants', () => {
     )
   })
 
+  it('resolves an Agent model tier against the active Provider', () => {
+    const definition = {
+      ...createAgentDefinition('workspace'),
+      modelTier: 'sonnet' as const,
+    }
+    const createProvider = (id: string, sonnet: string): Provider => ({
+      id,
+      name: id,
+      type: 'custom',
+      apiFormat: 'anthropic',
+      apiKey: 'test',
+      models: {
+        main: `${id}-main`,
+        sonnet,
+        opus: `${id}-opus`,
+        haiku: `${id}-haiku`,
+      },
+      createdAt: new Date(0).toISOString(),
+    })
+
+    assert.equal(resolveAgentModel(definition, createProvider('first', 'first-sonnet'), 'fallback'), 'first-sonnet')
+    assert.equal(resolveAgentModel(definition, createProvider('second', 'second-sonnet'), 'fallback'), 'second-sonnet')
+    assert.equal(
+      resolveAgentModel({ model: 'legacy-model' }, createProvider('first', 'first-sonnet'), 'fallback'),
+      'legacy-model'
+    )
+    assert.equal(resolveAgentModel({}, createProvider('first', 'first-sonnet'), 'fallback'), 'fallback')
+  })
+
   it('merges workspace tool preferences over global differences', async () => {
     const registry = new ToolRegistry()
     for (const name of ['read', 'write', 'new_tool']) {
@@ -243,6 +276,7 @@ describe('Agent runtime regression invariants', () => {
       name: 'Global reviewer',
       description: 'Reviews code',
       systemPrompt: 'Review code carefully.',
+      modelTier: 'sonnet' as const,
       enabledTools: ['builtin.read'],
       readOnly: true,
       permissionMode: 'default' as const,
@@ -252,6 +286,7 @@ describe('Agent runtime regression invariants', () => {
     }
 
     await store.save(base, 'global')
+    assert.equal(registry.get('reviewer')?.modelTier, 'sonnet')
     await store.save({ ...base, name: 'Workspace reviewer' }, 'workspace')
     assert.equal(registry.get('reviewer')?.name, 'Workspace reviewer')
     assert.equal(registry.get('reviewer')?.source, 'workspace')

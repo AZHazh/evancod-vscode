@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowRight, Check, LoaderCircle } from 'lucide-vue-next'
 import Button from '@/components/common/Button.vue'
 import { useVSCode } from '@/composables/useVSCode'
 import { toPlainAgentDefinition } from '@/lib/agentDefinition'
+import { useProviderStore } from '@/stores/provider'
 import type { AgentDefinition } from '@/types'
 
 const props = defineProps<{ initialDefinition?: AgentDefinition }>()
@@ -19,7 +20,11 @@ interface ToolEntry {
   capabilities: string[]
 }
 
+type AgentModelTier = NonNullable<AgentDefinition['modelTier']>
+type AgentModelSelection = AgentModelTier | 'inherit' | 'legacy'
+
 const vscode = useVSCode()
+const providerStore = useProviderStore()
 const step = ref(0)
 const steps = ['目标', '职责', '工具', '权限', '模型', '预览', '确认']
 const name = ref('')
@@ -37,7 +42,8 @@ const allowExecute = ref(false)
 const allowNetwork = ref(true)
 const permissionMode = ref<'default' | 'acceptEdits' | 'plan'>('default')
 const isolation = ref<'none' | 'worktree'>('none')
-const model = ref('')
+const modelSelection = ref<AgentModelSelection>('main')
+const legacyModel = ref('')
 const effortLevel = ref<'low' | 'medium' | 'high' | 'max'>('medium')
 const maxIterations = ref(30)
 const executionMode = ref<'foreground' | 'background'>('foreground')
@@ -48,6 +54,27 @@ const saving = ref(false)
 const error = ref('')
 let saveTimeout: ReturnType<typeof setTimeout> | undefined
 let saveRequestId: string | undefined
+
+const modelTierLabels: Record<AgentModelTier, string> = {
+  main: '主模型',
+  sonnet: 'Sonnet',
+  opus: 'Opus',
+  haiku: 'Haiku',
+}
+const modelOptions = computed(() => {
+  const provider = providerStore.activeProvider
+  if (!provider) return []
+  return (Object.keys(modelTierLabels) as AgentModelTier[]).map(tier => ({
+    tier,
+    label: modelTierLabels[tier],
+    model: provider.models[tier],
+  }))
+})
+const selectedModel = computed(() => {
+  if (modelSelection.value === 'legacy') return legacyModel.value.trim()
+  if (modelSelection.value === 'inherit') return providerStore.currentModel
+  return providerStore.activeProvider?.models[modelSelection.value]?.trim() || ''
+})
 
 const canContinue = computed(() => {
   if (step.value === 0) return Boolean(name.value.trim() && description.value.trim())
@@ -70,7 +97,8 @@ function toggleTool(id: string) {
 function next() {
   error.value = ''
   if (step.value === 4) {
-    generateDraft()
+    if (props.initialDefinition) applyRuntimeSettingsToDraft()
+    else generateDraft()
     return
   }
   if (step.value < steps.length - 1) step.value++
@@ -95,7 +123,7 @@ function generateDraft() {
         output: output.value,
         constraints: constraints.value,
         executionMode: executionMode.value,
-        model: model.value,
+        model: selectedModel.value,
       },
     },
   })
@@ -122,7 +150,12 @@ function applyModelDraft(modelDraft: Record<string, unknown>) {
     description:
       typeof modelDraft.description === 'string' ? modelDraft.description : description.value,
     systemPrompt: `${prompt}\n\n默认执行方式：${executionMode.value === 'background' ? '后台' : '前台'}。`,
-    model: model.value.trim() || undefined,
+    modelTier:
+      modelSelection.value === 'legacy' || modelSelection.value === 'inherit'
+        ? undefined
+        : modelSelection.value,
+    model:
+      modelSelection.value === 'legacy' ? legacyModel.value.trim() || undefined : undefined,
     effortLevel: effortLevel.value,
     enabledTools: filteredTools,
     readOnly: readOnly.value,
@@ -138,6 +171,23 @@ function applyModelDraft(modelDraft: Record<string, unknown>) {
   }
   step.value = 5
   generating.value = false
+}
+
+function applyRuntimeSettingsToDraft() {
+  if (!draft.value) return
+  draft.value = {
+    ...draft.value,
+    modelTier:
+      modelSelection.value === 'legacy' || modelSelection.value === 'inherit'
+        ? undefined
+        : modelSelection.value,
+    model:
+      modelSelection.value === 'legacy' ? legacyModel.value.trim() || undefined : undefined,
+    effortLevel: effortLevel.value,
+    maxIterations: maxIterations.value,
+    defaultMode: executionMode.value,
+  }
+  step.value = 5
 }
 
 function save() {
@@ -203,7 +253,14 @@ onMounted(() => {
     draft.value = { ...props.initialDefinition, enabledTools: [...props.initialDefinition.enabledTools] }
     name.value = props.initialDefinition.name
     description.value = props.initialDefinition.description
-    model.value = props.initialDefinition.model || ''
+    if (props.initialDefinition.modelTier) {
+      modelSelection.value = props.initialDefinition.modelTier
+    } else if (props.initialDefinition.model) {
+      modelSelection.value = 'legacy'
+      legacyModel.value = props.initialDefinition.model
+    } else {
+      modelSelection.value = 'inherit'
+    }
     effortLevel.value = props.initialDefinition.effortLevel || 'medium'
     maxIterations.value = props.initialDefinition.maxIterations
     executionMode.value = props.initialDefinition.defaultMode || 'foreground'
@@ -212,7 +269,7 @@ onMounted(() => {
     isolation.value = props.initialDefinition.isolation
     scope.value = props.initialDefinition.source === 'workspace' ? 'workspace' : 'global'
     enabledTools.value = new Set(props.initialDefinition.enabledTools)
-    step.value = 5
+    step.value = 4
   }
 })
 onUnmounted(() => {
@@ -275,7 +332,16 @@ onUnmounted(() => {
 
       <template v-else-if="step === 4">
         <h2>模型和运行参数</h2>
-        <label>模型覆盖<input v-model="model" placeholder="留空则继承当前模型" /></label>
+        <label>模型
+          <select v-model="modelSelection" :disabled="modelOptions.length === 0 && modelSelection !== 'legacy'">
+            <option v-if="modelSelection === 'legacy'" value="legacy">原模型（{{ legacyModel }}）</option>
+            <option value="inherit">跟随当前会话（{{ providerStore.currentModel }}）</option>
+            <option v-if="modelOptions.length === 0 && modelSelection !== 'legacy'" value="main" disabled>请先配置并激活服务商</option>
+            <option v-for="option in modelOptions" :key="option.tier" :value="option.tier">
+              {{ option.label }}（{{ option.model }}）
+            </option>
+          </select>
+        </label>
         <label>推理程度<select v-model="effortLevel"><option>low</option><option>medium</option><option>high</option><option>max</option></select></label>
         <label>最大轮次<input v-model.number="maxIterations" type="number" min="1" max="500" /></label>
         <label>默认执行方式<select v-model="executionMode"><option value="foreground">前台</option><option value="background">后台</option></select></label>
@@ -303,7 +369,7 @@ onUnmounted(() => {
       <Button variant="ghost" @click="step === 0 ? emit('cancel') : back()"><template #icon><ArrowLeft /></template>{{ step === 0 ? '取消' : '上一步' }}</Button>
       <div class="scope" v-if="step === 5"><button :class="{ active: scope === 'global' }" @click="scope = 'global'">全局</button><button :class="{ active: scope === 'workspace' }" @click="scope = 'workspace'">工作区</button></div>
       <Button :disabled="!canContinue || generating" :loading="saving" @click="step === 5 ? save() : next()">
-        {{ step === 5 ? '确认保存' : step === 4 ? '生成草稿' : '下一步' }}<template #icon><ArrowRight /></template>
+        {{ step === 5 ? '确认保存' : step === 4 && !initialDefinition ? '生成草稿' : '下一步' }}<template #icon><ArrowRight /></template>
       </Button>
     </footer>
   </section>

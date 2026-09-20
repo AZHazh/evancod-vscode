@@ -1,13 +1,17 @@
-import type { PermissionMode } from '../../types'
+import type { PermissionMode, Provider } from '../../types'
 
 export type AgentSource = 'builtin' | 'global' | 'workspace'
 export type AgentEffortLevel = 'low' | 'medium' | 'high' | 'max'
+export type AgentModelTier = 'main' | 'sonnet' | 'opus' | 'haiku'
 
 export interface AgentDefinition {
   id: string
   name: string
   description: string
   systemPrompt: string
+  /** 当前 Provider 中要使用的逻辑模型等级。 */
+  modelTier?: AgentModelTier
+  /** 兼容旧版 Agent 定义中的具体模型覆盖。 */
   model?: string
   effortLevel?: AgentEffortLevel
   enabledTools: readonly string[]
@@ -19,6 +23,19 @@ export interface AgentDefinition {
   defaultMode?: 'foreground' | 'background'
   enabled: boolean
   source: AgentSource
+}
+
+export function resolveAgentModel(
+  definition: Pick<AgentDefinition, 'modelTier' | 'model'>,
+  provider: Provider,
+  fallbackModel: string
+): string {
+  if (definition.modelTier) {
+    return (
+      provider.models[definition.modelTier]?.trim() || provider.models.main.trim() || fallbackModel
+    )
+  }
+  return definition.model?.trim() || fallbackModel
 }
 
 const sourcePriority: Record<AgentSource, number> = {

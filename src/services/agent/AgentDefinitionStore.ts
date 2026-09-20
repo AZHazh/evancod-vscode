@@ -11,6 +11,7 @@ const definitionSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/i),
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().min(1).max(500),
+  modelTier: z.enum(['main', 'sonnet', 'opus', 'haiku']).optional(),
   model: z.string().trim().min(1).optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
   enabledTools: z.array(z.string()).default([]),

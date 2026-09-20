@@ -11,6 +11,19 @@ const vscode = useVSCode()
 const definitions = ref<AgentDefinition[]>([])
 const error = ref('')
 
+const modelTierLabels: Record<NonNullable<AgentDefinition['modelTier']>, string> = {
+  main: '主模型',
+  sonnet: 'Sonnet',
+  opus: 'Opus',
+  haiku: 'Haiku',
+}
+
+function getModelLabel(definition: AgentDefinition) {
+  if (definition.modelTier) return modelTierLabels[definition.modelTier]
+  if (definition.model) return definition.model
+  return '跟随会话'
+}
+
 function load() {
   vscode.postMessage({ type: 'agent.registry.list.request' })
 }
@@ -59,7 +72,7 @@ onUnmounted(() => window.removeEventListener('message', handleMessage))
         <div class="agent-copy">
           <div class="title"><strong>{{ definition.name }}</strong><code>{{ definition.id }}</code><span>{{ definition.source }}</span></div>
           <p>{{ definition.description }}</p>
-          <small>{{ definition.enabledTools.length }} 个工具 · {{ definition.readOnly ? '只读' : definition.permissionMode }} · {{ definition.maxIterations }} 轮</small>
+          <small>{{ definition.enabledTools.length }} 个工具 · {{ definition.readOnly ? '只读' : definition.permissionMode }} · {{ getModelLabel(definition) }} · {{ definition.maxIterations }} 轮</small>
         </div>
         <div class="actions">
           <Button variant="ghost" size="small" title="编辑 Agent" @click="emit('edit', definition)"><template #icon><Pencil /></template></Button>
