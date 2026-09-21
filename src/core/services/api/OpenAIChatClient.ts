@@ -1,4 +1,5 @@
 import type { Message, TokenUsage } from '../../../types'
+import { getModelMaxOutputTokens } from '../../../utils/model/modelTokens'
 import { resolveOpenAIReasoningEffort } from '../../../utils/thinking'
 import { sanitizeToolMessageSequence } from './toolMessageSanitizer'
 import {
@@ -27,7 +28,7 @@ export class OpenAIChatClient implements ApiClient {
       messages: this.config.systemPrompt
         ? [{ role: 'system', content: this.config.systemPrompt }, ...convertOpenAIChatMessages(messages)]
         : convertOpenAIChatMessages(messages),
-      max_tokens: this.config.maxTokens || 4096,
+      max_tokens: this.config.maxTokens ?? getModelMaxOutputTokens(this.config.model).default,
       temperature: this.config.temperature ?? 1,
     })
 
@@ -48,7 +49,7 @@ export class OpenAIChatClient implements ApiClient {
       messages: this.config.systemPrompt
         ? [{ role: 'system', content: this.config.systemPrompt }, ...convertOpenAIChatMessages(messages)]
         : convertOpenAIChatMessages(messages),
-      max_tokens: this.config.maxTokens || 4096,
+      max_tokens: this.config.maxTokens ?? getModelMaxOutputTokens(this.config.model).default,
       temperature: this.config.temperature ?? 1,
       stream: true,
       stream_options: { include_usage: true },

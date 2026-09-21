@@ -49,8 +49,9 @@ export function getModelMaxOutputTokens(model: string): ModelOutputLimits {
     return { default: 8_192, upperLimit: 8_192 }
   }
 
-  // 未知模型的保守默认值
-  return { default: 64_000, upperLimit: 128_000 }
+  // 中转服务的未知模型默认按当前主流模型能力处理：128K 输出上限。
+  // 具体模型若有更严格限制，应在上方补充专属匹配规则或通过 maxTokens 覆盖。
+  return { default: 128_000, upperLimit: 128_000 }
 }
 
 /**

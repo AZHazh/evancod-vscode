@@ -1,4 +1,5 @@
 import type { Message, TokenUsage } from '../../../types'
+import { getModelMaxOutputTokens } from '../../../utils/model/modelTokens'
 import { resolveOpenAIReasoningEffort } from '../../../utils/thinking'
 import { sanitizeToolMessageSequence } from './toolMessageSanitizer'
 import {
@@ -25,7 +26,7 @@ export class OpenAIResponsesClient implements ApiClient {
     const response = await this.fetchJson('/v1/responses', {
       model: this.config.model,
       input: this.config.systemPrompt ? `${this.config.systemPrompt}\n\n${convertResponsesInput(messages)}` : convertResponsesInput(messages),
-      max_output_tokens: this.config.maxTokens || 4096,
+      max_output_tokens: this.config.maxTokens ?? getModelMaxOutputTokens(this.config.model).default,
       temperature: this.config.temperature ?? 1,
     })
 
@@ -45,7 +46,7 @@ export class OpenAIResponsesClient implements ApiClient {
       model: this.config.model,
       // 结构化 input 数组，承载文本 / 工具调用 / 工具结果
       input: convertResponsesInputItems(messages),
-      max_output_tokens: this.config.maxTokens || 4096,
+      max_output_tokens: this.config.maxTokens ?? getModelMaxOutputTokens(this.config.model).default,
       temperature: this.config.temperature ?? 1,
       stream: true,
     }
