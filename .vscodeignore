@@ -35,6 +35,10 @@ scripts/**
 # 打包产物自身
 *.vsix
 
+# 测试与临时产物（测试编译输出、集成测试 VS Code 实例的用户数据目录等）
+.tmp/**
+**/.vscode-test/**
+
 # 其它杂项
 .gitignore
 .prettierignore
