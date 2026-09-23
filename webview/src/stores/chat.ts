@@ -1059,6 +1059,18 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function upsertToolResult(event: Extract<AgentServerEvent, { type: 'tool_result' }>) {
+    const toolUseIndex = uiMessages.value.findIndex(
+      (message): message is Extract<UIMessage, { type: 'tool_use' }> =>
+        message.type === 'tool_use' && message.toolUseId === event.toolUseId
+    )
+    if (toolUseIndex !== -1 && uiMessages.value[toolUseIndex].type === 'tool_use') {
+      uiMessages.value.splice(toolUseIndex, 1, {
+        ...uiMessages.value[toolUseIndex],
+        isPending: false,
+      })
+      toolUseIndexCache.set(event.toolUseId, toolUseIndex)
+    }
+
     const payload = {
       id: `${event.toolUseId}:result`,
       type: 'tool_result' as const,

@@ -8,9 +8,30 @@ const taskStore = useTaskStore()
 const loading = ref(false)
 const collapsed = ref(false)
 
-const completedCount = computed(() => taskStore.completedTasks.length)
+// 已提交完成、正在等待最终复核的任务也代表实际工作已经完成，
+// 否则复核阶段会从 N/N 突然显示成 0/N，折叠后尤其像进度停滞。
+const completedCount = computed(
+  () => taskStore.tasks.filter(task => task.status === 'completed').length
+)
 const totalCount = computed(() => taskStore.stats.total)
-const progressPercent = computed(() => totalCount.value === 0 ? 0 : Math.round((completedCount.value / totalCount.value) * 100))
+const isReviewing = computed(() =>
+  taskStore.tasks.some(task => task.completion?.state === 'reviewing')
+)
+const isExecuting = computed(() =>
+  taskStore.tasks.some(task => task.status === 'in_progress')
+)
+const progressPercent = computed(() => {
+  if (totalCount.value === 0) return 0
+  // 当前执行项按半格展示，让首个长任务执行时进度条也能产生可见变化。
+  const activeCredit = isExecuting.value && completedCount.value < totalCount.value ? 0.5 : 0
+  return Math.round(((completedCount.value + activeCredit) / totalCount.value) * 100)
+})
+const progressStatus = computed(() => {
+  if (isReviewing.value) return 'reviewing'
+  if (isExecuting.value) return 'executing'
+  if (totalCount.value > 0 && completedCount.value === totalCount.value) return 'completed'
+  return 'idle'
+})
 
 onMounted(() => {
   handleRefresh()
@@ -36,7 +57,9 @@ function taskLabel(task: { id: string; subject: string }) {
       <div class="header-left">
         <div class="title-badge"><ClipboardList class="title-icon" /></div>
         <span class="panel-title">任务</span>
-        <div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }" /></div>
+        <div class="progress-track" :class="`status-${progressStatus}`">
+          <div class="progress-fill" :style="{ width: `${progressPercent}%` }" />
+        </div>
         <span class="progress-text">{{ completedCount }}/{{ totalCount }}</span>
         <button class="icon-button" type="button" @click="collapsed = !collapsed" aria-label="折叠任务面板">
           <ChevronDown class="chevron" :class="{ collapsed }" />
@@ -129,6 +152,7 @@ function taskLabel(task: { id: string; subject: string }) {
 }
 
 .progress-track {
+  position: relative;
   width: min(220px, 20vw);
   height: 8px;
   overflow: hidden;
@@ -140,7 +164,14 @@ function taskLabel(task: { id: string; subject: string }) {
   height: 100%;
   border-radius: inherit;
   background: #7ee08f;
-  transition: width 180ms ease;
+  transition:
+    width 180ms ease,
+    background-color 180ms ease;
+}
+
+.progress-track.status-executing .progress-fill,
+.progress-track.status-reviewing .progress-fill {
+  background: var(--vscode-charts-yellow, #cca700);
 }
 
 .progress-text {

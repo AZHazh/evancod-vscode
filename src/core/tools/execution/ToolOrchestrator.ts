@@ -51,7 +51,7 @@ export class ToolOrchestrator {
         }
       }
 
-      const isSafe = this.isConcurrencySafe(toolCall.name)
+      const isSafe = this.isConcurrencySafe(toolCall)
       const queuedAt = performance.now()
       if (isSafe) await this.acquireSafeSlot()
       const queueMs = isSafe ? Math.round(performance.now() - queuedAt) : 0
@@ -79,7 +79,7 @@ export class ToolOrchestrator {
     }
 
     for (const toolCall of toolCalls) {
-      if (this.isConcurrencySafe(toolCall.name)) {
+      if (this.isConcurrencySafe(toolCall)) {
         parallelBatch.push(toolCall)
         continue
       }
@@ -113,14 +113,21 @@ export class ToolOrchestrator {
     }
   }
 
-  private isConcurrencySafe(toolName: string): boolean {
-    const tool = this.tools.find(candidate => candidate.name === toolName)
-    const maybeSafe = tool as Tool & { isConcurrencySafe?: boolean }
+  private isConcurrencySafe(toolCall: ToolCall): boolean {
+    const tool = this.tools.find(candidate => candidate.name === toolCall.name)
+    const maybeSafe = tool as Tool & {
+      isConcurrencySafe?: boolean | ((input: unknown) => boolean)
+    }
+    if (typeof maybeSafe?.isConcurrencySafe === 'function') {
+      return maybeSafe.isConcurrencySafe(toolCall.input ?? toolCall.args)
+    }
     if (typeof maybeSafe?.isConcurrencySafe === 'boolean') {
       return maybeSafe.isConcurrencySafe
     }
 
-    return ['read_file', 'glob', 'grep', 'list_directory', 'find', 'task_list', 'task_get'].includes(toolName)
+    return ['read_file', 'glob', 'grep', 'list_directory', 'find', 'task_list', 'task_get'].includes(
+      toolCall.name
+    )
   }
 
   private acquireSafeSlot(): Promise<void> {

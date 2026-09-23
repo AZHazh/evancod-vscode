@@ -329,8 +329,46 @@ describe('Agent runtime regression invariants', () => {
       prompt: 'Review the requested file',
     })
 
+    assert.equal(tool.isConcurrencySafe({ subagent_type: 'reviewer' }), true)
     assert.equal(result.success, false)
     assert.match(result.error || '', /不得由主 Agent 自行替代执行/)
+  })
+
+  it('rejects writable background Agents in the shared workspace', async () => {
+    const definition = {
+      ...createAgentDefinition('workspace'),
+      id: 'writer',
+      readOnly: false,
+      defaultMode: 'background' as const,
+    }
+    let startCount = 0
+    const coordinator = {
+      listAgentDefinitions: () => [definition],
+      getAgentDefinition: () => definition,
+      startAgent: async () => {
+        startCount++
+        return 'agent-test'
+      },
+    }
+    const tool = new AgentTool(
+      coordinator as any,
+      process.cwd(),
+      { models: { main: 'test-model' } } as Provider,
+      'test-model'
+    )
+
+    const result = await tool.execute({
+      subagent_type: 'writer',
+      description: 'Modify code',
+      prompt: 'Modify the requested file',
+      run_in_background: true,
+      isolation: 'none',
+    })
+
+    assert.equal(tool.isConcurrencySafe({ subagent_type: 'writer' }), false)
+    assert.equal(result.success, false)
+    assert.match(result.error || '', /文件竞态/)
+    assert.equal(startCount, 0)
   })
 
   it('rejects unsafe Agent IDs and bypass permission definitions', () => {
@@ -574,6 +612,48 @@ describe('Agent runtime regression invariants', () => {
       /Query cancelled/
     )
     assert.equal(executionCount, 0)
+  })
+
+  it('uses input-aware concurrency policies for read-only Agent calls', async () => {
+    let running = 0
+    let maxRunning = 0
+    const tool = {
+      name: 'agent',
+      isConcurrencySafe: (input: unknown) =>
+        Boolean((input as { readOnly?: boolean } | undefined)?.readOnly),
+    }
+    const executor = {
+      runToolUse: async (call: { id: string; name: string }) => {
+        running++
+        maxRunning = Math.max(maxRunning, running)
+        await new Promise<void>(resolve => setImmediate(resolve))
+        running--
+        return {
+          toolCallId: call.id,
+          toolName: call.name,
+          content: 'ok',
+          isError: false,
+        }
+      },
+    }
+    const orchestrator = new ToolOrchestrator([tool] as any, executor as any)
+
+    await orchestrator.runTools([
+      { id: 'agent-1', name: 'agent', input: { readOnly: true } },
+      { id: 'agent-2', name: 'agent', input: { readOnly: true } },
+    ])
+
+    assert.equal(maxRunning, 2)
+
+    running = 0
+    maxRunning = 0
+    const serialOrchestrator = new ToolOrchestrator([tool] as any, executor as any)
+    await serialOrchestrator.runTools([
+      { id: 'writer-1', name: 'agent', input: { readOnly: false } },
+      { id: 'writer-2', name: 'agent', input: { readOnly: false } },
+    ])
+
+    assert.equal(maxRunning, 1)
   })
 
   it('archives oversized tool results and keeps an exact recovery copy', async () => {

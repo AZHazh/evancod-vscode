@@ -43,7 +43,7 @@ import type { Provider } from '../../../types'
 export class AgentTool extends Tool {
   readonly name = 'agent'
   readonly description =
-    '创建子 Agent 执行独立的研究或分析任务。子 Agent 有独立的上下文，结果摘要会返回给主 Agent。支持前台（阻塞）和后台（非阻塞）执行。'
+    '创建子 Agent 执行独立的研究或分析任务。子 Agent 有独立的上下文，结果摘要会返回给主 Agent。同一轮中的只读 Agent 可并行执行；可写 Agent 为避免工作区竞态会串行执行。支持前台（阻塞）和后台（非阻塞）执行。'
 
   /**
    * 构造函数
@@ -121,7 +121,8 @@ export class AgentTool extends Tool {
           },
           isolation: {
             type: 'string',
-            description: '可选隔离模式。none 使用当前工作目录；worktree 会创建临时 git worktree 隔离执行，要求 cwd 位于 git 仓库内。',
+            description:
+              '可选隔离模式。none 使用当前工作目录；worktree 会创建临时 git worktree 隔离执行，要求 cwd 位于 git 仓库内。临时 worktree 的文件改动不会自动合并回主工作区。',
             enum: ['none', 'worktree']
           },
           cwd: {
@@ -176,6 +177,12 @@ export class AgentTool extends Tool {
       const validModes: ExecutionMode[] = ['foreground', 'background']
       if (!validModes.includes(mode)) {
         return this.createErrorResult(`无效的 mode: ${mode}，必须是 foreground 或 background`)
+      }
+
+      if (!definition.readOnly && mode === 'background' && isolation === 'none') {
+        return this.createErrorResult(
+          '可写 Agent 不能在共享工作区后台运行，否则会与主 Agent 或其他 Agent 产生文件竞态。请改用 foreground，或使用 isolation=worktree 执行不需要自动合并的隔离任务。'
+        )
       }
 
       // 生成 Agent ID
@@ -269,6 +276,17 @@ Agent ID: ${result}
     } catch (error) {
       return this.createErrorResult(error)
     }
+  }
+
+  /**
+   * 只读 Agent 不会产生文件写入竞态，可以与同一模型响应中的其他安全调用并行。
+   * 可写 Agent 保持串行；后台共享工作区模式还会在 execute 中被拒绝。
+   */
+  isConcurrencySafe(input: unknown): boolean {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+    const args = input as { subagent_type?: string; type?: string }
+    const agentType = args.subagent_type || args.type || 'explore'
+    return this.coordinator.getAgentDefinition(agentType)?.readOnly === true
   }
 
   /**
