@@ -10,9 +10,7 @@
               <span class="permission-card__badge-dot" /> 等待审批
             </span>
           </div>
-          <div class="permission-card__description">
-            审阅模型返回的计划内容后，选择批准或拒绝。
-          </div>
+          <div class="permission-card__description">审阅模型返回的计划内容后，选择批准或拒绝。</div>
         </div>
       </div>
 
@@ -32,16 +30,31 @@
       </div>
 
       <div class="permission-card__actions">
-        <button class="chat-button chat-button--primary" type="button" :disabled="loading" @click="handleApprove">
-          <Check class="chat-button__icon" />{{ loading && action === 'approve' ? '处理中...' : '批准计划' }}
+        <button
+          class="chat-button chat-button--primary"
+          type="button"
+          :disabled="loading"
+          @click="handleApprove"
+        >
+          <Check class="chat-button__icon" />{{
+            loading && action === 'approve' ? '处理中...' : '批准计划'
+          }}
         </button>
-        <button class="chat-button chat-button--danger" type="button" :disabled="loading" @click="showRejectDialog = true">
+        <button
+          class="chat-button chat-button--danger"
+          type="button"
+          :disabled="loading"
+          @click="showRejectDialog = true"
+        >
           <X class="chat-button__icon" />拒绝
         </button>
       </div>
     </div>
 
-    <div v-else-if="plan.state === 'approved'" class="permission-card permission-card--approved result-card">
+    <div
+      v-else-if="plan.state === 'approved'"
+      class="permission-card permission-card--approved result-card"
+    >
       <div class="permission-card__header">
         <CircleCheck class="permission-card__file-icon permission-card__file-icon--approved" />
         <div class="permission-card__main">
@@ -51,12 +64,17 @@
               <CircleCheck class="permission-card__badge-icon" /> 已授权
             </span>
           </div>
-          <div class="permission-card__description">批准时间: {{ formatDate(plan.approvedAt!) }}</div>
+          <div class="permission-card__description">
+            批准时间: {{ formatDate(plan.approvedAt!) }}
+          </div>
         </div>
       </div>
     </div>
 
-    <div v-else-if="plan.state === 'rejected'" class="permission-card permission-card--denied result-card">
+    <div
+      v-else-if="plan.state === 'rejected'"
+      class="permission-card permission-card--denied result-card"
+    >
       <div class="permission-card__header">
         <CircleX class="permission-card__file-icon permission-card__file-icon--denied" />
         <div class="permission-card__main">
@@ -81,9 +99,7 @@
       @close="handleRejectClose"
     >
       <div class="reject-form">
-        <p class="reject-hint">
-          请说明拒绝原因，AI 将根据您的反馈重新制定计划：
-        </p>
+        <p class="reject-hint">请说明拒绝原因，AI 将根据您的反馈重新制定计划：</p>
         <Input
           v-model="rejectReason"
           type="textarea"
@@ -138,33 +154,36 @@ const planMarkdown = computed(() => {
   }
 
   if (props.plan.tasks.length > 0) {
-    sections.push([
-      '## Plan',
-      '',
-      ...props.plan.tasks.map((task, index) => {
-        const lines = [`${index + 1}. **${task.subject}**`]
-        if (task.description) lines.push(`   - ${task.description}`)
-        if (task.estimatedTime) lines.push(`   - 预计：${task.estimatedTime}`)
-        if (task.risks?.length) lines.push(`   - 风险：${task.risks.join('、')}`)
-        return lines.join('\n')
-      })
-    ].join('\n'))
+    sections.push(
+      [
+        '## Plan',
+        '',
+        ...props.plan.tasks.map((task, index) => {
+          const lines = [`${index + 1}. **${task.subject}**`]
+          if (task.description) lines.push(`   - ${task.description}`)
+          if (task.estimatedTime) lines.push(`   - 预计：${task.estimatedTime}`)
+          if (task.risks?.length) lines.push(`   - 风险：${task.risks.join('、')}`)
+          return lines.join('\n')
+        }),
+      ].join('\n')
+    )
   }
 
   if (props.plan.steps.length > 0) {
-    sections.push([
-      '## Steps',
-      '',
-      ...props.plan.steps.map(step => `- ${step}`)
-    ].join('\n'))
+    sections.push(['## Steps', '', ...props.plan.steps.map(step => `- ${step}`)].join('\n'))
   }
 
   if (props.plan.risks.length > 0) {
-    sections.push([
-      '## Risks',
-      '',
-      ...props.plan.risks.map(risk => `- **${riskLevelText(risk.level)}** ${risk.description}\n  - 缓解：${risk.mitigation}`)
-    ].join('\n'))
+    sections.push(
+      [
+        '## Risks',
+        '',
+        ...props.plan.risks.map(
+          risk =>
+            `- **${riskLevelText(risk.level)}** ${risk.description}\n  - 缓解：${risk.mitigation}`
+        ),
+      ].join('\n')
+    )
   }
 
   return sections.join('\n\n')
@@ -174,7 +193,7 @@ function riskLevelText(level: 'low' | 'medium' | 'high') {
   const map = {
     low: '低风险',
     medium: '中风险',
-    high: '高风险'
+    high: '高风险',
   }
   return map[level]
 }
@@ -244,7 +263,7 @@ function formatDate(dateString: string): string {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px;
+  padding: 10px;
   background: var(--chat-color-surface-container-lowest);
 }
 
@@ -345,7 +364,7 @@ function formatDate(dateString: string): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 16px 12px;
+  padding: 0 10px 12px;
 }
 
 .permission-card__path-row {
@@ -416,7 +435,10 @@ function formatDate(dateString: string): string {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
-  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease,
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
     transform 0.16s ease;
 
   &:hover:not(:disabled) {

@@ -23,7 +23,7 @@
  * 2. AI 只能使用读取工具分析代码和文件
  * 3. AI 生成结构化计划并写入计划文件
  * 4. 用户在 Webview 中审批计划
- * 5. 用户批准后，AI 调用 exit_plan_mode 退出计划模式
+ * 5. 用户批准后，AI 调用 exit_plan_mode 继续执行
  * 6. AI 开始执行计划中的任务
  */
 
@@ -110,10 +110,6 @@ const PLAN_MODE_ALLOWED_TOOLS = [
   'git_log',
   'git_branch',
 
-  // Task 查询
-  'task_list',
-  'task_get',
-
   // 用户交互
   'ask_user_question',
 
@@ -123,17 +119,15 @@ const PLAN_MODE_ALLOWED_TOOLS = [
 ]
 
 export class PlanModeManager {
-  /** 当前计划 */
-  private currentPlan: Plan | null = null
-
-  /** 计划模式状态 */
-  private state: PlanModeState = 'inactive'
-
-  /** 计划文件目录 */
-  private plansDir?: string
-
-  /** 审批等待回调 */
-  private approvalCallback?: (approved: boolean, reason?: string) => void
+  private readonly sessions = new Map<
+    string,
+    {
+      plan: Plan
+      state: PlanModeState
+      workDir: string
+      approvalCallback?: (approved: boolean, reason?: string) => void
+    }
+  >()
 
   /** Webview 管理器（可选，用于发送消息到 UI） */
   private webviewManager?: IWebviewManager
@@ -143,9 +137,7 @@ export class PlanModeManager {
    *
    * @param context - VSCode Extension Context
    */
-  constructor(private context: vscode.ExtensionContext) {
-    this.initPlansDirectory()
-  }
+  constructor(private context: vscode.ExtensionContext) {}
 
   /**
    * 设置 Webview 管理器
@@ -164,14 +156,6 @@ export class PlanModeManager {
    * - 如果有工作区，使用 <workspace>/.evancod/plans/
    * - 否则不创建计划文件
    */
-  private initPlansDirectory(): void {
-    const workspaceFolders = vscode.workspace.workspaceFolders
-    if (workspaceFolders && workspaceFolders.length > 0) {
-      const rootPath = workspaceFolders[0].uri.fsPath
-      this.plansDir = path.join(rootPath, '.evancod', 'plans')
-    }
-  }
-
   /**
    * 进入计划模式
    *
@@ -179,11 +163,16 @@ export class PlanModeManager {
    * @param description - 计划描述
    * @returns 计划对象
    */
-  async enterPlanMode(title: string, description: string): Promise<Plan> {
-    // 检查是否已在计划模式中
-    if (this.state !== 'inactive') {
+  async enterPlanMode(
+    sessionId: string,
+    title: string,
+    description: string,
+    workDir: string
+  ): Promise<Plan> {
+    const existing = this.sessions.get(sessionId)
+    if (existing && existing.state === 'planning') {
       throw new Error(
-        `Already in plan mode (state: ${this.state}). Please exit current plan first.`
+        `Already in plan mode (state: ${existing.state}). Please exit current plan first.`
       )
     }
 
@@ -203,8 +192,7 @@ export class PlanModeManager {
     }
 
     // 设置当前计划
-    this.currentPlan = plan
-    this.state = 'planning'
+    this.sessions.set(sessionId, { plan, state: 'planning', workDir })
 
     return plan
   }
@@ -217,37 +205,37 @@ export class PlanModeManager {
    * @param plan - 完整的计划内容
    * @returns 计划对象
    */
-  async exitPlanMode(plan: Partial<Plan>): Promise<Plan> {
-    // 检查是否在计划模式中
-    if (this.state !== 'planning') {
-      throw new Error(`Not in planning mode (state: ${this.state})`)
+  async exitPlanMode(sessionId: string, plan: Partial<Plan>): Promise<Plan> {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.state !== 'planning') {
+      throw new Error(`Not in planning mode (session: ${sessionId})`)
     }
 
-    if (!this.currentPlan) {
+    if (!session.plan) {
       throw new Error('No current plan found')
     }
 
     // 更新计划内容
     if (plan.tasks) {
-      this.currentPlan.tasks = plan.tasks
+      session.plan.tasks = plan.tasks
     }
     if (plan.steps) {
-      this.currentPlan.steps = plan.steps
+      session.plan.steps = plan.steps
     }
     if (plan.risks) {
-      this.currentPlan.risks = plan.risks
+      session.plan.risks = plan.risks
     }
 
     // 保存计划文件
-    await this.savePlanFile(this.currentPlan)
+    await this.savePlanFile(session.plan, session.workDir)
 
     // 发送消息到 Webview
     if (this.webviewManager) {
-      this.webviewManager.sendPlanSubmitted(this.currentPlan)
+      this.webviewManager.sendPlanSubmitted(session.plan)
     }
 
     // 返回计划，等待用户审批
-    return this.currentPlan
+    return session.plan
   }
 
   /**
@@ -256,22 +244,23 @@ export class PlanModeManager {
    * @param planId - 计划 ID
    */
   async approvePlan(planId: string): Promise<void> {
-    if (!this.currentPlan || this.currentPlan.id !== planId) {
+    const session = this.findSessionByPlanId(planId)
+    if (!session) {
       throw new Error(`Plan not found: ${planId}`)
     }
 
     // 更新计划状态
-    this.currentPlan.state = 'approved'
-    this.currentPlan.approvedAt = new Date().toISOString()
-    this.state = 'approved'
+    session.plan.state = 'approved'
+    session.plan.approvedAt = new Date().toISOString()
+    session.state = 'approved'
 
     // 更新计划文件
-    await this.savePlanFile(this.currentPlan)
+    await this.savePlanFile(session.plan, session.workDir)
 
     // 调用审批回调
-    if (this.approvalCallback) {
-      this.approvalCallback(true)
-      this.approvalCallback = undefined
+    if (session.approvalCallback) {
+      session.approvalCallback(true)
+      session.approvalCallback = undefined
     }
   }
 
@@ -282,32 +271,31 @@ export class PlanModeManager {
    * @param reason - 拒绝原因
    */
   async rejectPlan(planId: string, reason: string): Promise<void> {
-    if (!this.currentPlan || this.currentPlan.id !== planId) {
+    const session = this.findSessionByPlanId(planId)
+    if (!session) {
       throw new Error(`Plan not found: ${planId}`)
     }
 
     // 更新计划状态
-    this.currentPlan.state = 'rejected'
-    this.currentPlan.rejectedReason = reason
-    this.state = 'rejected'
+    session.plan.state = 'rejected'
+    session.plan.rejectedReason = reason
+    session.state = 'rejected'
 
     // 更新计划文件
-    await this.savePlanFile(this.currentPlan)
+    await this.savePlanFile(session.plan, session.workDir)
 
     // 调用审批回调
-    if (this.approvalCallback) {
-      this.approvalCallback(false, reason)
-      this.approvalCallback = undefined
+    if (session.approvalCallback) {
+      session.approvalCallback(false, reason)
+      session.approvalCallback = undefined
     }
   }
 
   /**
    * 完成计划执行，清除状态
    */
-  async completePlan(): Promise<void> {
-    this.currentPlan = null
-    this.state = 'inactive'
-    this.approvalCallback = undefined
+  async completePlan(sessionId: string): Promise<void> {
+    this.sessions.delete(sessionId)
   }
 
   /**
@@ -315,8 +303,8 @@ export class PlanModeManager {
    *
    * @returns 当前计划，如果没有则返回 null
    */
-  getCurrentPlan(): Plan | null {
-    return this.currentPlan
+  getCurrentPlan(sessionId: string): Plan | null {
+    return this.sessions.get(sessionId)?.plan || null
   }
 
   /**
@@ -324,8 +312,8 @@ export class PlanModeManager {
    *
    * @returns 计划模式状态
    */
-  getState(): PlanModeState {
-    return this.state
+  getState(sessionId: string): PlanModeState {
+    return this.sessions.get(sessionId)?.state || 'inactive'
   }
 
   /**
@@ -334,11 +322,14 @@ export class PlanModeManager {
    * @param toolName - 工具名称
    * @returns 是否允许
    */
-  isToolAllowedInPlanMode(toolName: string): boolean {
-    // 如果不在计划模式，所有工具都允许
-    if (this.state === 'inactive' || this.state === 'approved') {
+  isToolAllowedInPlanMode(toolName: string, sessionId?: string): boolean {
+    // 缺少会话上下文时按计划阶段处理，避免旧调用或子 Agent 绕过限制。
+    const state = sessionId ? this.getState(sessionId) : 'planning'
+    if (state === 'approved') {
       return true
     }
+
+    if (state === 'inactive') return PLAN_MODE_ALLOWED_TOOLS.includes(toolName)
 
     // 在计划模式下，只允许特定工具
     return PLAN_MODE_ALLOWED_TOOLS.includes(toolName)
@@ -351,9 +342,13 @@ export class PlanModeManager {
    *
    * @returns Promise<boolean> - true 表示批准，false 表示拒绝
    */
-  async waitForApproval(): Promise<{ approved: boolean; reason?: string }> {
+  async waitForApproval(sessionId: string): Promise<{ approved: boolean; reason?: string }> {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return { approved: false, reason: '计划不存在或已结束' }
+    }
     return new Promise((resolve) => {
-      this.approvalCallback = (approved: boolean, reason?: string) => {
+      session.approvalCallback = (approved: boolean, reason?: string) => {
         resolve({ approved, reason })
       }
     })
@@ -364,15 +359,16 @@ export class PlanModeManager {
    *
    * @param plan - 计划对象
    */
-  private async savePlanFile(plan: Plan): Promise<void> {
-    if (!this.plansDir) {
-      console.warn('No workspace folder, skipping plan file save')
+  private async savePlanFile(plan: Plan, workDir: string): Promise<void> {
+    if (!workDir) {
+      console.warn('No session work directory, skipping plan file save')
       return
     }
 
     try {
+      const plansDir = path.join(workDir, '.evancod', 'plans')
       // 确保目录存在
-      const dirUri = vscode.Uri.file(this.plansDir)
+      const dirUri = vscode.Uri.file(plansDir)
       try {
         await vscode.workspace.fs.stat(dirUri)
       } catch {
@@ -381,7 +377,7 @@ export class PlanModeManager {
 
       // 创建计划文件
       const fileName = `${plan.id}.md`
-      const filePath = path.join(this.plansDir, fileName)
+      const filePath = path.join(plansDir, fileName)
       const fileUri = vscode.Uri.file(filePath)
 
       // 格式化计划为 Markdown
@@ -507,8 +503,13 @@ export class PlanModeManager {
    * 销毁服务
    */
   dispose(): void {
-    this.currentPlan = null
-    this.state = 'inactive'
-    this.approvalCallback = undefined
+    this.sessions.clear()
+  }
+
+  private findSessionByPlanId(planId: string) {
+    for (const session of this.sessions.values()) {
+      if (session.plan.id === planId) return session
+    }
+    return undefined
   }
 }

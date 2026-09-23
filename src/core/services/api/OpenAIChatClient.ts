@@ -84,6 +84,7 @@ export class OpenAIChatClient implements ApiClient {
           parameters: tool.input_schema,
         },
       }))
+      if (options?.toolChoice === 'required') body.tool_choice = 'required'
     }
 
     const attempt = async (): Promise<ApiClientResponse> => {
@@ -109,7 +110,7 @@ export class OpenAIChatClient implements ApiClient {
       let receivedDone = false
       let usage: TokenUsage | undefined
 
-      while (true) {
+      for (;;) {
         const { value, done } = await reader.read()
         throwIfAborted(options?.signal)
         if (done) break

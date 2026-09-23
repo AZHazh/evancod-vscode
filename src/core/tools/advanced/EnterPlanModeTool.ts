@@ -41,7 +41,11 @@ export class EnterPlanModeTool extends Tool {
    *
    * @param planModeManager - 计划模式管理服务
    */
-  constructor(private planModeManager: PlanModeManager) {
+  constructor(
+    private planModeManager: PlanModeManager,
+    private sessionId: string,
+    private cwd: string
+  ) {
     super()
   }
 
@@ -92,8 +96,10 @@ export class EnterPlanModeTool extends Tool {
 
       // 进入计划模式
       const plan = await this.planModeManager.enterPlanMode(
+        this.sessionId,
         args.title.trim(),
-        args.description.trim()
+        args.description.trim(),
+        this.cwd
       )
 
       const content = `✅ 已进入计划模式
@@ -113,8 +119,8 @@ ${plan.description}
    - ✅ 允许: read_file, glob, grep, find, list_directory
    - ✅ 允许: analyze_ast, analyze_dependencies
    - ✅ 允许: git_status, git_diff, git_log, git_branch
-   - ✅ 允许: task_list, task_get
    - ❌ 禁止: edit_file, write_file, delete_file, bash 等修改操作
+   - ❌ 禁止: task_create, task_update, task_list, task_get（计划任务只记录在本计划中）
 
 2. **制定计划**
    - 分析现有代码结构
@@ -144,8 +150,6 @@ ${plan.description}
           'git_diff',
           'git_log',
           'git_branch',
-          'task_list',
-          'task_get',
           'enter_plan_mode',
           'exit_plan_mode'
         ]

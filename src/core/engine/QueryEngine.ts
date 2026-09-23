@@ -69,6 +69,8 @@ import { RuntimeProfileResolver } from './RuntimeProfileResolver'
  * QueryEngine 配置
  */
 export interface QueryEngineConfig {
+  /** 当前会话 ID，用于隔离计划模式状态。 */
+  sessionId?: string
   /**
    * 工作目录
    */
@@ -420,6 +422,7 @@ export class QueryEngine {
       this.config.toolSnapshot ||
       new RuntimeProfileResolver(registry).resolve({ readOnly: this.config.readOnly }).toolSnapshot
     const instantiated = snapshot.instantiate({
+      sessionId: this.config.sessionId,
       cwd: this.config.cwd,
       provider: this.config.provider,
       model: this.config.model,
@@ -431,15 +434,20 @@ export class QueryEngine {
       mcpManager: this.config.mcpManager,
       skillManager: this.config.skillManager,
     })
+    const planModeDisablesTasks = this.config.permissionMode === 'plan'
+    const enabledTools = planModeDisablesTasks
+      ? instantiated.tools.filter(tool => !tool.name.startsWith('task_'))
+      : instantiated.tools
     this.toolPolicies = new Map(
       snapshot
         .list()
+        .filter(registration => !planModeDisablesTasks || !registration.name.startsWith('task_'))
         .map(registration => [
           registration.name,
           { capabilities: registration.capabilities, source: registration.source },
         ])
     )
-    this.tools = instantiated.tools
+    this.tools = enabledTools
     for (const warning of instantiated.warnings) {
       if (this.config.verbose) console.warn(`[QueryEngine] ${warning}`)
     }
@@ -470,10 +478,14 @@ export class QueryEngine {
 
   private buildSystemPrompt(): string {
     const injectedPrompt = this.config.systemPrompt?.trim()
+    const planModeNotice =
+      this.config.permissionMode === 'plan'
+        ? '\n- 当前处于计划权限模式：先调用 enter_plan_mode（如果尚未进入），完成只读分析后调用 exit_plan_mode 提交完整 tasks/steps/risks，等待用户审批；审批前不要调用 write_file/edit_file，且不要调用 task_create、task_update、task_list 或 task_get。\n'
+        : ''
     return `你是 Evancod，一个在 VS Code 插件中运行的软件工程 Agent。
 
 工作契约：
-- 复杂多步骤、plan mode、todo list 或多项请求使用 task_create；执行前用 task_update 标记 in_progress，实际实现和验证完成后才能标记 completed，再用 task_list 检查下一项。
+- 复杂多步骤、todo list 或多项请求使用 task_create；执行前用 task_update 标记 in_progress，实际实现和验证完成后才能标记 completed，再用 task_list 检查下一项。计划权限模式是例外：计划阶段不使用任何 task 工具。
 - 编码前读取、搜索并分析工作区。能从代码、配置、文档、测试或既有模式确认的信息自行确认，不询问用户。
 - 只有缺少外部信息，或选择会实质影响公开 API、数据、依赖、兼容性、安全、性能、用户体验、不可逆操作范围或验收标准时，才调用 ask_user_question 集中询问 1-4 个阻塞问题。
 - 对局部、可逆、低风险细节遵循项目既有模式。用户要求冲突或不同理解会产生显著不同结果时，不得擅自选择。
@@ -481,7 +493,7 @@ export class QueryEngine {
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
 - 对复杂、独立或上下文较重的研究任务，可以使用 agent。后台 Agent 启动后不要轮询，等待完成通知。
 - 用户明确指定某个子 Agent 时，必须把对应定义 ID 传给 subagent_type；该 Agent 失败或超时后不得自行替代执行，应说明原因并询问是否重试。
-- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${this.buildSkillCatalog()}${
+- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${planModeNotice}${this.buildSkillCatalog()}${
       injectedPrompt ? `\n\n当前角色与附加约束：\n${injectedPrompt}` : ''
     }`
   }
@@ -607,14 +619,6 @@ Skill 使用契约：
     if (response.approved && response.rule === 'always' && toolName) {
       this.sessionAllowedTools.add(toolName)
     }
-    if (toolName === 'exit_plan_mode' && this.config.planModeManager) {
-      void (response.approved
-        ? this.config.planModeManager.approvePlan(response.requestId)
-        : this.config.planModeManager.rejectPlan(
-            response.requestId,
-            response.reason || '用户拒绝了计划'
-          ))
-    }
     waiter(response)
     return true
   }
@@ -711,6 +715,12 @@ Skill 使用契约：
       const MAX_EMPTY_RESPONSES = 3
       let taskContinuationCount = 0
       const MAX_TASK_CONTINUATIONS = 8
+      let planToolUseRetryCount = 0
+      const MAX_PLAN_TOOL_USE_RETRIES = 2
+      // exit_plan_mode 在用户批准前会阻塞当前工具调用。批准返回后，模型仍可能
+      // 直接输出总结，因此保留本轮查询的强制执行状态，直到至少成功调用一个
+      // 写入或执行工具。
+      let planExecutionRequired = false
       let taskCompletionReviewRequested = false
       let taskWorkflowActive =
         isExplicitContinuationRequest(content) &&
@@ -848,6 +858,8 @@ Skill 使用契约：
           toolDefinitions,
           {
             signal: this.abortController.signal,
+            toolChoice:
+              this.requiresPlanToolUse() || planExecutionRequired ? 'required' : undefined,
             onImageEvent: (event: ImageStreamEvent) => {
               if (this.cancelled) return
               this.handleImageStreamEvent(event, imageSavePromises)
@@ -873,6 +885,36 @@ Skill 使用契约：
         this.throwIfCancelled()
         assistantContent = response.content
         totalUsage = mergeUsage(totalUsage, response.usage)
+
+        // 计划审批依赖 enter/exit_plan_mode 的工具调用。部分 OpenAI 兼容模型或中转层
+        // 即使收到 tool_choice=required 仍可能返回纯文本；不能把这类响应当作计划完成。
+        if ((this.requiresPlanToolUse() || planExecutionRequired) && !response.toolCalls?.length) {
+          planToolUseRetryCount++
+          this.flushPendingDeltas()
+          if (assistantContent) {
+            this.onAgentEventCallback?.({ type: 'content_discard' })
+          }
+          if (planToolUseRetryCount > MAX_PLAN_TOOL_USE_RETRIES) {
+            throw new Error(
+              '计划模式要求模型通过工具完成流程，但当前模型连续返回普通文本。请切换支持工具调用的模型后重试。'
+            )
+          }
+          const continuationInstruction = planExecutionRequired
+            ? '[内部计划执行约束] 计划已经获得用户批准，不能直接输出总结或结束本轮。' +
+              '必须按照已批准计划立即调用至少一个实际执行工具（如 write_file、edit_file、bash、' +
+              'copy_file、move_file 或 delete_file），完成文件修改或验证后才能回复。'
+            : '[内部计划模式约束] 当前处于计划模式，不能直接输出 Markdown 或普通文本结束。' +
+              '必须调用工具继续：需要补充信息时调用 ask_user_question，需要读取项目时调用只读工具，' +
+              '计划完成时调用 exit_plan_mode 提交计划并等待用户审批。'
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content: continuationInstruction,
+            timestamp: Date.now(),
+            internal: true,
+          })
+          continue
+        }
 
         if (response.incomplete) {
           if (response.toolCalls?.length) {
@@ -1012,12 +1054,33 @@ Skill 使用契约：
             })
           }
 
+          // exit_plan_mode 只有在用户批准后才会成功返回。此时必须让模型至少
+          // 成功调用一次真正的写入/执行工具，避免批准后直接输出空泛总结。
+          if (
+            this.config.permissionMode === 'plan' &&
+            this.config.planModeManager?.getState(this.config.sessionId || '') === 'approved' &&
+            toolResults.some(
+              result => result.toolName === 'exit_plan_mode' && !result.isError
+            )
+          ) {
+            planExecutionRequired = true
+            planToolUseRetryCount = 0
+          }
+
+          if (
+            planExecutionRequired &&
+            toolResults.some(result => !result.isError && this.isPlanExecutionTool(result.toolName))
+          ) {
+            planExecutionRequired = false
+            planToolUseRetryCount = 0
+          }
+
           // 兜底断路器：连续多轮都只有重复的只读调用，说明模型在原地打转。
           // 此时不再继续工具循环，直接进入无工具的收尾请求让它给出结论。
           if (noProgress) {
             consecutiveNoProgressTurns++
             noProgressTurnCount = consecutiveNoProgressTurns
-            if (consecutiveNoProgressTurns >= 2) {
+            if (consecutiveNoProgressTurns >= 2 && !planExecutionRequired) {
               console.warn('Detected tool-call loop with no progress, forcing final answer')
               this.onAgentEventCallback?.({
                 type: 'system_notification',
@@ -1042,7 +1105,7 @@ Skill 使用契约：
               lastErrorSignature = errorSignature
               repeatedErrorTurns = 1
             }
-            if (repeatedErrorTurns >= 3) {
+            if (repeatedErrorTurns >= 3 && !planExecutionRequired) {
               console.warn('Detected repeated identical tool errors, forcing final answer')
               loopBroken = true
               terminationReason = 'no_progress'
@@ -1148,6 +1211,12 @@ Skill 使用契约：
       // 循环未正常闭环（触顶或被死循环断路器打断），且最后一轮以工具调用结尾：
       // 此时 finalContent 仍为空，直接落一条空 assistant 消息会导致闭环失败、
       // 任务面板停在半途。补一轮"无工具"的收尾请求，让模型基于已有结果给出总结。
+      if (planExecutionRequired && iteration >= MAX_ITERATIONS) {
+        throw new Error(
+          '计划已批准，但模型未调用任何实际执行工具。请重新发送“继续”，让模型按照批准的计划执行。'
+        )
+      }
+
       const needsClosing =
         (iteration >= MAX_ITERATIONS || loopBroken) && lastTurnHadToolCalls && !finalContent
       if (needsClosing) {
@@ -1465,11 +1534,20 @@ Skill 使用契约：
 
     const permissionMode = this.config.permissionMode || 'default'
 
+    if (permissionMode === 'plan' && toolName.startsWith('task_')) {
+      return Promise.resolve({ approved: false, reason: '计划模式完全不使用 Task 工具' })
+    }
+
     if (
       permissionMode === 'plan' &&
-      !this.config.planModeManager?.isToolAllowedInPlanMode(toolName)
+      !this.config.planModeManager?.isToolAllowedInPlanMode(toolName, this.config.sessionId)
     ) {
-      return Promise.resolve({ approved: false, reason: `Plan Mode 不允许使用工具: ${toolName}` })
+      return Promise.resolve({
+        approved: false,
+        reason:
+          `计划尚未审批，不能调用 ${toolName}。` +
+          '请不要重试写入或执行操作，继续只读分析并调用 exit_plan_mode 提交计划。',
+      })
     }
 
     if (permissionMode === 'bypassPermissions' || this.sessionAllowedTools.has(toolName)) {
@@ -1553,6 +1631,17 @@ Skill 使用契约：
         description: this.getPermissionDescription(toolName),
       })
     })
+  }
+
+  private requiresPlanToolUse(): boolean {
+    if (this.config.permissionMode !== 'plan') return false
+    return this.config.planModeManager?.getState(this.config.sessionId || '') !== 'approved'
+  }
+
+  private isPlanExecutionTool(toolName: string): boolean {
+    if (toolName === 'enter_plan_mode' || toolName === 'exit_plan_mode') return false
+    const capabilities = new Set(this.toolPolicies.get(toolName)?.capabilities || [])
+    return capabilities.has('write') || capabilities.has('execute')
   }
 
   private requestInteraction(

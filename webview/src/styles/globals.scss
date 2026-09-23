@@ -1,26 +1,34 @@
 :root {
   // cc-desktop inspired semantic tokens with VSCode fallbacks
-  --color-primary: #8F482F;
-  --color-primary-container: #AD5F45;
-  --color-primary-fixed: #FFDBD0;
-  --color-primary-fixed-dim: #FFB59D;
-  --color-on-primary: #FFFFFF;
-  --color-error: #BA1A1A;
+  --color-primary: #8f482f;
+  --color-primary-container: #ad5f45;
+  --color-primary-fixed: #ffdbd0;
+  --color-primary-fixed-dim: #ffb59d;
+  --color-on-primary: #ffffff;
+  --color-error: #ba1a1a;
 
-  --color-bg-primary: var(--vscode-editor-background, #FAF9F5);
-  --color-bg-secondary: var(--vscode-panel-background, #F4F4F0);
-  --color-surface: var(--vscode-input-background, #FAF9F5);
-  --color-surface-container: color-mix(in srgb, var(--color-bg-secondary) 88%, var(--color-bg-primary));
-  --color-surface-hover: color-mix(in srgb, var(--color-bg-secondary) 72%, var(--color-text-primary) 8%);
+  --color-bg-primary: var(--vscode-editor-background, #faf9f5);
+  --color-bg-secondary: var(--vscode-panel-background, #f4f4f0);
+  --color-surface: var(--vscode-input-background, #faf9f5);
+  --color-surface-container: color-mix(
+    in srgb,
+    var(--color-bg-secondary) 88%,
+    var(--color-bg-primary)
+  );
+  --color-surface-hover: color-mix(
+    in srgb,
+    var(--color-bg-secondary) 72%,
+    var(--color-text-primary) 8%
+  );
   --color-surface-glass: color-mix(in srgb, var(--color-bg-primary) 86%, transparent);
   --color-surface-glass-border: color-mix(in srgb, var(--color-border) 72%, transparent);
   --color-overlay-scrim: rgba(27, 28, 26, 0.48);
 
-  --color-text-primary: var(--vscode-editor-foreground, #1B1C1A);
-  --color-text-secondary: var(--vscode-descriptionForeground, #54433E);
+  --color-text-primary: var(--vscode-editor-foreground, #1b1c1a);
+  --color-text-secondary: var(--vscode-descriptionForeground, #54433e);
   --color-text-tertiary: color-mix(in srgb, var(--color-text-secondary) 72%, transparent);
-  --color-border: var(--vscode-panel-border, #DAC1BA);
-  --color-border-focus: var(--vscode-focusBorder, #8F482F);
+  --color-border: var(--vscode-panel-border, #dac1ba);
+  --color-border-focus: var(--vscode-focusBorder, #8f482f);
   --color-accent: var(--color-border-focus);
   --color-button-bg: var(--vscode-button-background, var(--color-primary));
   --color-button-fg: var(--vscode-button-foreground, var(--color-on-primary));
@@ -29,11 +37,21 @@
   --color-input-fg: var(--vscode-input-foreground, var(--color-text-primary));
   --color-input-border: var(--vscode-input-border, var(--color-border));
   --color-btn-primary-fg: var(--vscode-button-foreground, var(--color-on-primary));
-  --gradient-btn-primary: linear-gradient(135deg, var(--color-primary), var(--color-primary-container));
-  --gradient-btn-primary-hover: linear-gradient(135deg, var(--color-primary-container), var(--color-primary));
+  --gradient-btn-primary: linear-gradient(
+    135deg,
+    var(--color-primary),
+    var(--color-primary-container)
+  );
+  --gradient-btn-primary-hover: linear-gradient(
+    135deg,
+    var(--color-primary-container),
+    var(--color-primary)
+  );
 
   --shadow-dropdown: 0 8px 24px rgba(15, 23, 42, 0.06), 0 24px 60px rgba(15, 23, 42, 0.08);
-  --shadow-focus-ring: 0 0 0 1px color-mix(in srgb, var(--color-border-focus) 42%, transparent), 0 0 0 4px color-mix(in srgb, var(--color-border-focus) 16%, transparent);
+  --shadow-focus-ring:
+    0 0 0 1px color-mix(in srgb, var(--color-border-focus) 42%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--color-border-focus) 16%, transparent);
   --shadow-error-ring: 0 0 0 1px rgba(186, 26, 26, 0.22), 0 0 0 4px rgba(186, 26, 26, 0.12);
   --shadow-button-primary: 0 10px 24px rgba(143, 72, 47, 0.18);
 
@@ -53,8 +71,23 @@
   --radius-full: 9999px;
 
   // 对话区 token（cc-desktop / Claude Desktop 风格，优先跟随 VS Code 主题）
-  --chat-font-body: var(--vscode-font-family, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-  --chat-font-mono: var(--vscode-editor-font-family, 'JetBrains Mono', 'SF Mono', Menlo, Monaco, Consolas, monospace);
+  --chat-font-body: var(
+    --vscode-font-family,
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif
+  );
+  --chat-font-mono: var(
+    --vscode-editor-font-family,
+    'JetBrains Mono',
+    'SF Mono',
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace
+  );
 
   --chat-color-primary: #8f482f;
   --chat-color-primary-container: #ad5f45;
@@ -71,8 +104,14 @@
   --chat-color-surface-container: var(--vscode-input-background, #efeeea);
   --chat-color-surface-container-high: var(--vscode-list-hoverBackground, #e9e8e4);
   --chat-color-surface-container-highest: var(--vscode-list-activeSelectionBackground, #e3e2df);
-  --chat-color-surface-hover: var(--vscode-list-hoverBackground, var(--chat-color-surface-container-high));
-  --chat-color-surface-selected: var(--vscode-list-activeSelectionBackground, var(--chat-color-surface-container));
+  --chat-color-surface-hover: var(
+    --vscode-list-hoverBackground,
+    var(--chat-color-surface-container-high)
+  );
+  --chat-color-surface-selected: var(
+    --vscode-list-activeSelectionBackground,
+    var(--chat-color-surface-container)
+  );
   --chat-color-surface-user-msg: var(--vscode-input-background, #f5f0e8);
 
   --chat-color-text-primary: var(--vscode-editor-foreground, #1b1c1a);
@@ -104,11 +143,27 @@
   --chat-color-code-type: #7e5520;
   --chat-color-code-punctuation: #5c504a;
 
-  --chat-color-diff-added-bg: color-mix(in srgb, var(--vscode-charts-green, #16a34a) 16%, transparent);
-  --chat-color-diff-added-gutter: color-mix(in srgb, var(--vscode-charts-green, #16a34a) 24%, transparent);
+  --chat-color-diff-added-bg: color-mix(
+    in srgb,
+    var(--vscode-charts-green, #16a34a) 16%,
+    transparent
+  );
+  --chat-color-diff-added-gutter: color-mix(
+    in srgb,
+    var(--vscode-charts-green, #16a34a) 24%,
+    transparent
+  );
   --chat-color-diff-added-text: var(--vscode-charts-green, #1a7f37);
-  --chat-color-diff-removed-bg: color-mix(in srgb, var(--vscode-charts-red, #cf222e) 14%, transparent);
-  --chat-color-diff-removed-gutter: color-mix(in srgb, var(--vscode-charts-red, #cf222e) 22%, transparent);
+  --chat-color-diff-removed-bg: color-mix(
+    in srgb,
+    var(--vscode-charts-red, #cf222e) 14%,
+    transparent
+  );
+  --chat-color-diff-removed-gutter: color-mix(
+    in srgb,
+    var(--vscode-charts-red, #cf222e) 22%,
+    transparent
+  );
   --chat-color-diff-removed-text: var(--vscode-charts-red, #cf222e);
 
   --chat-color-terminal-header: var(--vscode-titleBar-activeBackground, #2d2d2d);
@@ -132,11 +187,11 @@
 }
 
 .vscode-dark,
-[data-vscode-theme-kind="vscode-dark"] {
-  --color-primary: #FFB59F;
-  --color-primary-container: #FF6E40;
-  --color-on-primary: #2C120B;
-  --color-error: #FFB4AB;
+[data-vscode-theme-kind='vscode-dark'] {
+  --color-primary: #ffb59f;
+  --color-primary-container: #ff6e40;
+  --color-on-primary: #2c120b;
+  --color-error: #ffb4ab;
   --color-overlay-scrim: rgba(6, 6, 6, 0.56);
   --shadow-dropdown: 0 16px 40px rgba(0, 0, 0, 0.42);
   --shadow-button-primary: 0 12px 24px rgba(255, 110, 64, 0.18);
@@ -163,28 +218,51 @@
 }
 
 @keyframes chat-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes chat-shimmer {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.38; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.38;
+  }
 }
 
 @keyframes chat-cursor-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 @keyframes chat-thinking-dots {
-  0%, 20% { content: ''; }
-  40% { content: '.'; }
-  60% { content: '..'; }
-  80%, 100% { content: '...'; }
+  0%,
+  20% {
+    content: '';
+  }
+  40% {
+    content: '.';
+  }
+  60% {
+    content: '..';
+  }
+  80%,
+  100% {
+    content: '...';
+  }
 }
 
 @keyframes chat-pulse-dot {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
     transform: scale(1);
   }
@@ -201,7 +279,13 @@
 }
 
 body {
-  font-family: var(--vscode-font-family), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    var(--vscode-font-family),
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text-primary);

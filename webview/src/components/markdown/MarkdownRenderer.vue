@@ -208,7 +208,7 @@ async function handleRenderedClick(event: MouseEvent) {
 .markdown-renderer {
   width: 100%;
   color: var(--chat-color-text-primary);
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.625;
 }
 
@@ -250,16 +250,16 @@ async function handleRenderedClick(event: MouseEvent) {
   }
 
   :deep(h1) {
-    font-size: 20px;
-  }
-  :deep(h2) {
     font-size: 18px;
   }
-  :deep(h3) {
+  :deep(h2) {
     font-size: 16px;
   }
-  :deep(h4) {
+  :deep(h3) {
     font-size: 15px;
+  }
+  :deep(h4) {
+    font-size: 14px;
   }
 
   :deep(ul),
@@ -315,7 +315,7 @@ async function handleRenderedClick(event: MouseEvent) {
   }
 
   :deep(.copy-btn) {
-    padding: 4px 8px;
+    padding: 2px;
     border: 1px solid color-mix(in srgb, var(--chat-color-outline-variant) 40%, transparent);
     border-radius: 6px;
     background: var(--chat-color-surface-container-lowest);
@@ -355,7 +355,7 @@ async function handleRenderedClick(event: MouseEvent) {
     width: 100%;
     margin: 0.75em 0;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 12px;
   }
 
   :deep(th),

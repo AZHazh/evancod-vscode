@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "code_review",
+  "name": "code review",
+  "description": "检查代码编写后的质量问题",
+  "modelTier": "haiku",
+  "effortLevel": "medium",
+  "enabledTools": [
+    "builtin.read_file",
+    "builtin.glob",
+    "builtin.grep",
+    "builtin.list_directory",
+    "builtin.find",
+    "builtin.lsp",
+    "builtin.web_fetch",
+    "builtin.web_search",
+    "builtin.task_list",
+    "builtin.task_get",
+    "builtin.ask_user_question",
+    "builtin.skill"
+  ],
+  "readOnly": true,
+  "permissionMode": "default",
+  "maxIterations": 100,
+  "isolation": "none",
+  "defaultMode": "foreground",
+  "enabled": true
+}

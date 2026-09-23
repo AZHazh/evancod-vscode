@@ -256,7 +256,7 @@ QueryEngine
 **Extension ↔ Webview 通信的唯一桥梁**。
 
 - 创建和管理 VSCode Webview Panel
-- 加载 HTML（开发模式连 localhost:5173，生产模式读 `webview/dist/`）
+- 加载 HTML（开发模式连 localhost:9999，生产模式读 `webview/dist/`）
 - 消息收发：`postMessage()` 发送，`onDidReceiveMessage()` 接收
 - 消息路由：将 Webview 消息分发到对应的 Handler
 - 处理文件选择、new-api 同步等特殊交互

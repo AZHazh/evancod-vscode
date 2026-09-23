@@ -44,7 +44,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   allowMultiple: false,
-  disabled: false
+  disabled: false,
 })
 
 const emit = defineEmits<{
@@ -84,7 +84,7 @@ function handleSelect(label: string) {
 }
 
 .option-item {
-  padding: 16px;
+  padding: 10px;
   background: var(--vscode-input-background);
   border: 2px solid var(--vscode-panel-border);
   border-radius: 8px;
@@ -119,13 +119,13 @@ function handleSelect(label: string) {
 
 .option-main {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: flex-start;
 }
 
 .option-check {
   flex-shrink: 0;
-  font-size: 20px;
+  font-size: 12px;
   line-height: 1;
   margin-top: 2px;
 }
@@ -140,14 +140,14 @@ function handleSelect(label: string) {
 }
 
 .option-label {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--vscode-foreground);
   margin-bottom: 4px;
 }
 
 .option-description {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.5;
 }

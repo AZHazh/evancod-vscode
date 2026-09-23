@@ -29,12 +29,12 @@ color-mix(in srgb, #55b7ff 45%, var(--color-border)); */
   /* background:
 color-mix(in srgb, #2386c8 18%, var(--color-surface)); */
   color: #55b7ff;
-  font-size: 13px;
+  font-size: 12px;
   vertical-align: middle;
 }
 .skill-badge__icon {
-  width: 17px;
-  height: 17px;
+  width: 12px;
+  height: 12px;
 }
 .skill-badge__remove {
   display: inline-flex;
@@ -45,7 +45,7 @@ color-mix(in srgb, #2386c8 18%, var(--color-surface)); */
   cursor: pointer;
 }
 .skill-badge__remove svg {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 </style>

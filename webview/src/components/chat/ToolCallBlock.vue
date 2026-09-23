@@ -742,7 +742,29 @@ function downloadImage(image: GeneratedImage) {
         Running
       </span>
       <span v-else class="tool-call__result-summary">{{ resultSummary }}</span>
-      <span v-if="status === 'error'" class="tool-call__error-icon">!</span>
+      <span v-if="status === 'error'" class="tool-call__error-icon">
+        <svg
+          t="1790081186690"
+          class="icon"
+          viewBox="0 0 1024 1024"
+          version="1.1"
+          xmlns="http://www.w3.org/2000/svg"
+          p-id="8090"
+          width="12"
+          height="12"
+        >
+          <path
+            d="M552.96 643.072H471.04c-9.728 0-17.92-7.68-17.92-17.408L429.056 148.48c-0.512-10.24 7.68-18.944 17.92-18.944h129.024c10.24 0 18.944 8.704 17.92 18.944l-23.552 477.696c0 9.216-7.68 16.896-17.408 16.896z"
+            fill="#f85149"
+            p-id="8091"
+          ></path>
+          <path
+            d="M512 817.664m-105.472 0a105.472 105.472 0 1 0 210.944 0 105.472 105.472 0 1 0-210.944 0Z"
+            fill="#f85149"
+            p-id="8092"
+          ></path>
+        </svg>
+      </span>
       <span v-if="expandable" class="tool-call__chevron">
         <svg v-if="expanded" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path
@@ -1001,8 +1023,8 @@ function downloadImage(image: GeneratedImage) {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 5px;
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -1016,11 +1038,11 @@ function downloadImage(image: GeneratedImage) {
 
 .tool-call__icon {
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
+  // display: flex;
+  // align-items: center;
+  // justify-content: center;
+  width: 12px;
+  height: 12px;
   color: var(--chat-color-outline);
   transition: color 200ms ease;
 
@@ -1059,7 +1081,7 @@ function downloadImage(image: GeneratedImage) {
   align-items: center;
   gap: 4px;
   color: var(--chat-color-outline);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .tool-call--error .tool-call__result-summary,
@@ -1077,12 +1099,12 @@ function downloadImage(image: GeneratedImage) {
 }
 
 .tool-call__chevron {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
+  // display: flex;
+  // flex-shrink: 0;
+  // align-items: center;
+  // justify-content: center;
+  width: 12px;
+  height: 12px;
   color: var(--chat-color-outline);
 
   svg {

@@ -11,6 +11,9 @@
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"
       ],
+      "env": {
+        "ELECTRON_RUN_AS_NODE": ""
+      },
       "preLaunchTask": "${defaultBuildTask}"
     },
     {
@@ -23,7 +26,10 @@
       ],
       "outFiles": [
         "${workspaceFolder}/out/test/**/*.js"
-      ]
+      ],
+      "env": {
+        "ELECTRON_RUN_AS_NODE": ""
+      }
     }
   ]
 }

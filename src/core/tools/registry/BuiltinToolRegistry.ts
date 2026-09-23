@@ -28,6 +28,7 @@ import {
 } from '..'
 import type { Tool } from '../base/Tool'
 import { ToolRegistry, type ToolCapability, type ToolContext } from './ToolRegistry'
+import type { PlanModeManager } from '../../../services/plan/PlanModeManager'
 
 interface BuiltinToolOptions {
   name: string
@@ -38,10 +39,12 @@ interface BuiltinToolOptions {
 }
 
 const metadataContext = {
+  sessionId: '__metadata__',
   cwd: '',
   provider: {},
   model: '',
   fileSystem: {},
+  planModeManager: {} as PlanModeManager,
 } as ToolContext
 
 function registerBuiltin(registry: ToolRegistry, options: BuiltinToolOptions): void {
@@ -209,14 +212,20 @@ export function createBuiltinToolRegistry(): ToolRegistry {
     description: '进入计划模式。',
     category: 'task',
     capabilities: ['write'],
-    create: context => context.planModeManager && new EnterPlanModeTool(context.planModeManager),
+    create: context =>
+      context.planModeManager && context.sessionId
+        ? new EnterPlanModeTool(context.planModeManager, context.sessionId, context.cwd)
+        : undefined,
   })
   registerBuiltin(registry, {
     name: 'exit_plan_mode',
     description: '退出计划模式并提交计划。',
     category: 'task',
     capabilities: ['write'],
-    create: context => context.planModeManager && new ExitPlanModeTool(context.planModeManager),
+    create: context =>
+      context.planModeManager && context.sessionId
+        ? new ExitPlanModeTool(context.planModeManager, context.sessionId, context.cwd)
+        : undefined,
   })
   registerBuiltin(registry, {
     name: 'ask_user_question',

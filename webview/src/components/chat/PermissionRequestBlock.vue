@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, CircleCheck, CircleX, FilePenLine, FilePlus2, FileX2, Folder, ShieldCheck, X, Terminal } from 'lucide-vue-next'
+import {
+  Check,
+  CircleCheck,
+  CircleX,
+  FilePenLine,
+  FilePlus2,
+  FileX2,
+  Folder,
+  ShieldCheck,
+  X,
+  Terminal,
+} from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import DiffViewer from '@/components/diff/DiffViewer.vue'
 import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
@@ -39,9 +50,7 @@ const content = computed(() =>
 const isEditLike = computed(() =>
   ['edit_file', 'write_file', 'Edit', 'Write'].includes(props.toolName)
 )
-const isDeleteLike = computed(() =>
-  ['delete_file', 'Delete'].includes(props.toolName)
-)
+const isDeleteLike = computed(() => ['delete_file', 'Delete'].includes(props.toolName))
 const normalizedToolName = computed(() => props.toolName.toLowerCase())
 const isWriteLike = computed(
   () => normalizedToolName.value === 'write_file' || normalizedToolName.value === 'write'
@@ -61,7 +70,9 @@ const toolNameDisplay = computed(() => {
   return labels[props.toolName] || props.toolName
 })
 const systemIdentity = computed(() =>
-  (isEditLike.value || isDeleteLike.value) ? `Evancod ${fileActionLabel.value}` : toolNameDisplay.value
+  isEditLike.value || isDeleteLike.value
+    ? `Evancod ${fileActionLabel.value}`
+    : toolNameDisplay.value
 )
 const responseState = ref<'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'>(
   props.responseState || 'pending'
@@ -103,79 +114,111 @@ function denyPermission() {
     reason: '用户拒绝了工具执行请求',
   })
 }
-
 </script>
 
 <template>
   <div class="permission-card" :class="`permission-card--${responseState}`">
-      <div class="permission-card__header">
-        <component
-          :is="isWriteLike ? FilePlus2 : isDeleteLike ? FileX2 : FilePenLine"
-          v-if="isEditLike || isDeleteLike"
-          class="permission-card__file-icon"
-          :class="`permission-card__file-icon--${responseState}`"
+    <div class="permission-card__header">
+      <component
+        :is="isWriteLike ? FilePlus2 : isDeleteLike ? FileX2 : FilePenLine"
+        v-if="isEditLike || isDeleteLike"
+        class="permission-card__file-icon"
+        :class="`permission-card__file-icon--${responseState}`"
+      />
+      <Terminal
+        v-else-if="toolName === 'bash'"
+        class="permission-card__file-icon"
+        :class="`permission-card__file-icon--${responseState}`"
+      />
+      <div
+        v-else
+        class="permission-card__icon-wrap"
+        :class="`permission-card__icon-wrap--${responseState}`"
+      >
+        <CircleCheck
+          v-if="responseState === 'approved'"
+          class="permission-card__header-status-icon"
         />
-        <Terminal
-          v-else-if="toolName === 'bash'"
-          class="permission-card__file-icon"
-          :class="`permission-card__file-icon--${responseState}`"
+        <CircleX
+          v-else-if="responseState !== 'pending'"
+          class="permission-card__header-status-icon"
         />
-        <div v-else class="permission-card__icon-wrap" :class="`permission-card__icon-wrap--${responseState}`">
-          <CircleCheck v-if="responseState === 'approved'" class="permission-card__header-status-icon" />
-          <CircleX v-else-if="responseState !== 'pending'" class="permission-card__header-status-icon" />
-          <span v-else>!</span>
+        <span v-else>!</span>
+      </div>
+      <div class="permission-card__main">
+        <div class="permission-card__title-row">
+          <span class="permission-card__title"
+            >允许 {{ systemIdentity }}{{ filePath ? ` ${filePath.split('/').pop()}?` : '' }}</span
+          >
+          <span class="permission-card__badge" :class="`permission-card__badge--${statusClass}`">
+            <component
+              :is="responseState === 'approved' ? CircleCheck : CircleX"
+              v-if="responseState !== 'pending'"
+              class="permission-card__badge-icon"
+            />
+            <span v-else class="permission-card__badge-dot" /> {{ statusText }}
+          </span>
         </div>
-        <div class="permission-card__main">
-          <div class="permission-card__title-row">
-            <span class="permission-card__title"
-              >允许 {{ systemIdentity }}{{ filePath ? ` ${filePath.split('/').pop()}?` : '' }}</span
-            >
-            <span class="permission-card__badge" :class="`permission-card__badge--${statusClass}`">
-              <component :is="responseState === 'approved' ? CircleCheck : CircleX" v-if="responseState !== 'pending'" class="permission-card__badge-icon" />
-              <span v-else class="permission-card__badge-dot" /> {{ statusText }}
-            </span>
-          </div>
-          <div v-if="description && !isEditLike" class="permission-card__description">
-            {{ description }}
-          </div>
+        <div v-if="description && !isEditLike" class="permission-card__description">
+          {{ description }}
         </div>
       </div>
+    </div>
 
-      <div class="permission-card__body">
-        <div v-if="(isEditLike || isDeleteLike) && filePath" class="permission-card__path-row" :title="filePath">
-          <Folder class="permission-card__path-icon" />
-          <span>{{ filePath }}</span>
-        </div>
-        <DiffViewer
-          v-if="isEditLike && (oldString || newString || content)"
-          :file-path="filePath"
-          :old-text="oldString"
-          :new-text="newString"
-          :content="content"
-        />
-        <TerminalChrome
-          v-else-if="toolName === 'bash' && command"
-          :command="command"
-          :description="description"
-          status="running"
-        />
-        <div v-else class="permission-card__detail-row">
-          <span>Input</span>
-          <code>{{ inputText }}</code>
-        </div>
+    <div class="permission-card__body">
+      <div
+        v-if="(isEditLike || isDeleteLike) && filePath"
+        class="permission-card__path-row"
+        :title="filePath"
+      >
+        <Folder class="permission-card__path-icon" />
+        <span>{{ filePath }}</span>
       </div>
+      <DiffViewer
+        v-if="isEditLike && (oldString || newString || content)"
+        :file-path="filePath"
+        :old-text="oldString"
+        :new-text="newString"
+        :content="content"
+      />
+      <TerminalChrome
+        v-else-if="toolName === 'bash' && command"
+        :command="command"
+        :description="description"
+        status="running"
+      />
+      <div v-else class="permission-card__detail-row">
+        <span>Input</span>
+        <code>{{ inputText }}</code>
+      </div>
+    </div>
 
-      <div v-if="responseState === 'pending'" class="permission-card__actions">
-        <button class="chat-button chat-button--primary" type="button" :disabled="submitting" @click="approvePermission">
-          <Check class="chat-button__icon" />允许
-        </button>
-        <button class="chat-button chat-button--ghost" type="button" :disabled="submitting" @click="approveSession">
-          <ShieldCheck class="chat-button__icon" />本次会话允许
-        </button>
-        <button class="chat-button chat-button--danger" type="button" :disabled="submitting" @click="denyPermission">
-          <X class="chat-button__icon" />拒绝
-        </button>
-      </div>
+    <div v-if="responseState === 'pending'" class="permission-card__actions">
+      <button
+        class="chat-button chat-button--primary"
+        type="button"
+        :disabled="submitting"
+        @click="approvePermission"
+      >
+        <Check class="chat-button__icon" />允许
+      </button>
+      <button
+        class="chat-button chat-button--ghost"
+        type="button"
+        :disabled="submitting"
+        @click="approveSession"
+      >
+        <ShieldCheck class="chat-button__icon" />本次会话允许
+      </button>
+      <button
+        class="chat-button chat-button--danger"
+        type="button"
+        :disabled="submitting"
+        @click="denyPermission"
+      >
+        <X class="chat-button__icon" />拒绝
+      </button>
+    </div>
   </div>
 </template>
 
@@ -409,7 +452,7 @@ function denyPermission() {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px;
+  padding: 10px;
   background: var(--chat-color-surface-container-lowest);
 }
 
@@ -443,8 +486,8 @@ function denyPermission() {
 
 .permission-card__icon-wrap {
   display: flex;
-  width: 32px;
-  height: 32px;
+  width: 23px;
+  height: 23px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -561,7 +604,7 @@ function denyPermission() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 16px 12px;
+  padding: 0 10px 12px;
 }
 
 .permission-card__path-row {
@@ -594,7 +637,7 @@ function denyPermission() {
 .permission-card__detail-row {
   display: flex;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 8px 0;
   border-radius: var(--chat-radius-md);
   background: var(--chat-color-surface-container);
   color: var(--chat-color-text-secondary);
@@ -660,7 +703,10 @@ function denyPermission() {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
-  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease,
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
     transform 0.16s ease;
 
   &:hover {

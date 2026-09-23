@@ -54,6 +54,8 @@ export interface ApiClientResponse {
 
 export interface ApiClientOptions {
   signal?: AbortSignal
+  /** 强制模型返回工具调用；计划模式在审批前使用。 */
+  toolChoice?: 'required'
   /** 原生生图事件回调（目前仅 OpenAI Responses 路径产生） */
   onImageEvent?: ImageStreamCallback
 }

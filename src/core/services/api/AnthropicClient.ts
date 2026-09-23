@@ -141,6 +141,7 @@ export class AnthropicClient implements ApiClient {
 
       if (tools && tools.length > 0) {
         requestParams.tools = tools
+        if (options?.toolChoice === 'required') requestParams.tool_choice = { type: 'any' }
       }
       // 将取消信号传入 SDK；仅在迭代事件后检查 signal 无法中断“等待下一帧”的请求。
       const stream = this.client.messages.stream(requestParams, { signal: options?.signal })

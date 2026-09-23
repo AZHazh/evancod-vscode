@@ -46,7 +46,7 @@
  */
 
 import { Tool, ToolDefinition, ToolResult } from '../base/Tool'
-import type { PlanModeManager, Plan } from '../../../services/plan/PlanModeManager'
+import type { PlanModeManager } from '../../../services/plan/PlanModeManager'
 
 export class ExitPlanModeTool extends Tool {
   readonly name = 'exit_plan_mode'
@@ -58,7 +58,11 @@ export class ExitPlanModeTool extends Tool {
    *
    * @param planModeManager - 计划模式管理服务
    */
-  constructor(private planModeManager: PlanModeManager) {
+  constructor(
+    private planModeManager: PlanModeManager,
+    private sessionId: string,
+    private cwd: string
+  ) {
     super()
   }
 
@@ -186,8 +190,22 @@ export class ExitPlanModeTool extends Tool {
         }
       }
 
+      // 用户直接选择“计划权限模式”时，模型可能跳过 enter_plan_mode。
+      // 为兼容这种调用顺序，首次提交时自动建立当前会话的计划上下文。
+      if (this.planModeManager.getState(this.sessionId) !== 'planning') {
+        const fallbackTitle = args.tasks[0]?.subject?.trim() || '执行计划'
+        const fallbackDescription =
+          '计划权限模式下提交的执行计划。批准前仅进行分析，批准后才允许执行文件修改。'
+        await this.planModeManager.enterPlanMode(
+          this.sessionId,
+          fallbackTitle,
+          fallbackDescription,
+          this.cwd
+        )
+      }
+
       // 提交计划
-      const plan = await this.planModeManager.exitPlanMode({
+      const plan = await this.planModeManager.exitPlanMode(this.sessionId, {
         tasks: args.tasks.map((task) => ({
           id: this.generateTaskId(),
           subject: task.subject.trim(),
@@ -199,40 +217,105 @@ export class ExitPlanModeTool extends Tool {
         risks: args.risks || []
       })
 
-      const approval = await this.planModeManager.waitForApproval()
+      const approval = await this.planModeManager.waitForApproval(this.sessionId)
       if (!approval.approved) {
+        await this.planModeManager.completePlan(this.sessionId)
         return this.createErrorResult(approval.reason || '用户拒绝了计划')
       }
 
-      // 格式化任务列表
-      const tasksText = plan.tasks
-        .map((task, index) => {
-          const riskText =
-            task.risks && task.risks.length > 0
-              ? `\n   风险: ${task.risks.join(', ')}`
-              : ''
-          const timeText = task.estimatedTime ? `\n   预估: ${task.estimatedTime}` : ''
-          return `${index + 1}. ${task.subject}${timeText}${riskText}\n   ${task.description}`
-        })
-        .join('\n\n')
+      const content = this.formatPlanResult(plan, approval.approved)
 
-      // 格式化执行步骤
-      const stepsText = plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')
+      return this.createSuccessResult(content, {
+        planId: plan.id,
+        state: plan.state,
+        tasksCount: plan.tasks.length,
+        stepsCount: plan.steps.length,
+        risksCount: plan.risks.length,
+        filePath: plan.filePath,
+        awaitingApproval: false,
+        approved: true
+      })
+    } catch (error) {
+      return this.createErrorResult(error)
+    }
+  }
 
-      // 格式化风险评估
-      const risksText =
-        plan.risks && plan.risks.length > 0
-          ? '\n\n风险评估:\n' +
-            plan.risks
-              .map((risk) => {
-                const levelIcon =
-                  risk.level === 'high' ? '🔴' : risk.level === 'medium' ? '🟡' : '🟢'
-                return `${levelIcon} ${risk.level.toUpperCase()}: ${risk.description}\n   缓解: ${risk.mitigation}`
-              })
-              .join('\n')
-          : ''
+  /**
+   * 生成任务 ID
+   *
+   * @returns 任务 ID
+   */
+  private generateTaskId(): string {
+    const timestamp = Date.now().toString(36)
+    const random = Math.random().toString(36).substring(2, 9)
+    return `task-${timestamp}-${random}`
+  }
 
-      const content = `✅ 计划已提交，等待用户审批
+  /**
+   * 审批是 waitForApproval 返回前才发生的异步事件，不能复用审批前缓存的文本。
+   * 在审批完成后重新读取 plan.state，确保模型收到的结果与 UI 状态一致。
+   */
+  private formatPlanResult(plan: {
+    id: string
+    title: string
+    state: string
+    tasks: Array<{
+      subject: string
+      description: string
+      estimatedTime?: string
+      risks?: string[]
+    }>
+    steps: string[]
+    risks: Array<{ level: 'low' | 'medium' | 'high'; description: string; mitigation: string }>
+    filePath?: string
+  }, approved: boolean): string {
+    const tasksText = plan.tasks
+      .map((task, index) => {
+        const riskText =
+          task.risks && task.risks.length > 0 ? `\n   风险: ${task.risks.join(', ')}` : ''
+        const timeText = task.estimatedTime ? `\n   预估: ${task.estimatedTime}` : ''
+        return `${index + 1}. ${task.subject}${timeText}${riskText}\n   ${task.description}`
+      })
+      .join('\n\n')
+    const stepsText = plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')
+    const risksText =
+      plan.risks.length > 0
+        ? '\n\n风险评估:\n' +
+          plan.risks
+            .map((risk) => {
+              const levelIcon =
+                risk.level === 'high' ? '🔴' : risk.level === 'medium' ? '🟡' : '🟢'
+              return `${levelIcon} ${risk.level.toUpperCase()}: ${risk.description}\n   缓解: ${risk.mitigation}`
+            })
+            .join('\n')
+        : ''
+
+    if (approved) {
+      return `✅ 计划已获得用户批准，现在开始执行
+
+计划 ID: ${plan.id}
+标题: ${plan.title}
+状态: ✅ 已批准
+
+---
+
+📋 任务列表 (共 ${plan.tasks.length} 个):
+
+${tasksText}
+
+---
+
+🔧 执行步骤 (共 ${plan.steps.length} 步):
+
+${stepsText}${risksText}
+
+---
+
+请按照上面的 tasks 和 steps 立即调用所需执行工具，完成实际文件修改和验证，不要只输出总结。
+计划文件：${plan.filePath || '.evancod/plans/'}。`
+    }
+
+    return `✅ 计划已提交，等待用户审批
 
 计划 ID: ${plan.id}
 标题: ${plan.title}
@@ -259,29 +342,5 @@ ${stepsText}${risksText}
 - ❌ 拒绝：返回修改计划
 
 提示: 计划已保存到 ${plan.filePath || '.evancod/plans/'} 目录。`
-
-      return this.createSuccessResult(content, {
-        planId: plan.id,
-        state: plan.state,
-        tasksCount: plan.tasks.length,
-        stepsCount: plan.steps.length,
-        risksCount: plan.risks.length,
-        filePath: plan.filePath,
-        awaitingApproval: true
-      })
-    } catch (error) {
-      return this.createErrorResult(error)
-    }
-  }
-
-  /**
-   * 生成任务 ID
-   *
-   * @returns 任务 ID
-   */
-  private generateTaskId(): string {
-    const timestamp = Date.now().toString(36)
-    const random = Math.random().toString(36).substring(2, 9)
-    return `task-${timestamp}-${random}`
   }
 }

@@ -173,5 +173,5 @@ Webview 通过 VSCode Webview API 与 Extension 通信，消息协议定义在 `
 
 - Extension 日志：VSCode 输出面板 "Extension Host"
 - Webview 控制台：运行命令 "Developer: Open Webview Developer Tools"
-- 开发时 Webview 运行在 `http://localhost:5173`，生产构建嵌入 extension
+- 开发时 Webview 运行在 `http://localhos:9999`，生产构建嵌入 extension
 - 如果 Webview 未加载，检查 `webview/dist/` 是否存在构建产物

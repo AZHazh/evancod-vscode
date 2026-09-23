@@ -81,6 +81,7 @@ export class OpenAIResponsesClient implements ApiClient {
 
     if (tools && tools.length > 0) {
       requestBody.tools = convertResponsesTools(tools)
+      if (options?.toolChoice === 'required') requestBody.tool_choice = 'required'
     }
 
     const response = await this.fetchStream('/v1/responses', requestBody, options?.signal)

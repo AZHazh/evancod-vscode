@@ -12,6 +12,7 @@ export type ToolCapability = 'read' | 'write' | 'execute' | 'network' | 'interac
 export type ToolSource = 'builtin' | 'mcp' | 'plugin'
 
 export interface ToolContext {
+  sessionId?: string
   cwd: string
   provider: Provider
   model: string

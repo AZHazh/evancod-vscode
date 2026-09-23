@@ -158,7 +158,7 @@ const thinkingElapsedSeconds = computed(() =>
 const formattedThinkingElapsed = computed(() => formatElapsed(thinkingElapsedSeconds.value))
 const thinkingTokenCount = computed(() => {
   const activeThinking = enhancedMessages.value.find(
-    message => message.type === 'thinking' && message.id === chatStore.activeThinkingMessageId,
+    message => message.type === 'thinking' && message.id === chatStore.activeThinkingMessageId
   )
   return activeThinking?.type === 'thinking' ? estimateTokenCount(activeThinking.content) : 0
 })
@@ -457,13 +457,13 @@ onBeforeUnmount(() => {
   border-radius: var(--chat-radius-full);
   background: color-mix(in srgb, var(--chat-color-surface-container-low) 82%, transparent);
   color: var(--chat-color-text-tertiary);
-  font-size: 12px;
+  font-size: 10px;
   line-height: 1;
 }
 
 .streaming-indicator__spark {
   color: #c084fc;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 

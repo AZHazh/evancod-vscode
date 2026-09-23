@@ -249,6 +249,9 @@ export class ChatService {
    */
   async createNewSession(): Promise<Session> {
     await this.settleActiveRequestBeforeSessionSwitch()
+    if (this.currentSessionId) {
+      await this.planModeManager.completePlan(this.currentSessionId)
+    }
     return this.createNewSessionNow()
   }
 
@@ -315,6 +318,9 @@ export class ChatService {
     await this.settleActiveRequestBeforeSessionSwitch()
     // 用户在等待期间又选择了另一个会话，当前结果不能覆盖更新的选择。
     if (generation !== this.sessionSwitchGeneration) return null
+    if (this.currentSessionId && this.currentSessionId !== session.id) {
+      await this.planModeManager.completePlan(this.currentSessionId)
+    }
     this.currentSessionId = session.id
     this.queryEngine = undefined
     this.saveSessions()
@@ -515,6 +521,7 @@ export class ChatService {
     const cancelledEngine = this.queryEngine
     const activeRequest = this.activeRequest
     cancelledEngine?.cancel('用户停止生成')
+    if (session) void this.planModeManager.completePlan(session.id)
     this.activeRequestController?.abort('用户停止生成')
     this.directGenerationController?.abort('用户停止生成')
     void this.agentCoordinator.cancelAllAgents('用户停止生成').catch(error => {
@@ -867,6 +874,7 @@ export class ChatService {
       }
 
       if (error instanceof QueryCancelledError) {
+        await this.planModeManager.completePlan(session.id)
         requestContext.status = 'cancelled'
         requestContext.updatedAt = new Date().toISOString()
         if (session.activeRun?.id === `run-${sourceMessageId}`) {
@@ -883,6 +891,7 @@ export class ChatService {
       }
 
       // 添加错误消息
+      await this.planModeManager.completePlan(session.id)
       requestContext.status = 'interrupted'
       requestContext.updatedAt = new Date().toISOString()
       if (session.activeRun?.id === `run-${sourceMessageId}`) {
@@ -1401,6 +1410,7 @@ export class ChatService {
 
     // 创建 QueryEngine
     const engine = new QueryEngine({
+      sessionId: session.id,
       cwd: session.workDir,
       provider,
       model: this.getCurrentModel(),

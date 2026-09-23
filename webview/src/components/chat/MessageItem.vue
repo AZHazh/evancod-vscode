@@ -339,8 +339,8 @@ async function copyMessage() {
   font: inherit;
 }
 .message-file-token svg {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   color: #55b7ff;
 }
 .message-skill-token {
@@ -362,21 +362,21 @@ async function copyMessage() {
 .assistant-message__bubble {
   max-width: 100%;
   color: var(--chat-color-text-primary);
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.625;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .user-message__bubble {
-  padding: 12px 16px;
+  padding: 5px 10px;
   border-radius: 18px 4px 18px 18px;
   background: var(--chat-color-surface-user-msg);
   white-space: pre-wrap;
 }
 
 .assistant-message__bubble {
-  padding: 12px 16px;
+  padding: 5px;
   border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
   border-radius: 20px;
   border-top-left-radius: 8px;

@@ -1,8 +1,5 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import {
-  getDefaultEnvironment,
-  StdioClientTransport,
-} from '@modelcontextprotocol/sdk/client/stdio.js'
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 export interface MCPServerConfig {
   name: string
@@ -93,6 +90,12 @@ export class MCPClient {
   }
 
   private async connectWithSdk(): Promise<void> {
+    // MCP SDK/Zod 在 VS Code Extension Host 中访问 navigator 时会产生弃用告警。
+    // 延迟加载还可以避免 MCP SDK 导入失败阻断整个扩展的激活。
+    const [{ Client }, { getDefaultEnvironment, StdioClientTransport }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/client/index.js'),
+      import('@modelcontextprotocol/sdk/client/stdio.js'),
+    ])
     const client = new Client(
       { name: 'evancod-vscode', version: '0.1.42' },
       { capabilities: {} }
