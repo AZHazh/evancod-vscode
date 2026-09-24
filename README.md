@@ -61,6 +61,20 @@ Evancod 当前内置 26 个工具，覆盖常见开发场景：
 | `Evancod: 新建会话` | 创建一个空白会话          |
 | `Evancod: 同步中转` | 启动 new-api 服务配置同步 |
 
+### 长期记忆
+
+无需使用命令：发送“以后都使用单引号”“我习惯先运行测试”，或在开发请求中说“记住这个项目，所有函数都要加 JSDoc 注释”等明确长期规则后，系统会在后台自动记录。自动保存的规则可用 `/memory list` 查看；`/memory pending` 只显示需要确认的候选。模型回答中明确归纳出的项目决策仅成为待确认候选，不会直接当作事实保存。普通对话、一次性任务以及包含凭据的消息不会自动进入长期记忆。`/remember <内容>` 仍可用于手动明确记录。工作区记忆保存在 `<workspace>/.evancod/memory/entries/`，跨项目用户偏好保存在扩展的全局存储目录，不写入项目仓库。旧版 `.evancod/memory/*.md` 和 `.claude/memory/*.md` 会保留原件并安全迁移。
+
+| 聊天命令 | 作用 |
+| ------- | ---- |
+| `/memory list`、`/memory pending` | 查看有效记忆和待确认候选 |
+| `/memory show <id>` | 查看内容、来源、置信度和更新时间 |
+| `/memory confirm <id>`、`/memory reject <id>` | 处理待确认或冲突的候选 |
+| `/memory edit <id> <内容>`、`/memory forget <id>` | 修改或停用记忆 |
+| `/memory restore <id>`、`/memory refresh` | 恢复上一历史版本或重建索引 |
+
+包含密钥或凭据的内容不会由记忆系统保存；`MEMORY.md` 是程序生成的索引，不要手动维护。
+
 ### VS Code 配置
 
 | 配置项                   | 说明                                        | 默认值                      |

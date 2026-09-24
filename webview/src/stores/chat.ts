@@ -453,6 +453,11 @@ export const useChatStore = defineStore('chat', () => {
         }
         return message
       })
+      for (const optimisticId of pendingOptimisticUserMessageIds.value) {
+        if (!uiMessages.value.some(message => message.id === optimisticId)) {
+          pendingOptimisticUserMessageIds.value.delete(optimisticId)
+        }
+      }
       // 缓存索引失效：uiMessages 被全量重建
       streamingAssistantIndex = -1
       streamingThinkingIndex = -1
@@ -1299,7 +1304,7 @@ export const useChatStore = defineStore('chat', () => {
     stopRequested = false
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
-    const isBuiltinCommand = /^\/(clear|clean|new|compact|help)(\s|$)/i.test(trimmed)
+    const isBuiltinCommand = /^\/(clear|clean|new|compact|help|memory|remember)(\s|$)/i.test(trimmed)
 
     const messageSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     const optimisticId = `optimistic-user-${messageSuffix}`

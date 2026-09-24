@@ -14,6 +14,7 @@
       "env": {
         "ELECTRON_RUN_AS_NODE": ""
       },
+      "noDebug": true,
       "preLaunchTask": "${defaultBuildTask}"
     },
     {
@@ -29,7 +30,8 @@
       ],
       "env": {
         "ELECTRON_RUN_AS_NODE": ""
-      }
+      },
+      "noDebug": true
     }
   ]
 }

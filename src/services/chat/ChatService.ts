@@ -14,6 +14,7 @@
  */
 
 import * as vscode from 'vscode'
+import * as path from 'path'
 import type {
   Session,
   Message,
@@ -31,6 +32,7 @@ import { AgentCoordinator } from '../agent/AgentCoordinator'
 import { MCPConnectionManager } from '../mcp/MCPConnectionManager'
 import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
+import { LLMMemoryExtractor } from '../memory/LLMMemoryExtractor'
 import { QueryCancelledError, QueryEngine } from '../../core/engine/QueryEngine'
 import { isSuccessfulTermination } from '../../core/engine/termination'
 import {
@@ -103,6 +105,7 @@ export class ChatService {
    * 用于与 AI 对话
    */
   private queryEngine?: QueryEngine
+  private memoryQuery = ''
 
   private currentModelId: string | null = null
   private effortLevel: 'low' | 'medium' | 'high' | 'max' = 'medium'
@@ -142,6 +145,14 @@ export class ChatService {
     private toolProfileService?: ToolProfileService
   ) {
     this.persistence = new SessionPersistenceService(context)
+    this.memoryManager.setSemanticExtractor(
+      new LLMMemoryExtractor(() => {
+        const provider = this.providerService.getActiveProvider()
+        if (!provider || provider.apiFormat === 'openai_image') return undefined
+        const model = this.getCurrentModel()
+        return model ? { provider, model } : undefined
+      })
+    )
   }
 
   async initialize(): Promise<void> {
@@ -256,8 +267,15 @@ export class ChatService {
   }
 
   private async createNewSessionNow(): Promise<Session> {
+    const previousSession = this.getCurrentSession()
+    if (previousSession) {
+      void this.memoryManager.archiveScope('session', previousSession.id, previousSession.workDir)
+        .catch(error => console.error('Failed to archive session memory:', error))
+    }
     // 获取工作目录（用于文件操作的相对路径基准）
-    const workDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
+    const activeFolder = vscode.window.activeTextEditor &&
+      vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
+    const workDir = activeFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
 
     // 创建会话对象
     const session: Session = {
@@ -660,9 +678,10 @@ export class ChatService {
     await this.memoryManager.initialize()
     if (requestSignal?.aborted) return
 
-    const commandResult = await this.resolveSlashCommand(content, session)
+    const commandResult = await this.resolveSlashCommand(content, session, messageId)
     if (commandResult.handled) {
       this.saveSessions()
+      this.agentEventCallback?.({ type: 'status', state: 'idle', verb: 'command_completed' })
       return
     }
 
@@ -677,6 +696,10 @@ export class ChatService {
       attachmentContexts
     )
     const sourceMessageId = messageId || this.generateId()
+    if (!interruptedContext) {
+      void this.memoryManager.captureUserMessage(content, session.workDir, sourceMessageId)
+        .catch(error => console.warn('Memory extraction failed:', error instanceof Error ? error.message : 'unknown'))
+    }
     const requestContext =
       interruptedContext ||
       createRequestContext(
@@ -711,6 +734,7 @@ export class ChatService {
     const messageContent = [composedPrompt.modelContent, recoveryInstruction, requestContract]
       .filter(Boolean)
       .join('\n\n')
+    this.memoryQuery = commandResult.content
     const userContentBlocks = this.buildUserContentBlocks(messageContent, attachmentContexts, true)
 
     // 检测是否为 openai_image 格式的 Provider —— 不需要初始化 QueryEngine
@@ -718,7 +742,7 @@ export class ChatService {
     const isDirectImageGen = activeProvider?.apiFormat === 'openai_image'
 
     // 3. 初始化 QueryEngine（openai_image 格式不需要）
-    if (!isDirectImageGen && !this.queryEngine) {
+    if (!isDirectImageGen) {
       await this.initializeQueryEngine()
     }
     if (requestSignal?.aborted) return
@@ -850,6 +874,14 @@ export class ChatService {
         this.messageCallback(lastMessage)
       }
       this.saveSessions()
+      if (completed) {
+        void this.memoryManager.archiveScope('task', requestContext.id, session.workDir)
+          .catch(error => console.error('Failed to archive task memory:', error))
+        if (lastMessage?.role === 'assistant') {
+          void this.memoryManager.captureAssistantReply(lastMessage.content, session.workDir, lastMessage.id)
+            .catch(error => console.warn('Memory extraction failed:', error instanceof Error ? error.message : 'unknown'))
+        }
+      }
     } catch (error) {
       // 错误处理
       console.error('Failed to send message:', error)
@@ -1076,8 +1108,34 @@ export class ChatService {
 
   private async resolveSlashCommand(
     content: string,
-    session: Session
+    session: Session,
+    messageId?: string
   ): Promise<{ handled: boolean; content: string; displayContent?: string }> {
+    if (/^\/(?:memory|remember)(?:\s|$)/.test(content.trim())) {
+      const commandMessage: Message = {
+        id: messageId || this.generateId(), role: 'user', content, timestamp: Date.now(),
+      }
+      session.messages.push(commandMessage)
+      this.appendOrUpdateTranscript(session, {
+        id: commandMessage.id, type: 'user_text', content, timestamp: commandMessage.timestamp,
+      })
+      let message: string
+      try {
+        message = await this.handleMemoryCommand(content.trim(), session.workDir)
+      } catch (error) {
+        message = `记忆操作失败：${error instanceof Error ? error.message : '未知错误'}`
+      }
+      const response: Message = { id: this.generateId(), role: 'assistant', content: message, timestamp: Date.now() }
+      session.messages.push(response)
+      this.appendOrUpdateTranscript(session, {
+        id: response.id, type: 'assistant_text', content: response.content,
+        timestamp: response.timestamp, model: this.getCurrentModel(),
+      })
+      session.updatedAt = Date.now()
+      session.messageCount = session.messages.length
+      this.messageCallback?.(response)
+      return { handled: true, content }
+    }
     const parsedCommand = commandManager.parse(content.trim())
     if (!parsedCommand) {
       return { handled: false, content }
@@ -1087,7 +1145,7 @@ export class ChatService {
 
     if (result.success && result.metadata?.action === 'init') {
       try {
-        const initialized = await this.memoryManager.initializeProjectMemories()
+        const initialized = await this.memoryManager.initializeProjectMemories(session.workDir)
         const created = initialized.created.length
           ? initialized.created.join('、')
           : '无（基础文件已存在）'
@@ -1195,6 +1253,55 @@ export class ChatService {
     }
 
     return { handled: true, content }
+  }
+
+  private async handleMemoryCommand(command: string, workspace: string): Promise<string> {
+    if (command.startsWith('/remember ')) {
+      const result = await this.memoryManager.remember(`记住${command.slice(10).trim()}`, workspace)
+      return { saved: '已保存记忆', pending: '已创建待确认候选', conflict: '发现冲突，请通过 /memory pending 查看', ignored: '请输入要记住的内容' }[result]
+    }
+    const [, action = 'list', ...parts] = command.split(/\s+/)
+    const id = parts[0]
+    if (action === 'list') {
+      const items = this.memoryManager.list({ workspace, status: 'active' })
+      return items.length ? items.map(item => `${item.id} [${item.scope}/${item.kind}] ${item.description} · 置信度 ${item.confidence} · ${item.updatedAt}`).join('\n') : '暂无有效记忆'
+    }
+    if (action === 'pending') {
+      const items = this.memoryManager.pending(workspace)
+      return items.length
+        ? items.map(item => `${item.id} [${item.scope}/${item.kind}] ${item.description}`).join('\n')
+        : '暂无待确认候选。用户明确要求“记住”的内容会直接保存，请使用 /memory list 查看。'
+    }
+    if (action === 'show' && id) {
+      const item = this.memoryManager.list({ workspace }).find(record => record.id === id) ||
+        this.memoryManager.pending(workspace).find(record => record.id === id)
+      return item ? JSON.stringify(item, null, 2) : '未找到记忆'
+    }
+    if (action === 'confirm' && id) {
+      await this.memoryManager.confirm(id, workspace)
+      return '已确认记忆'
+    }
+    if (action === 'reject' && id) {
+      await this.memoryManager.reject(id, workspace)
+      return '已拒绝候选'
+    }
+    if (action === 'forget' && id) {
+      await this.memoryManager.forget(id, workspace)
+      return '已停用记忆（历史仍保留）'
+    }
+    if (action === 'restore' && id) {
+      await this.memoryManager.restore(id, workspace)
+      return '已恢复上一历史版本'
+    }
+    if (action === 'edit' && id && parts.length > 1) {
+      await this.memoryManager.update(id, { content: parts.slice(1).join(' ') }, workspace)
+      return '已修改记忆'
+    }
+    if (action === 'refresh') {
+      await this.memoryManager.maintain(workspace)
+      return '索引与过期状态已更新'
+    }
+    return '用法：/memory [list|pending|show <id>|confirm <id>|reject <id>|forget <id>|restore <id>|edit <id> <内容>|refresh] 或 /remember <内容>'
   }
 
   private restoreDisplayedCommand(
@@ -1353,35 +1460,24 @@ export class ChatService {
     return results
   }
 
-  private withMemoryContext(content: string): string {
-    const memoryContext = this.buildMemoryContext()
-    if (!memoryContext) {
-      return content
-    }
-
-    return `${content}\n\n${memoryContext}`
-  }
-
-  private buildMemoryContext(): string {
-    const memories = this.memoryManager.listMemories()
+  private buildMemoryContext(session: Session): string {
+    const mentionedPath = this.memoryQuery.match(/(?:src|webview|packages)[\\/][\w./\\-]+/)?.[0]
+    const modulePath = mentionedPath ? path.resolve(session.workDir, mentionedPath) : session.workDir
+    const memories = this.memoryManager.retrieve({
+      query: this.memoryQuery || session.messages.filter(message => message.role === 'user').at(-1)?.content || '',
+      workspace: session.workDir,
+      modulePath,
+      sessionId: session.id,
+    })
     if (!memories.length) {
       return ''
     }
-
-    const maxLength = 12000
     const memoryText = memories
       .map(memory => {
-        const { type, name, description } = memory.metadata
-        return `- type: ${type}\n  name: ${name}\n  description: ${description}\n  content:\n${memory.content}`
+        return `- scope: ${memory.scope}\n  kind: ${memory.kind}\n  subject: ${memory.subject}\n  content: ${memory.content}`
       })
       .join('\n\n')
-
-    const clippedMemoryText =
-      memoryText.length > maxLength
-        ? `${memoryText.slice(0, maxLength)}\n\n[Memory context truncated]`
-        : memoryText
-
-    return `<memory_context>\n以下是当前项目的持久化记忆，供回答时参考。\n\n${clippedMemoryText}\n</memory_context>`
+    return `<memory_context>\n以下是与当前请求相关的持久化记忆，仅供参考；当前用户要求优先。\n\n${memoryText}\n</memory_context>`
   }
 
   /**
@@ -1916,7 +2012,7 @@ export class ChatService {
   }
 
   private buildRuntimeMessages(session: Session): Message[] {
-    const messages = [...session.messages]
+    const messages = session.messages.filter(message => message.id !== 'runtime-context')
 
     // 如果有压缩摘要或记忆，作为 user 消息注入到最前面
     const contextParts: string[] = []
@@ -1928,7 +2024,7 @@ export class ChatService {
       }
     }
 
-    const memoryContext = this.buildMemoryContext()
+    const memoryContext = this.buildMemoryContext(session)
     if (memoryContext) {
       contextParts.push(memoryContext)
     }
