@@ -55,7 +55,8 @@ let agentDefinitionStore: AgentDefinitionStore
  */
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Evancod extension is now active!')
-  const logPath = initializePerformanceLogger(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath)
+  const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development
+  const logPath = initializePerformanceLogger(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath, isDevelopment)
   performanceLog('extension.activate.start', { logPath })
 
   /**

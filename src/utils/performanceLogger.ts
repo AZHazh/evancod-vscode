@@ -5,8 +5,16 @@ import * as path from 'path'
 let logPath = path.join(os.tmpdir(), 'evancod-performance.log')
 let pendingWrite: Promise<void> = Promise.resolve()
 let eventLoopTimer: NodeJS.Timeout | undefined
+let isDevMode = false
 
-export function initializePerformanceLogger(workspaceRoot?: string): string {
+export function initializePerformanceLogger(workspaceRoot?: string, isDevelopment = false): string {
+  isDevMode = isDevelopment
+
+  // 只在开发模式下创建日志文件
+  if (!isDevMode) {
+    return ''
+  }
+
   logPath = workspaceRoot ? path.join(workspaceRoot, '.evancod', 'performance.log') : path.join(os.tmpdir(), 'evancod-performance.log')
   pendingWrite = pendingWrite.then(async () => {
     await fs.promises.mkdir(path.dirname(logPath), { recursive: true })
@@ -26,6 +34,9 @@ export function initializePerformanceLogger(workspaceRoot?: string): string {
 }
 
 export function performanceLog(event: string, data: Record<string, unknown> = {}): void {
+  // 只在开发模式下写入日志
+  if (!isDevMode) return
+
   const line = JSON.stringify({ time: new Date().toISOString(), event, ...data })
   pendingWrite = pendingWrite.then(() => fs.promises.appendFile(logPath, line + '\n', 'utf8')).catch(() => undefined)
 }
@@ -37,6 +48,11 @@ export function performanceSnapshot(): Record<string, unknown> {
 }
 
 export async function performanceMeasure<T>(event: string, action: () => Promise<T>, data: Record<string, unknown> = {}): Promise<T> {
+  // 只在开发模式下记录性能
+  if (!isDevMode) {
+    return await action()
+  }
+
   const startedAt = performance.now()
   try {
     const result = await action()

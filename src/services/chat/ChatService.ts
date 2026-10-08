@@ -1526,6 +1526,7 @@ export class ChatService {
       permissionMode: this.permissionMode,
       imageProvider: this.providerService.getImageProvider() || undefined,
       toolSnapshot: toolProfile?.toolSnapshot,
+      isDevelopment: this.context.extensionMode === vscode.ExtensionMode.Development,
     })
     this.queryEngine = engine
 

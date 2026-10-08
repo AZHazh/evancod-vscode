@@ -6,6 +6,9 @@ const MAX_INLINE_RESULT_BYTES = 64 * 1024
 const HEAD_PREVIEW_CHARS = 12_000
 const TAIL_PREVIEW_CHARS = 4_000
 
+// 全局开发模式标志
+let isDevMode = false
+
 export interface ContextToolResult {
   content: string
   archivedPath?: string
@@ -13,8 +16,16 @@ export interface ContextToolResult {
 }
 
 /**
+ * 设置开发模式标志
+ */
+export function setToolResultDevMode(isDevelopment: boolean): void {
+  isDevMode = isDevelopment
+}
+
+/**
  * 将超长工具结果完整归档，只把可恢复的头尾预览送回模型。
  * 归档失败时返回原文，宁可多用 token 也不丢失能力。
+ * 生产环境下不创建归档文件，直接返回完整内容。
  */
 export async function prepareToolResultForContext(
   cwd: string,
@@ -24,6 +35,11 @@ export async function prepareToolResultForContext(
 ): Promise<ContextToolResult> {
   const originalBytes = Buffer.byteLength(content, 'utf8')
   if (originalBytes <= MAX_INLINE_RESULT_BYTES) {
+    return { content, originalBytes }
+  }
+
+  // 生产环境下不创建归档文件，直接返回完整内容
+  if (!isDevMode) {
     return { content, originalBytes }
   }
 

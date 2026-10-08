@@ -289,6 +289,7 @@ export class AgentCoordinator {
       maxIterations: definition.maxIterations,
       toolSnapshot: runtimeProfile.toolSnapshot,
       systemPrompt: this.buildSystemPrompt(definition, config.description),
+      isDevelopment: this.context.extensionMode === vscode.ExtensionMode.Development,
     }
 
     const engine = new QueryEngine(engineConfig)

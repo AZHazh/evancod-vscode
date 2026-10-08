@@ -55,6 +55,7 @@ import { MemoryManager } from '../../services/memory/MemoryManager'
 import { ToolExecutor } from '../tools/execution/ToolExecutor'
 import { ToolOrchestrator, type RunToolsOutcome } from '../tools/execution/ToolOrchestrator'
 import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
+import { setToolResultDevMode } from '../tools/execution/toolResultContext'
 import {
   DEFAULT_MAX_ITERATIONS,
   isSuccessfulTermination,
@@ -172,6 +173,12 @@ export interface QueryEngineConfig {
    * 否则会在闭环前被截断。默认 100。
    */
   maxIterations?: number
+
+  /**
+   * 是否为开发模式（可选）
+   * 控制是否创建调试文件（performance.log、.tmp/evancod-tool-results）
+   */
+  isDevelopment?: boolean
 }
 
 /**
@@ -416,6 +423,9 @@ export class QueryEngine {
    * Phase 6.5: 添加 LSP、Web、Notebook 工具
    */
   private initializeTools() {
+    // 设置工具结果归档的开发模式标志
+    setToolResultDevMode(this.config.isDevelopment ?? false)
+
     this.fs = new VSCodeFileSystemAdapter()
     const registry = createBuiltinToolRegistry()
     const snapshot =
