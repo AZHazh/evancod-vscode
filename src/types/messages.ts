@@ -90,6 +90,7 @@ export type AgentServerEvent =
       terminationReason?: import('../core/engine/termination').QueryTerminationReason
       completed?: boolean
     }
+  | { type: 'context_usage'; usage: import('./index').TokenUsage }
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'

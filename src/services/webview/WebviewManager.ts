@@ -1240,16 +1240,118 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
 
   private async handleFileOpen(filePath?: string): Promise<void> {
     if (!filePath) return
+    const workDir = this.chatService.getCurrentSession()?.workDir
+    const baseDir = workDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
+    const reference = this.parseFileReference(filePath)
     try {
-      const workDir = this.chatService.getCurrentSession()?.workDir
-      const resolvedPath = path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(workDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd(), filePath)
-      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolvedPath))
-      await vscode.window.showTextDocument(document, { preview: false })
+      const resolvedPath = path.isAbsolute(reference.path)
+        ? reference.path
+        : path.resolve(baseDir, reference.path)
+      const uri = await this.resolveFileUri(resolvedPath, baseDir)
+      const document = await vscode.workspace.openTextDocument(uri)
+      const position = reference.line
+        ? new vscode.Position(reference.line - 1, Math.max((reference.column || 1) - 1, 0))
+        : undefined
+      await vscode.window.showTextDocument(document, { preview: false, selection: position ? new vscode.Range(position, position) : undefined })
+      await vscode.commands.executeCommand('revealInExplorer', uri)
+      if (position) {
+        const editor = vscode.window.activeTextEditor
+        if (editor) editor.revealRange(new vscode.Range(position, position))
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '无法打开文件'
       vscode.window.showWarningMessage(`打开文件失败: ${message}`)
+    }
+  }
+
+  private async resolveFileUri(filePath: string, baseDir: string): Promise<vscode.Uri> {
+    const directUri = vscode.Uri.file(filePath)
+    try {
+      await vscode.workspace.fs.stat(directUri)
+      return directUri
+    } catch {
+      // 模型可能带回了已失效的绝对根目录，下面按当前工作区的路径后缀恢复。
+    }
+
+    const normalized = filePath.replace(/\\/g, '/').replace(/^\/+/, '')
+    const withoutDrive = normalized.replace(/^[A-Za-z]:\//, '')
+    const segments = withoutDrive.split('/').filter(Boolean)
+    // 从最长的路径后缀开始搜索。这样既能修复模型返回旧绝对根目录的问题，
+    // 也不会退化成仅按 basename 随机打开同名文件。
+    const suffixes: string[] = []
+    for (let count = segments.length; count >= 2; count -= 1) {
+      suffixes.push(segments.slice(-count).join('/'))
+    }
+
+    const roots: string[] = []
+    const addRoot = (root: string | undefined) => {
+      if (!root) return
+      const resolved = path.resolve(root)
+      if (!roots.some(item => path.normalize(item).toLowerCase() === path.normalize(resolved).toLowerCase())) {
+        roots.push(resolved)
+      }
+    }
+    try {
+      const baseUri = vscode.Uri.file(baseDir)
+      const baseStat = await vscode.workspace.fs.stat(baseUri)
+      if (baseStat.type === vscode.FileType.Directory) addRoot(baseDir)
+    } catch {
+      // 会话工作目录可能已经被移动，继续使用当前打开的工作区根目录。
+    }
+    for (const folder of vscode.workspace.workspaceFolders || []) addRoot(folder.uri.fsPath)
+
+    for (const suffix of suffixes) {
+      const pattern = `**/${suffix}`
+      for (const root of roots) {
+        const matches = await vscode.workspace.findFiles(
+          new vscode.RelativePattern(root, pattern),
+          undefined,
+          20
+        )
+        if (matches.length === 1) return matches[0]
+        if (matches.length > 1) {
+          const exact = matches.find(match =>
+            vscode.workspace.asRelativePath(match, false).replace(/\\/g, '/').endsWith(suffix)
+          )
+          if (exact) return exact
+        }
+      }
+    }
+
+    throw new Error(`无法解析文件路径: ${filePath}`)
+  }
+
+  private parseFileReference(value: string): { path: string; line?: number; column?: number } {
+    let reference = value.trim().replace(/^<|>$/g, '')
+    let line: number | undefined
+    let column: number | undefined
+    const locationSuffix = reference.match(/^(.*)(?:#L|:)(\d+)(?::(\d+))?$/)
+    if (locationSuffix) {
+      reference = locationSuffix[1]
+      line = Number(locationSuffix[2])
+      column = locationSuffix[3] ? Number(locationSuffix[3]) : undefined
+    }
+    if (/^file:\/\//i.test(reference)) {
+      try {
+        reference = vscode.Uri.parse(reference).fsPath
+      } catch {
+        reference = decodeURIComponent(reference.replace(/^file:\/\//i, ''))
+      }
+    } else {
+      try {
+        reference = decodeURIComponent(reference)
+      } catch {
+        // 保留无法解码的原始引用，后续仍可按普通路径或符号处理。
+      }
+    }
+    // 某些 URI 解码实现会保留盘符前的斜杠（/d:/...），在 Windows
+    // 上需要还原成 d:\\... 才能被 path.isAbsolute 正确识别。
+    reference = reference.replace(/^\/([A-Za-z]):[\\/]/, '$1:\\')
+    reference = reference.replace(/^\\([A-Za-z]):[\\/]/, '$1:\\')
+    return {
+      path: reference,
+      line,
+      column,
     }
   }
 

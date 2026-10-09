@@ -777,6 +777,7 @@ Skill 使用契约：
         // 检查是否需要自动压缩。首次请求没有服务端 usage 时，使用保守估算值。
         const estimatedTokens = estimateMessagesTokens(this.config.messages)
         const currentTokens = Math.max(totalUsage?.lastTotalTokens || 0, estimatedTokens)
+        this.emitContextUsage(totalUsage)
         if (
           currentTokens > 0 &&
           shouldAutoCompact(
@@ -898,6 +899,7 @@ Skill 使用契约：
         this.throwIfCancelled()
         assistantContent = response.content
         totalUsage = mergeUsage(totalUsage, response.usage)
+        this.emitContextUsage(totalUsage)
 
         // 计划审批依赖 enter/exit_plan_mode 的工具调用。部分 OpenAI 兼容模型或中转层
         // 即使收到 tool_choice=required 仍可能返回纯文本；不能把这类响应当作计划完成。
@@ -1066,6 +1068,7 @@ Skill 使用契约：
               contentBlocks: result.contentBlocks as ContentBlock[] | undefined,
             })
           }
+          this.emitContextUsage(totalUsage)
 
           // exit_plan_mode 只有在用户批准后才会成功返回。此时必须让模型至少
           // 成功调用一次真正的写入/执行工具，避免批准后直接输出空泛总结。
@@ -1284,6 +1287,7 @@ Skill 使用契约：
         timestamp: Date.now(),
       }
       this.config.messages.push(finalMessage)
+      this.emitContextUsage(totalUsage)
 
       // 计算上下文窗口使用百分比
       if (totalUsage) {
@@ -1524,6 +1528,29 @@ Skill 使用契约：
     return microcompact(this.config.messages, 5)
   }
 
+  /** 在每轮 API/工具结果后更新上下文估算，让长任务在结束前即可看到真实进度。 */
+  private emitContextUsage(usage: TokenUsage | undefined): void {
+    const contextWindow = this.getConfiguredContextWindow()
+    const effectiveContextWindow = getEffectiveContextWindow(this.config.model, contextWindow)
+    const estimatedMessageTokens = estimateMessagesTokens(this.config.messages)
+    // 工具结果加入历史后，实时展示必须跟随当前消息估算值增长。
+    // 不能与上一轮请求的 lastTotalTokens 取 max，否则较小的工具结果会被
+    // 上一轮的 prompt+output 总量遮住，直到下一轮模型返回 usage 才突然跳变。
+    const estimatedCurrentTokens =
+      estimatedMessageTokens || usage?.lastPromptTokens || usage?.lastTotalTokens || 0
+    this.onAgentEventCallback?.({
+      type: 'context_usage',
+      usage: {
+        ...(usage || {}),
+        estimated: estimatedMessageTokens > 0 || typeof usage?.lastTotalTokens !== 'number',
+        contextWindow,
+        effectiveContextWindow,
+        estimatedCurrentTokens,
+        percentUsed: Math.min(Math.round((estimatedCurrentTokens / effectiveContextWindow) * 100), 100),
+      },
+    })
+  }
+
   private getConfiguredContextWindow(): number {
     const configured =
       this.config.provider.modelContextWindows?.[this.config.model] ||
@@ -1762,8 +1789,21 @@ Skill 使用契约：
       model: summaryModel,
       effortLevel: 'low',
     })
+    const compactionMessages = [...this.config.messages]
+    const tasks = this.config.taskManager?.listTasks() || []
+    if (tasks.length) {
+      compactionMessages.push({
+        id: `compact-task-state-${Date.now()}`,
+        role: 'user',
+        content:
+          '[压缩前的结构化任务状态，必须原样保留到摘要中；不要把已完成任务改写为待完成。]\n' +
+          this.buildTaskReviewContext(),
+        timestamp: Date.now(),
+        internal: true,
+      })
+    }
     const { summaryMessage } = await compactConversation(
-      this.config.messages,
+      compactionMessages,
       summaryApiClient,
       summaryModel
     )

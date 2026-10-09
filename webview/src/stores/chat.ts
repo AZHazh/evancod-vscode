@@ -272,7 +272,18 @@ export const useChatStore = defineStore('chat', () => {
       case 'session.created':
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
-        sessions.value.push(message.data.session)
+        // 新会话没有用户/助手消息时只是草稿，不显示在历史列表中。
+        // 第一条消息到达后，扩展会通过 session.list 将它加入列表。
+        if (message.data.session.messages?.some((item: { role?: string }) =>
+          item.role === 'user' || item.role === 'assistant'
+        )) {
+          sessions.value = [
+            message.data.session,
+            ...sessions.value.filter(session => session.id !== message.data.session.id),
+          ]
+        } else {
+          sessions.value = sessions.value.filter(session => session.id !== message.data.session.id)
+        }
         syncUiMessagesFromSession()
         break
 
@@ -309,9 +320,10 @@ export const useChatStore = defineStore('chat', () => {
 
   function mergeSessionList(items: SessionListItem[]): Session[] {
     const map = new Map(sessions.value.map(session => [session.id, session]))
+    const merged: Session[] = []
     for (const item of items) {
       const existing = map.get(item.id)
-      map.set(item.id, {
+      merged.push({
         id: item.id,
         name: item.title,
         createdAt: new Date(item.createdAt).getTime(),
@@ -327,7 +339,7 @@ export const useChatStore = defineStore('chat', () => {
         messageCount: existing?.messageCount ?? existing?.messages?.length ?? 0,
       })
     }
-    return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    return merged.sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
   function syncUiMessagesFromSession(preserveRuntime = false) {
@@ -850,6 +862,10 @@ export const useChatStore = defineStore('chat', () => {
         if (compactionStatus.value === 'compacting') {
           compactionStatus.value = 'idle'
         }
+        break
+
+      case 'context_usage':
+        tokenUsage.value = event.usage as TokenUsage
         break
 
       case 'status':

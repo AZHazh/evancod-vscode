@@ -17,6 +17,13 @@ const props = withDefaults(
 )
 
 const chatStore = useChatStore()
+const emit = defineEmits<{
+  (event: 'file-open', path: string): void
+}>()
+
+function openFile(path: string) {
+  if (path) emit('file-open', path)
+}
 const expanded = computed({
   get: () => chatStore.isExpandedState(`thinking:${props.messageId}`),
   set: value => chatStore.setExpandedState(`thinking:${props.messageId}`, value),
@@ -106,7 +113,12 @@ onBeforeUnmount(() => {
     </button>
 
     <div v-if="expanded" class="thinking-block__content">
-      <MarkdownRenderer :content="content" variant="compact" :show-copy-button="false" />
+      <MarkdownRenderer
+        :content="content"
+        variant="compact"
+        :show-copy-button="false"
+        @file-open="openFile"
+      />
       <span v-if="isActive" class="thinking-block__cursor" />
     </div>
   </div>

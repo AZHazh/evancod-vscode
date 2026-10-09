@@ -21,7 +21,11 @@
         </div>
 
         <div class="plan-markdown">
-          <MarkdownRenderer :content="planMarkdown" variant="document" />
+          <MarkdownRenderer
+            :content="planMarkdown"
+            variant="document"
+            @file-open="openFile"
+          />
         </div>
 
         <div v-if="hasHighRisks" class="approval-warning">
@@ -129,7 +133,12 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   approve: []
   reject: [reason: string]
+  'file-open': [path: string]
 }>()
+
+function openFile(path: string) {
+  if (path) emit('file-open', path)
+}
 
 const showRejectDialog = ref(false)
 const rejectReason = ref('')

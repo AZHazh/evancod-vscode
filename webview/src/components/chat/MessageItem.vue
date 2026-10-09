@@ -60,19 +60,6 @@ function copyInlineMessage(event: ClipboardEvent) {
   )
 }
 
-function handleMessageClick(event: MouseEvent) {
-  const target = event.target as HTMLElement
-  const token = target.closest<HTMLElement>('[data-file-path]')
-  if (token?.dataset.filePath) {
-    event.preventDefault()
-    openFile(token.dataset.filePath)
-    return
-  }
-  const code = target.closest('code')
-  const value = code?.textContent?.trim() || ''
-  if (value && /(?:^|[\\/])[^\\/\n]+\.[A-Za-z0-9]{1,8}$/.test(value)) openFile(value)
-}
-
 const content = computed(() => ('content' in props.message ? props.message.content : ''))
 const displayUserContent = computed(() => {
   if (props.message.type !== 'user_text') return ''
@@ -198,12 +185,12 @@ async function copyMessage() {
           class="assistant-message__bubble"
           :class="{ 'assistant-message__bubble--document': documentLayout }"
         >
-          <MarkdownRenderer
-            :content="message.content"
-            :streaming="isStreamingAssistant"
-            :variant="documentLayout ? 'document' : 'default'"
-            @click="handleMessageClick"
-          />
+        <MarkdownRenderer
+          :content="message.content"
+          :streaming="isStreamingAssistant"
+          :variant="documentLayout ? 'document' : 'default'"
+          @file-open="openFile"
+        />
         </div>
         <div class="message-action-bar message-action-bar--start">
           <button
@@ -225,6 +212,7 @@ async function copyMessage() {
       :content="message.content"
       :timestamp="message.timestamp"
       :is-active="message.id === chatStore.activeThinkingMessageId"
+      @file-open="openFile"
     />
 
     <AgentCard
@@ -279,7 +267,12 @@ async function copyMessage() {
     />
 
     <div v-else-if="message.type === 'plan_approval'" class="plan-message">
-      <PlanApproval :plan="message.plan" @approve="approvePlan" @reject="rejectPlan" />
+      <PlanApproval
+        :plan="message.plan"
+        @approve="approvePlan"
+        @reject="rejectPlan"
+        @file-open="openFile"
+      />
     </div>
 
     <GeneratedImageBlock

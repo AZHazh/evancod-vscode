@@ -63,6 +63,10 @@ export type StreamCallback = (delta: string, isComplete: boolean) => void
 export type AgentEventCallback = (event: AgentServerEvent) => void
 
 const TEXT_ATTACHMENT_LIMIT = 120_000
+const GLOBAL_MODEL_KEY = 'evancod.runtime.model'
+const GLOBAL_EFFORT_LEVEL_KEY = 'evancod.runtime.effortLevel'
+const DEFAULT_MODEL = 'claude-3-5-sonnet-20241022'
+const DEFAULT_EFFORT_LEVEL: 'low' | 'medium' | 'high' | 'max' = 'medium'
 
 export class ChatService {
   private transcriptDeltaBuffers = new Map<string, string>()
@@ -107,8 +111,8 @@ export class ChatService {
   private queryEngine?: QueryEngine
   private memoryQuery = ''
 
-  private currentModelId: string | null = null
-  private effortLevel: 'low' | 'medium' | 'high' | 'max' = 'medium'
+  private currentModelId: string | null
+  private effortLevel: 'low' | 'medium' | 'high' | 'max'
   private permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' = 'default'
   private persistence: SessionPersistenceService
   private taskNotificationQueue = new TaskNotificationQueue()
@@ -145,6 +149,8 @@ export class ChatService {
     private toolProfileService?: ToolProfileService
   ) {
     this.persistence = new SessionPersistenceService(context)
+    this.currentModelId = context.globalState.get<string>(GLOBAL_MODEL_KEY) || null
+    this.effortLevel = this.readGlobalEffortLevel()
     this.memoryManager.setSemanticExtractor(
       new LLMMemoryExtractor(() => {
         const provider = this.providerService.getActiveProvider()
@@ -157,9 +163,12 @@ export class ChatService {
 
   async initialize(): Promise<void> {
     const data = await this.persistence.load()
-    this.sessions = Object.values(data.sessions).sort((a, b) => b.updatedAt - a.updatedAt)
+    const loadedSessions = Object.values(data.sessions)
+    this.sessions = loadedSessions
+      .filter(session => this.hasConversationMessages(session))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
     this.currentSessionId =
-      data.currentSessionId && data.sessions[data.currentSessionId]
+      data.currentSessionId && this.sessions.some(session => session.id === data.currentSessionId)
         ? data.currentSessionId
         : this.sessions[0]?.id || null
     this.taskManager.setCurrentSession(this.currentSessionId)
@@ -189,7 +198,21 @@ export class ChatService {
         session.messageCount = session.messages.length
       }
     }
+    if (this.sessions.length !== loadedSessions.length) {
+      this.saveSessions()
+    }
     const currentSession = this.getCurrentSession()
+    // 兼容持久化全局状态加入前已有的会话配置，并将其升级为全局偏好。
+    // 全局状态优先，避免打开扩展时被旧会话覆盖。
+    const legacyRuntimeConfig = currentSession?.runtimeConfig
+    if (!this.currentModelId && legacyRuntimeConfig?.model) {
+      this.currentModelId = legacyRuntimeConfig.model
+      this.persistGlobalModel()
+    }
+    if (this.effortLevel === DEFAULT_EFFORT_LEVEL && legacyRuntimeConfig?.effortLevel) {
+      this.effortLevel = legacyRuntimeConfig.effortLevel
+      this.persistGlobalEffortLevel()
+    }
     const activeRequestContext = currentSession?.requestContexts?.find(
       context => context.id === currentSession.activeRun?.requestId
     )
@@ -212,13 +235,19 @@ export class ChatService {
 
     const sessions: Record<string, Session> = {}
     for (const session of this.sessions) {
+      if (!this.hasConversationMessages(session)) continue
       sessions[session.id] = session
     }
+
+    // 空会话只是当前输入草稿，不能让持久化数据继续指向它。
+    const currentSessionId = this.currentSessionId && sessions[this.currentSessionId]
+      ? this.currentSessionId
+      : null
 
     void this.persistence.save(
       {
         sessions,
-        currentSessionId: this.currentSessionId,
+        currentSessionId,
       },
       immediate
     )
@@ -267,6 +296,8 @@ export class ChatService {
   }
 
   private async createNewSessionNow(): Promise<Session> {
+    // 空会话只是输入草稿，不进入历史记录。
+    this.sessions = this.sessions.filter(session => this.hasConversationMessages(session))
     const previousSession = this.getCurrentSession()
     if (previousSession) {
       void this.memoryManager.archiveScope('session', previousSession.id, previousSession.workDir)
@@ -325,7 +356,11 @@ export class ChatService {
    * @returns 会话数组
    */
   getSessions(): Session[] {
-    return this.sessions
+    return this.sessions.filter(session => this.hasConversationMessages(session))
+  }
+
+  private hasConversationMessages(session: Session): boolean {
+    return session.messages.some(message => message.role === 'user' || message.role === 'assistant')
   }
 
   async loadSession(sessionId: string): Promise<Session | null> {
@@ -432,7 +467,7 @@ export class ChatService {
 
   getCurrentModel(): string {
     const provider = this.providerService.getActiveProvider()
-    return this.currentModelId || provider?.models.main || 'claude-3-5-sonnet-20241022'
+    return this.currentModelId || provider?.models.main || DEFAULT_MODEL
   }
 
   setCurrentModel(model: string) {
@@ -441,6 +476,7 @@ export class ChatService {
     }
 
     this.currentModelId = model.trim()
+    this.persistGlobalModel()
     this.queryEngine = undefined
     this.persistRuntimeConfig()
   }
@@ -460,10 +496,12 @@ export class ChatService {
   }) {
     if (options.model) {
       this.currentModelId = options.model.trim()
+      this.persistGlobalModel()
     }
 
     if (options.effortLevel) {
       this.effortLevel = options.effortLevel
+      this.persistGlobalEffortLevel()
     }
 
     if (options.permissionMode) {
@@ -1571,6 +1609,22 @@ export class ChatService {
     this.saveSessions()
   }
 
+  private readGlobalEffortLevel(): 'low' | 'medium' | 'high' | 'max' {
+    const value = this.context.globalState.get<string>(GLOBAL_EFFORT_LEVEL_KEY)
+    return value === 'low' || value === 'medium' || value === 'high' || value === 'max'
+      ? value
+      : DEFAULT_EFFORT_LEVEL
+  }
+
+  private persistGlobalModel(): void {
+    if (!this.currentModelId) return
+    void this.context.globalState.update(GLOBAL_MODEL_KEY, this.currentModelId)
+  }
+
+  private persistGlobalEffortLevel(): void {
+    void this.context.globalState.update(GLOBAL_EFFORT_LEVEL_KEY, this.effortLevel)
+  }
+
   private syncActiveRunFromTasks(session: Session): void {
     if (!session.activeRun || session.activeRun.status !== 'running') return
     const activeTask = this.taskManager.listTasks().find(task => task.status === 'in_progress')
@@ -1810,6 +1864,16 @@ export class ChatService {
           emittedEvent = { ...event, usage: session.tokenUsage }
         }
         this.finalizeStreamingTranscript(session)
+        break
+      }
+
+      case 'context_usage': {
+        // 这是当前运行的快照，不写入累计消耗；最终 message_complete
+        // 仍由 mergeSessionUsage 统一合并，避免每轮快照被重复累加。
+        emittedEvent = {
+          ...event,
+          usage: { ...(session.tokenUsage || {}), ...event.usage },
+        }
         break
       }
     }

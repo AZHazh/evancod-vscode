@@ -42,6 +42,10 @@ const props = withDefaults(defineProps<Props>(), {
   streaming: false,
 })
 
+const emit = defineEmits<{
+  (event: 'file-open', path: string): void
+}>()
+
 /**
  * 渲染后的 HTML
  */
@@ -77,8 +81,12 @@ sharedRenderer.code = ({ text, lang }) => {
 
 sharedRenderer.link = ({ href, title, tokens }) => {
   const text = tokens.map(token => ('raw' in token ? token.raw : '')).join('')
+  if (isFileReferenceValue(href)) {
+    return `<a href="#" data-file-path="${escapeHtml(href)}" class="markdown-file-reference">${text}</a>`
+  }
+
   if (!href.startsWith('http://') && !href.startsWith('https://')) {
-    return `<a href="#" data-file-path="${escapeHtml(href)}">${text}</a>`
+    return `<span class="markdown-reference">${text}</span>`
   }
 
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : ''
@@ -87,10 +95,20 @@ sharedRenderer.link = ({ href, title, tokens }) => {
 
 sharedRenderer.codespan = ({ text }) => {
   const value = text.trim()
-  const fileAttr = /(?:^|[\\/])[^\\/\n]+\.[A-Za-z0-9]{1,8}$/.test(value)
-    ? ` data-file-path="${escapeHtml(value)}"`
-    : ''
-  return `<code${fileAttr}>${escapeHtml(text)}</code>`
+  const isFileReference = isFileReferenceValue(value)
+  const className = isFileReference
+    ? 'markdown-reference markdown-file-reference'
+    : 'markdown-reference'
+  const attribute = isFileReference ? ` data-file-path="${escapeHtml(value)}"` : ''
+  return `<code class="${className}"${attribute}>${escapeHtml(text)}</code>`
+}
+
+function isFileReferenceValue(value: string): boolean {
+  const normalized = value.trim()
+  if (/^file:\/\//i.test(normalized)) return true
+  return /\.(?:ts|tsx|js|jsx|mjs|cjs|vue|svelte|json|md|mdx|css|scss|less|html?|xml|ya?ml|toml|py|java|go|rs|c|h|cpp|hpp|cs|php|rb|swift|kt|kts|sql|sh|ps1|bat|txt|png|jpe?g|gif|webp|svg)(?:(?::|#L)\d+(?::\d+)?)?$/i.test(
+    normalized
+  )
 }
 
 /**
@@ -179,6 +197,12 @@ function escapeHtml(text: string): string {
 
 async function handleRenderedClick(event: MouseEvent) {
   const target = event.target as HTMLElement
+  const fileToken = target.closest<HTMLElement>('[data-file-path]')
+  if (fileToken?.dataset.filePath) {
+    event.preventDefault()
+    emit('file-open', fileToken.dataset.filePath)
+    return
+  }
   const button = target.closest<HTMLButtonElement>('.copy-btn')
   if (!button) return
 
@@ -345,11 +369,24 @@ async function handleRenderedClick(event: MouseEvent) {
   :deep(a) {
     color: var(--chat-color-text-accent);
     text-decoration: none;
+    cursor: pointer;
 
     &:hover {
       text-decoration: underline;
     }
   }
+
+  :deep(.markdown-file-reference) {
+    color: #55b7ff;
+    cursor: pointer;
+    text-decoration: none;
+
+    &:hover {
+      color: #8acbff;
+      text-decoration: underline;
+    }
+  }
+
 
   :deep(table) {
     width: 100%;

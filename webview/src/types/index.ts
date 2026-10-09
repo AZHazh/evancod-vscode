@@ -398,6 +398,7 @@ export type AgentServerEvent =
       terminationReason?: string
       completed?: boolean
     }
+  | { type: 'context_usage'; usage: TokenUsage }
   | { type: 'status'; state: string; verb?: string }
   | {
       type: 'system_notification'
