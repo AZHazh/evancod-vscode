@@ -28,7 +28,11 @@ import { ToolProfileService } from './services/tools/ToolProfileService'
 import { AgentDefinitionStore } from './services/agent/AgentDefinitionStore'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { initializePerformanceLogger, performanceLog, performanceMeasure } from './utils/performanceLogger'
+import {
+  initializePerformanceLogger,
+  performanceLog,
+  performanceMeasure,
+} from './utils/performanceLogger'
 
 // 使用模块级变量（而非全局变量）保存服务实例
 // 这样可以保证作用域隔离，且通过 ExtensionContext 管理生命周期
@@ -56,7 +60,10 @@ let agentDefinitionStore: AgentDefinitionStore
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Evancod extension is now active!')
   const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development
-  const logPath = initializePerformanceLogger(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath, isDevelopment)
+  const logPath = initializePerformanceLogger(
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+    isDevelopment
+  )
   performanceLog('extension.activate.start', { logPath })
 
   /**
@@ -102,7 +109,8 @@ export async function activate(context: vscode.ExtensionContext) {
         console.log('[Extension] Calling showOpenDialog...')
         const files = await vscode.window.showOpenDialog({
           canSelectFiles: true,
-          canSelectFolders: true,
+          // 附件处理链路按文件读取；允许选择目录会让 Windows 原生对话框进入目录选择模式。
+          canSelectFolders: false,
           canSelectMany: true,
           openLabel: '添加到上下文',
           title: '选择要添加到 Evancod 上下文的文件或图片',
@@ -197,7 +205,9 @@ export async function activate(context: vscode.ExtensionContext) {
       onTaskListChange: () => taskManager.notifyTaskList(),
       getPermissionMode: () => chatService.getRuntimeState().permissionMode,
     })
-    await performanceMeasure('startup.agent.restorePersistedTasks', () => agentCoordinator.restorePersistedTasks())
+    await performanceMeasure('startup.agent.restorePersistedTasks', () =>
+      agentCoordinator.restorePersistedTasks()
+    )
 
     // 初始化状态栏服务
     statusBarService = new StatusBarService(context, providerService)

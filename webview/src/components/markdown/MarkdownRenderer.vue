@@ -31,7 +31,7 @@ interface Props {
 
   variant?: 'default' | 'document' | 'compact'
 
-  /** 流式阶段使用轻量纯文本，完成后再做完整 Markdown 解析。 */
+  /** 流式阶段也实时解析 Markdown，完成时只负责落地最后一帧。 */
   streaming?: boolean
 }
 
@@ -124,6 +124,12 @@ function isFileReferenceValue(value: string): boolean {
 let renderTimer = 0
 const RENDER_THROTTLE_MS = 100
 
+function cancelScheduledRender() {
+  if (!renderTimer) return
+  window.clearTimeout(renderTimer)
+  renderTimer = 0
+}
+
 function scheduleRender() {
   if (renderTimer) return
   renderTimer = window.setTimeout(() => {
@@ -133,26 +139,23 @@ function scheduleRender() {
 }
 
 onMounted(() => {
-  if (!props.streaming) {
-    renderMarkdown()
-  }
+  renderMarkdown()
 })
 
 /**
- * 非流式内容继续使用节流渲染；流式结束时立即生成最终 Markdown。
+ * 流式内容使用节流渲染，避免每个 token 都重新解析完整文本；
+ * 流式结束时立即生成最终 Markdown，确保最后一批增量不会停留在旧 HTML。
  */
 watch(
   () => [props.content, props.streaming] as const,
   ([, streaming], [, previousStreaming]) => {
     if (streaming) {
-      if (renderTimer) {
-        window.clearTimeout(renderTimer)
-        renderTimer = 0
-      }
+      scheduleRender()
       return
     }
 
     if (previousStreaming) {
+      cancelScheduledRender()
       renderMarkdown()
       return
     }
@@ -162,7 +165,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  if (renderTimer) window.clearTimeout(renderTimer)
+  cancelScheduledRender()
 })
 
 /**
@@ -177,7 +180,8 @@ function renderMarkdown() {
     }) as string
   } catch (error) {
     console.error('Markdown 渲染失败:', error)
-    renderedHtml.value = `<p class="error">渲染失败: ${error}</p>`
+    // 流式内容可能暂时处于不完整语法状态；异常时仍显示原文，避免消息消失。
+    renderedHtml.value = `<pre class="markdown-render-error">${escapeHtml(props.content)}</pre>`
   }
 }
 
@@ -223,8 +227,12 @@ async function handleRenderedClick(event: MouseEvent) {
 
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
-    <div v-if="streaming" class="markdown-content markdown-content--streaming">{{ content }}</div>
-    <div v-else class="markdown-content" v-html="renderedHtml" @click="handleRenderedClick"></div>
+    <div
+      class="markdown-content"
+      :class="{ 'markdown-content--streaming': streaming }"
+      v-html="renderedHtml"
+      @click="handleRenderedClick"
+    ></div>
   </div>
 </template>
 
@@ -419,6 +427,11 @@ async function handleRenderedClick(event: MouseEvent) {
 
 .markdown-content--streaming {
   overflow-wrap: anywhere;
+}
+
+.markdown-content :deep(.markdown-render-error) {
+  margin: 0;
+  overflow-x: auto;
   white-space: pre-wrap;
 }
 
