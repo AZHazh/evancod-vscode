@@ -52,5 +52,9 @@ export function composerAttachmentToPayload(attachment: ComposerAttachment): str
 }
 
 export function workspaceReferenceToPayload(reference: WorkspaceReference) {
+  // 如果有行号信息,返回带行号的路径格式
+  if (reference.startLine && reference.endLine) {
+    return `${reference.path}:${reference.startLine}-${reference.endLine}`
+  }
   return reference.path
 }

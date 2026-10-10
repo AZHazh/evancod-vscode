@@ -69,6 +69,12 @@ export class WebviewManager implements vscode.WebviewViewProvider {
   private createFreshSessionOnReady = false
 
   /**
+   * Vue 应用准备就绪的 Promise
+   */
+  private vueReadyPromise: Promise<void> | undefined
+  private resolveVueReady: (() => void) | undefined
+
+  /**
    * 可释放资源列表
    * 用于在 Webview 关闭时清理资源
    */
@@ -142,10 +148,17 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     this.resolveViewReady = undefined
     this.viewReadyPromise = undefined
 
+    // 初始化 Vue 应用准备就绪的 Promise
+    this.vueReadyPromise = new Promise(resolve => {
+      this.resolveVueReady = resolve
+    })
+
     webviewView.onDidDispose(() => {
       if (this.view !== webviewView) return
       this.view = undefined
       this.webview = undefined
+      this.vueReadyPromise = undefined
+      this.resolveVueReady = undefined
       this.disposables.forEach(d => d.dispose())
       this.disposables = []
     }, undefined, this.disposables)
@@ -251,6 +264,12 @@ export class WebviewManager implements vscode.WebviewViewProvider {
             this.postRuntimeState()
             // 会话恢复后主动刷新当前会话任务列表，避免重新打开对话后任务丢失
             this.chatService.notifyTaskList()
+
+            // 标记 Vue 应用已准备就绪
+            if (this.resolveVueReady) {
+              this.resolveVueReady()
+              this.resolveVueReady = undefined
+            }
             break
           }
 
@@ -387,7 +406,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
             break
 
           case 'file.open':
-            await this.handleFileOpen(message.data?.path)
+            await this.handleFileOpen(message.data?.path, message.data?.line)
             break
 
           case 'workspace.pick':
@@ -910,8 +929,11 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   /**
    * 处理命令返回的文件
    */
-  public handlePickedFiles(files: vscode.Uri[]): void {
+  public async handlePickedFiles(files: vscode.Uri[]): Promise<void> {
     console.log('[WebviewManager] handlePickedFiles called with', files.length, 'files')
+    // 等待 webview 和 Vue 应用都准备就绪
+    await this.getWebview()
+    await this.vueReadyPromise
     this.postMessage({
       type: 'file.picked',
       data: {
@@ -920,6 +942,26 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
           name: path.basename(file.fsPath),
         })),
       },
+    })
+  }
+
+  /**
+   * 处理代码选择
+   */
+  public async handleCodeSelection(selection: {
+    path: string
+    name: string
+    startLine: number
+    endLine: number
+    content: string
+  }): Promise<void> {
+    console.log('[WebviewManager] handleCodeSelection called for', selection.name)
+    // 等待 webview 和 Vue 应用都准备就绪
+    await this.getWebview()
+    await this.vueReadyPromise
+    this.postMessage({
+      type: 'code.selection',
+      data: selection,
     })
   }
 
@@ -1238,7 +1280,7 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     }
   }
 
-  private async handleFileOpen(filePath?: string): Promise<void> {
+  private async handleFileOpen(filePath?: string, lineNumber?: number): Promise<void> {
     if (!filePath) return
     const workDir = this.chatService.getCurrentSession()?.workDir
     const baseDir = workDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
@@ -1249,8 +1291,10 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
         : path.resolve(baseDir, reference.path)
       const uri = await this.resolveFileUri(resolvedPath, baseDir)
       const document = await vscode.workspace.openTextDocument(uri)
-      const position = reference.line
-        ? new vscode.Position(reference.line - 1, Math.max((reference.column || 1) - 1, 0))
+      // 如果传入了行号参数,优先使用它;否则使用 reference 中的行号
+      const targetLine = lineNumber !== undefined ? lineNumber : reference.line
+      const position = targetLine
+        ? new vscode.Position(targetLine - 1, Math.max((reference.column || 1) - 1, 0))
         : undefined
       await vscode.window.showTextDocument(document, { preview: false, selection: position ? new vscode.Range(position, position) : undefined })
       await vscode.commands.executeCommand('revealInExplorer', uri)

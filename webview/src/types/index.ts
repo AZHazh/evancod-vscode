@@ -15,6 +15,8 @@ export interface WorkspaceReference {
   name: string
   path: string
   relativePath: string
+  startLine?: number
+  endLine?: number
 }
 
 export type ComposerAttachment =
@@ -182,6 +184,8 @@ export interface InlineMessageSegment {
   path?: string
   name?: string
   description?: string
+  startLine?: number
+  endLine?: number
 }
 
 export interface RequestReference {

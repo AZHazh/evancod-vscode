@@ -2,7 +2,7 @@
   "name": "vscode-evancod",
   "displayName": "Evancod",
   "description": "AI-powered coding agent for VSCode",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "publisher": "evancod",
   "icon": "resources/extension-icon.png",
   "engines": {
@@ -31,6 +31,14 @@
         "command": "evancod.syncNewApi",
         "title": "Evancod: 同步中转",
         "icon": "$(sync)"
+      },
+      {
+        "command": "evancod.addFileToChat",
+        "title": "将文件添加到Evancod"
+      },
+      {
+        "command": "evancod.addSelectionToChat",
+        "title": "将所选内容添加到Evancod"
       }
     ],
     "viewsContainers": {
@@ -58,6 +66,20 @@
           "command": "evancod.openChat",
           "when": "resourceScheme == file",
           "group": "navigation@100"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "evancod.addFileToChat",
+          "when": "!explorerResourceIsFolder",
+          "group": "evancod@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "evancod.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "evancod@1"
         }
       ]
     },

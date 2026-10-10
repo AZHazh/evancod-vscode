@@ -40,9 +40,9 @@ function rejectPlan(reason: string) {
   })
 }
 
-function openFile(filePath: string) {
+function openFile(filePath: string, line?: number) {
   if (!filePath) return
-  vscode.postMessage({ type: 'file.open', data: { path: filePath } })
+  vscode.postMessage({ type: 'file.open', data: { path: filePath, line } })
 }
 
 function copyInlineMessage(event: ClipboardEvent) {
@@ -148,9 +148,13 @@ async function copyMessage() {
               type="button"
               class="message-file-token"
               :data-file-path="segment.path"
-              @click="openFile(segment.path || '')"
+              @click="openFile(segment.path || '', segment.startLine)"
             >
-              <FileIcon /><span>{{ segment.name }}</span>
+              <FileIcon /><span>{{
+                segment.startLine && segment.endLine
+                  ? `${segment.name}:${segment.startLine}-${segment.endLine}`
+                  : segment.name
+              }}</span>
             </button>
             <span v-else class="message-skill-token"
               ><SkillBadge :skill="{ name: segment.name || '', description: segment.description }"

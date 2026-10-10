@@ -236,6 +236,16 @@ export type ExtensionToWebviewMessage =
         context?: any
       }
     }
+  | {
+      type: 'code.selection'
+      data: {
+        path: string
+        name: string
+        startLine: number
+        endLine: number
+        content: string
+      }
+    }
 
 /**
  * Webview → Extension 消息类型
@@ -297,7 +307,7 @@ export type WebviewToExtensionMessage =
     }
   | {
       type: 'file.open'
-      data: { path: string }
+      data: { path: string; line?: number }
     }
   | {
       type: 'interaction_response'

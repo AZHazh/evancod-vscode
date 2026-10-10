@@ -131,6 +131,53 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   )
 
+  // 从资源管理器添加文件到对话框
+  context.subscriptions.push(
+    vscode.commands.registerCommand('evancod.addFileToChat', async (uri: vscode.Uri) => {
+      if (!webviewManager) {
+        vscode.window.showErrorMessage('Evancod 尚未初始化完成，请查看 Debug Console 中的错误。')
+        return
+      }
+
+      // 打开聊天面板（如果未打开）
+      webviewManager.show()
+
+      // 添加文件到输入框（等待 webview 准备就绪）
+      await webviewManager.handlePickedFiles([uri])
+    })
+  )
+
+  // 从编辑器添加选中内容到对话框
+  context.subscriptions.push(
+    vscode.commands.registerCommand('evancod.addSelectionToChat', async () => {
+      if (!webviewManager) {
+        vscode.window.showErrorMessage('Evancod 尚未初始化完成，请查看 Debug Console 中的错误。')
+        return
+      }
+
+      const editor = vscode.window.activeTextEditor
+      if (!editor || editor.selection.isEmpty) {
+        return
+      }
+
+      const document = editor.document
+      const selection = editor.selection
+      const selectedText = document.getText(selection)
+
+      // 打开聊天面板（如果未打开）
+      webviewManager.show()
+
+      // 发送选中的代码片段（等待 webview 准备就绪）
+      await webviewManager.handleCodeSelection({
+        path: document.uri.fsPath,
+        name: path.basename(document.uri.fsPath),
+        startLine: selection.start.line + 1, // VSCode 行号从 0 开始，显示时从 1 开始
+        endLine: selection.end.line + 1,
+        content: selectedText,
+      })
+    })
+  )
+
   try {
     // 只在激活关键路径加载 Provider 和 Task；其余重量级服务在扩展可用后后台初始化，
     // 避免多个文件扫描/解析任务同时争用 Extension Host 的事件循环。

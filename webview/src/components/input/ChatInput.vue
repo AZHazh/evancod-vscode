@@ -335,6 +335,36 @@ function insertToken(
   if (kind === 'skill')
     token.dataset.skillDescription =
       selectedSkills.value.find(skill => skill.name === label)?.description || ''
+
+  // 为文件 token 添加路径和行号信息，用于跳转
+  if (kind === 'file') {
+    const ref = referenceRegistry.get(id) || attachmentRegistry.get(id)
+    if (ref && 'path' in ref) {
+      token.dataset.filePath = ref.path
+      if ('startLine' in ref && ref.startLine) {
+        token.dataset.startLine = String(ref.startLine)
+        token.dataset.endLine = String(ref.endLine)
+      }
+    }
+    // 添加点击事件
+    token.style.cursor = 'pointer'
+    token.addEventListener('click', e => {
+      e.preventDefault()
+      e.stopPropagation()
+      const filePath = token.dataset.filePath
+      const startLine = token.dataset.startLine
+      if (filePath) {
+        vscode.postMessage({
+          type: 'file.open',
+          data: {
+            path: filePath,
+            line: startLine ? Number.parseInt(startLine) : undefined,
+          },
+        })
+      }
+    })
+  }
+
   token.contentEditable = 'false'
   const iconHost = document.createElement('span')
   iconHost.className = 'inline-token__icon'
@@ -484,7 +514,16 @@ function serializeEditor() {
       const file =
         attachments.value.find(item => item.id === id) ||
         workspaceReferences.value.find(item => item.id === id)
-      if (file) segments.push({ type: 'file', name: file.name, path: file.path })
+      if (file) {
+        const segment: InlineMessageSegment = { type: 'file', name: file.name, path: file.path }
+        // 如果是 WorkspaceReference 且有行号信息,添加到 segment
+        const ref = workspaceReferences.value.find(item => item.id === id)
+        if (ref?.startLine && ref?.endLine) {
+          segment.startLine = ref.startLine
+          segment.endLine = ref.endLine
+        }
+        segments.push(segment)
+      }
       return ''
     }
     if (element.tagName === 'BR') return '\n'
@@ -854,9 +893,15 @@ async function handlePaste(event: ClipboardEvent) {
             name: segment.name || segment.path,
             path: segment.path,
             relativePath: segment.path,
+            startLine: segment.startLine,
+            endLine: segment.endLine,
           })
           referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
-          insertToken('file', segment.name || segment.path, id)
+          const displayName =
+            segment.startLine && segment.endLine
+              ? `${segment.name || segment.path}:${segment.startLine}-${segment.endLine}`
+              : segment.name || segment.path
+          insertToken('file', displayName, id)
         }
       }
       syncEditorInput()
@@ -914,6 +959,24 @@ function handleMessage(event: MessageEvent) {
       attachmentRegistry.set(attachment.id, attachment)
       insertToken('file', file.name || file.path, attachment.id)
     }
+  }
+
+  if (message.type === 'code.selection') {
+    const { path: filePath, name, startLine, endLine } = message.data
+    const id = createId()
+    const displayName = `${name}:${startLine}-${endLine}`
+
+    workspaceReferences.value.push({
+      id,
+      type: 'file',
+      name,
+      path: filePath,
+      relativePath: filePath,
+      startLine,
+      endLine,
+    })
+    referenceRegistry.set(id, workspaceReferences.value[workspaceReferences.value.length - 1])
+    insertToken('file', displayName, id)
   }
 
   if (message.type === 'slash.commands') {
