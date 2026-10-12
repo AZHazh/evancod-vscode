@@ -28,7 +28,7 @@ function approvePlan() {
   if (props.message.type !== 'plan_approval') return
   window.vscode?.postMessage({
     type: 'plan.approve',
-    data: { planId: props.message.plan.id },
+    data: { planId: props.message.plan.id, sessionId: chatStore.currentSession?.id },
   })
 }
 
@@ -36,7 +36,7 @@ function rejectPlan(reason: string) {
   if (props.message.type !== 'plan_approval') return
   window.vscode?.postMessage({
     type: 'plan.reject',
-    data: { planId: props.message.plan.id, reason },
+    data: { planId: props.message.plan.id, sessionId: chatStore.currentSession?.id, reason },
   })
 }
 
@@ -189,12 +189,12 @@ async function copyMessage() {
           class="assistant-message__bubble"
           :class="{ 'assistant-message__bubble--document': documentLayout }"
         >
-        <MarkdownRenderer
-          :content="message.content"
-          :streaming="isStreamingAssistant"
-          :variant="documentLayout ? 'document' : 'default'"
-          @file-open="openFile"
-        />
+          <MarkdownRenderer
+            :content="message.content"
+            :streaming="isStreamingAssistant"
+            :variant="documentLayout ? 'document' : 'default'"
+            @file-open="openFile"
+          />
         </div>
         <div class="message-action-bar message-action-bar--start">
           <button
@@ -259,6 +259,8 @@ async function copyMessage() {
       :tool-name="message.toolName"
       :input="message.input"
       :description="message.description"
+      :deferred="message.deferred"
+      :requested-at="message.requestedAt"
       :response-state="message.responseState"
     />
 
@@ -266,6 +268,8 @@ async function copyMessage() {
       v-else-if="message.type === 'interaction_request'"
       :request-id="message.requestId"
       :input="message.input"
+      :deferred="message.deferred"
+      :requested-at="message.requestedAt"
       :response-state="message.responseState"
       :response-answers="message.responseAnswers"
     />

@@ -13,10 +13,7 @@ import {
   createRequestContext,
   shouldIncludeRequestContract,
 } from '../services/chat/UserPromptComposer'
-import {
-  DEFAULT_MAX_ITERATIONS,
-  isSuccessfulTermination,
-} from '../core/engine/termination'
+import { DEFAULT_MAX_ITERATIONS, isSuccessfulTermination } from '../core/engine/termination'
 import { PermissionResponseCache } from '../services/webview/PermissionResponseCache'
 import { Tool, type ToolDefinition, type ToolResult } from '../core/tools/base/Tool'
 import { ToolRegistry } from '../core/tools/registry/ToolRegistry'
@@ -79,9 +76,9 @@ function createAgentDefinition(
 afterEach(async () => {
   globalThis.fetch = originalFetch
   await Promise.all(
-    temporaryDirectories.splice(0).map(directory =>
-      fs.rm(directory, { recursive: true, force: true })
-    )
+    temporaryDirectories
+      .splice(0)
+      .map(directory => fs.rm(directory, { recursive: true, force: true }))
   )
 })
 
@@ -112,7 +109,10 @@ describe('Agent runtime regression invariants', () => {
       create: () => new RegistryTestTool('write'),
     })
 
-    assert.deepEqual(snapshot.list().map(tool => tool.id), ['builtin.read'])
+    assert.deepEqual(
+      snapshot.list().map(tool => tool.id),
+      ['builtin.read']
+    )
     assert.equal(registry.resolveId('legacy_read'), 'builtin.read')
     assert.throws(
       () =>
@@ -197,13 +197,26 @@ describe('Agent runtime regression invariants', () => {
       createdAt: new Date(0).toISOString(),
     })
 
-    assert.equal(resolveAgentModel(definition, createProvider('first', 'first-sonnet'), 'fallback'), 'first-sonnet')
-    assert.equal(resolveAgentModel(definition, createProvider('second', 'second-sonnet'), 'fallback'), 'second-sonnet')
     assert.equal(
-      resolveAgentModel({ model: 'legacy-model' }, createProvider('first', 'first-sonnet'), 'fallback'),
+      resolveAgentModel(definition, createProvider('first', 'first-sonnet'), 'fallback'),
+      'first-sonnet'
+    )
+    assert.equal(
+      resolveAgentModel(definition, createProvider('second', 'second-sonnet'), 'fallback'),
+      'second-sonnet'
+    )
+    assert.equal(
+      resolveAgentModel(
+        { model: 'legacy-model' },
+        createProvider('first', 'first-sonnet'),
+        'fallback'
+      ),
       'legacy-model'
     )
-    assert.equal(resolveAgentModel({}, createProvider('first', 'first-sonnet'), 'fallback'), 'fallback')
+    assert.equal(
+      resolveAgentModel({}, createProvider('first', 'first-sonnet'), 'fallback'),
+      'fallback'
+    )
   })
 
   it('merges workspace tool preferences over global differences', async () => {
@@ -230,10 +243,7 @@ describe('Agent runtime regression invariants', () => {
     ])
 
     await service.save('workspace', ['builtin.write', 'builtin.new_tool'])
-    assert.deepEqual(service.resolve().enabledTools, [
-      'builtin.write',
-      'builtin.new_tool',
-    ])
+    assert.deepEqual(service.resolve().enabledTools, ['builtin.write', 'builtin.new_tool'])
 
     await service.reset('workspace')
     assert.deepEqual(service.resolve().enabledTools, ['builtin.read', 'builtin.new_tool'])
@@ -601,11 +611,7 @@ describe('Agent runtime regression invariants', () => {
         throw new Error('should not execute')
       },
     }
-    const orchestrator = new ToolOrchestrator(
-      [tool] as any,
-      executor as any,
-      () => true
-    )
+    const orchestrator = new ToolOrchestrator([tool] as any, executor as any, () => true)
 
     await assert.rejects(
       orchestrator.runTools([{ id: 'call-1', name: 'read_file', input: { path: 'x' } }]),
@@ -676,9 +682,7 @@ describe('Agent runtime regression invariants', () => {
       toolName: 'bash',
       toolCallId: `call-${index}`,
       content:
-        index === 1
-          ? 'Error: test failed'
-          : `result-${index}\n${'x'.repeat(2500)}\nend-${index}`,
+        index === 1 ? 'Error: test failed' : `result-${index}\n${'x'.repeat(2500)}\nend-${index}`,
       timestamp: index,
     }))
 
@@ -718,5 +722,18 @@ describe('Agent runtime regression invariants', () => {
 
     now += 5000
     assert.equal(cache.get(response.requestId), undefined)
+  })
+
+  it('isolates cached permission responses with the same request ID by session', () => {
+    const cache = new PermissionResponseCache()
+    const first = { requestId: 'permission-shared', sessionId: 'session-a', approved: true }
+    const second = { requestId: 'permission-shared', sessionId: 'session-b', approved: false }
+
+    cache.set(first)
+    cache.set(second)
+
+    assert.deepEqual(cache.get(first.requestId, first.sessionId), first)
+    assert.deepEqual(cache.get(second.requestId, second.sessionId), second)
+    assert.equal(cache.get(first.requestId, 'session-c'), undefined)
   })
 })

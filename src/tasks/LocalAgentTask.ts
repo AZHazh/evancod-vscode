@@ -4,6 +4,8 @@ export type LocalAgentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped
 
 export interface LocalAgentTask {
   id: string
+  /** 发起该子 Agent 的会话；旧记录可能没有此字段。 */
+  sessionId?: string
   toolUseId?: string
   type: string
   description: string
@@ -131,7 +133,10 @@ export class LocalAgentTaskStore {
 
   private async writeTask(task: LocalAgentTask): Promise<void> {
     await this.ensureDirectories()
-    await vscode.workspace.fs.writeFile(this.taskUri(task.id), Buffer.from(JSON.stringify(task, null, 2), 'utf-8'))
+    await vscode.workspace.fs.writeFile(
+      this.taskUri(task.id),
+      Buffer.from(JSON.stringify(task, null, 2), 'utf-8')
+    )
   }
 
   private taskUri(taskId: string): vscode.Uri {

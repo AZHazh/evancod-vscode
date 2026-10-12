@@ -59,8 +59,24 @@ import {
  * 用于通知 WebviewManager 更新 UI
  */
 export type MessageCallback = (message: Message) => void
-export type StreamCallback = (delta: string, isComplete: boolean) => void
-export type AgentEventCallback = (event: AgentServerEvent) => void
+export type StreamCallback = (delta: string, isComplete: boolean, sessionId: string) => void
+export type AgentEventCallback = (event: AgentServerEvent, sessionId: string) => void
+
+/**
+ * 单个会话独占的运行时资源。
+ *
+ * QueryEngine 和取消控制器不能跟随 UI 的当前会话切换，否则后台会话会被新会话
+ * 复用或误停。运行时仅存在于扩展进程内，会话内容仍由 Session 持久化。
+ */
+interface SessionRuntime {
+  engine?: QueryEngine
+  activeRequest?: Promise<void>
+  requestQueue: Promise<void>
+  requestController?: AbortController
+  directGenerationController?: AbortController
+  isStreaming: boolean
+  memoryQuery: string
+}
 
 const TEXT_ATTACHMENT_LIMIT = 120_000
 const GLOBAL_MODEL_KEY = 'evancod.runtime.model'
@@ -71,7 +87,7 @@ const DEFAULT_EFFORT_LEVEL: 'low' | 'medium' | 'high' | 'max' = 'medium'
 export class ChatService {
   private transcriptDeltaBuffers = new Map<string, string>()
   private transcriptDeltaFlushAt = new Map<string, number>()
-  private activeThinkingBlockId: string | undefined
+  private activeThinkingBlockIds = new Map<string, string>()
   /**
    * 会话列表（存储在内存中）
    * 优势：
@@ -97,19 +113,7 @@ export class ChatService {
    * 是否正在流式接收 AI 响应
    * 用于防止重复发送、显示加载状态等
    */
-  private isStreaming = false
-  private persistenceDirtyWhileStreaming = false
-  private activeRequest?: Promise<void>
-  private requestQueue: Promise<void> = Promise.resolve()
-  private activeRequestController?: AbortController
-  private directGenerationController?: AbortController
-
-  /**
-   * QueryEngine 实例
-   * 用于与 AI 对话
-   */
-  private queryEngine?: QueryEngine
-  private memoryQuery = ''
+  private sessionRuntimes = new Map<string, SessionRuntime>()
 
   private currentModelId: string | null
   private effortLevel: 'low' | 'medium' | 'high' | 'max'
@@ -228,21 +232,19 @@ export class ChatService {
   }
 
   private saveSessions(immediate = false): void {
-    if (this.isStreaming) {
-      this.persistenceDirtyWhileStreaming = true
-      return
-    }
-
     const sessions: Record<string, Session> = {}
     for (const session of this.sessions) {
-      if (!this.hasConversationMessages(session)) continue
+      if (
+        !this.hasConversationMessages(session) &&
+        !this.sessionRuntimes.get(session.id)?.activeRequest
+      )
+        continue
       sessions[session.id] = session
     }
 
     // 空会话只是当前输入草稿，不能让持久化数据继续指向它。
-    const currentSessionId = this.currentSessionId && sessions[this.currentSessionId]
-      ? this.currentSessionId
-      : null
+    const currentSessionId =
+      this.currentSessionId && sessions[this.currentSessionId] ? this.currentSessionId : null
 
     void this.persistence.save(
       {
@@ -276,6 +278,35 @@ export class ChatService {
   }
 
   /**
+   * 获取会话运行时；首次发送消息时才创建，避免历史会话占用引擎资源。
+   *
+   * @param sessionId - 会话 ID
+   * @returns 会话独占的运行时
+   */
+  private getSessionRuntime(sessionId: string): SessionRuntime {
+    let runtime = this.sessionRuntimes.get(sessionId)
+    if (!runtime) {
+      runtime = {
+        requestQueue: Promise.resolve(),
+        isStreaming: false,
+        memoryQuery: '',
+      }
+      this.sessionRuntimes.set(sessionId, runtime)
+    }
+    return runtime
+  }
+
+  /**
+   * 获取指定会话，不依赖可能随时变化的当前 UI 会话。
+   *
+   * @param sessionId - 会话 ID
+   * @returns 匹配的会话，找不到时返回 null
+   */
+  private getSession(sessionId: string): Session | null {
+    return this.sessions.find(session => session.id === sessionId) || null
+  }
+
+  /**
    * 创建新会话
    *
    * 会话创建流程：
@@ -288,25 +319,24 @@ export class ChatService {
    * @returns 新创建的会话对象
    */
   async createNewSession(): Promise<Session> {
-    await this.settleActiveRequestBeforeSessionSwitch()
-    if (this.currentSessionId) {
-      await this.planModeManager.completePlan(this.currentSessionId)
-    }
     return this.createNewSessionNow()
   }
 
   private async createNewSessionNow(): Promise<Session> {
     // 空会话只是输入草稿，不进入历史记录。
-    this.sessions = this.sessions.filter(session => this.hasConversationMessages(session))
-    const previousSession = this.getCurrentSession()
-    if (previousSession) {
-      void this.memoryManager.archiveScope('session', previousSession.id, previousSession.workDir)
-        .catch(error => console.error('Failed to archive session memory:', error))
-    }
+    this.sessions = this.sessions.filter(
+      session =>
+        this.hasConversationMessages(session) ||
+        Boolean(this.sessionRuntimes.get(session.id)?.activeRequest)
+    )
     // 获取工作目录（用于文件操作的相对路径基准）
-    const activeFolder = vscode.window.activeTextEditor &&
+    const activeFolder =
+      vscode.window.activeTextEditor &&
       vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
-    const workDir = activeFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
+    const workDir =
+      activeFolder?.uri.fsPath ||
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      process.cwd()
 
     // 创建会话对象
     const session: Session = {
@@ -331,8 +361,6 @@ export class ChatService {
 
     // 设置为当前活动会话。新会话也会使尚未完成的历史会话加载失效。
     this.sessionSwitchGeneration++
-    // QueryEngine 持有创建时会话的完整消息历史，切换会话时必须丢弃。
-    this.queryEngine = undefined
     this.currentSessionId = session.id
     this.saveSessions()
     await this.refreshCurrentSessionTasks()
@@ -356,7 +384,23 @@ export class ChatService {
    * @returns 会话数组
    */
   getSessions(): Session[] {
-    return this.sessions.filter(session => this.hasConversationMessages(session))
+    return this.sessions.filter(
+      session =>
+        this.hasConversationMessages(session) ||
+        Boolean(this.sessionRuntimes.get(session.id)?.activeRequest)
+    )
+  }
+
+  /**
+   * 判断会话是否仍有顶层请求在执行。
+   *
+   * @param sessionId - 会话 ID
+   * @returns 请求处于执行或收尾阶段时返回 true
+   */
+  isSessionRunning(sessionId: string): boolean {
+    const activeRun = this.getSession(sessionId)?.activeRun
+    if (activeRun) return activeRun.status === 'running'
+    return Boolean(this.sessionRuntimes.get(sessionId)?.activeRequest)
   }
 
   private hasConversationMessages(session: Session): boolean {
@@ -368,17 +412,12 @@ export class ChatService {
     if (!session) return null
 
     const generation = ++this.sessionSwitchGeneration
-    await this.settleActiveRequestBeforeSessionSwitch()
-    // 用户在等待期间又选择了另一个会话，当前结果不能覆盖更新的选择。
-    if (generation !== this.sessionSwitchGeneration) return null
-    if (this.currentSessionId && this.currentSessionId !== session.id) {
-      await this.planModeManager.completePlan(this.currentSessionId)
-    }
     this.currentSessionId = session.id
-    this.queryEngine = undefined
     this.saveSessions()
     // 先加载任务再通知，避免在任务加载完成前发送空/旧列表
     await this.refreshCurrentSessionTasks()
+    // 用户快速选择多个会话时，较早的异步任务加载结果不能覆盖最后一次选择。
+    if (generation !== this.sessionSwitchGeneration) return null
     return session
   }
 
@@ -449,14 +488,12 @@ export class ChatService {
   async deleteSession(sessionId: string): Promise<void> {
     // 删除操作同样会使并发中的历史会话加载失效。
     this.sessionSwitchGeneration++
-    if (this.currentSessionId === sessionId) {
-      await this.settleActiveRequestBeforeSessionSwitch()
-    }
+    await this.stopGeneration(sessionId)
 
     this.sessions = this.sessions.filter(session => session.id !== sessionId)
+    this.sessionRuntimes.delete(sessionId)
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = this.sessions[0]?.id || null
-      this.queryEngine = undefined
       this.saveSessions()
       // 先加载新当前会话任务再通知，避免发送空/旧列表
       await this.refreshCurrentSessionTasks()
@@ -477,7 +514,7 @@ export class ChatService {
 
     this.currentModelId = model.trim()
     this.persistGlobalModel()
-    this.queryEngine = undefined
+    this.invalidateCurrentSessionEngine()
     this.persistRuntimeConfig()
   }
 
@@ -508,7 +545,7 @@ export class ChatService {
       this.permissionMode = options.permissionMode
     }
 
-    this.queryEngine = undefined
+    this.invalidateCurrentSessionEngine()
     this.persistRuntimeConfig()
   }
 
@@ -516,7 +553,7 @@ export class ChatService {
     this.currentModelId = null
     this.effortLevel = 'medium'
     this.permissionMode = 'default'
-    this.queryEngine = undefined
+    this.invalidateCurrentSessionEngine()
     this.persistRuntimeConfig()
   }
 
@@ -545,49 +582,71 @@ export class ChatService {
 
   handlePermissionResponse(response: {
     requestId: string
+    sessionId?: string
     approved: boolean
     reason?: string
     updatedInput?: unknown
     rule?: 'once' | 'always'
   }): boolean {
-    const handled = this.queryEngine?.handlePermissionResponse(response) ?? false
-    if (handled) this.recordPermissionResponse(response)
+    const runtimes = response.sessionId
+      ? ([[response.sessionId, this.sessionRuntimes.get(response.sessionId)]] as const)
+      : Array.from(this.sessionRuntimes.entries())
+    const match = runtimes.find(([, runtime]) =>
+      runtime?.engine?.handlePermissionResponse(response)
+    )
+    const handled = Boolean(match)
+    if (match) this.recordPermissionResponse(match[0], response)
     return handled
   }
 
   handleInteractionResponse(response: {
     requestId: string
+    sessionId?: string
     answered: boolean
     answers?: unknown
     reason?: string
   }): boolean {
-    const handled = this.queryEngine?.handleInteractionResponse(response) ?? false
-    if (handled) {
-      this.recordInteractionResponse(response)
-    }
+    const runtimes = response.sessionId
+      ? ([[response.sessionId, this.sessionRuntimes.get(response.sessionId)]] as const)
+      : Array.from(this.sessionRuntimes.entries())
+    const match = runtimes.find(([, runtime]) =>
+      runtime?.engine?.handleInteractionResponse(response)
+    )
+    const handled = Boolean(match)
+    if (match) this.recordInteractionResponse(match[0], response)
     return handled
   }
 
   cancelBash(toolUseId: string, taskId?: string): boolean {
-    return this.queryEngine?.cancelBash(toolUseId, taskId) ?? false
+    return Array.from(this.sessionRuntimes.values()).some(
+      runtime => runtime.engine?.cancelBash(toolUseId, taskId) ?? false
+    )
   }
 
-  async stopGeneration(): Promise<Session | null> {
-    const session = this.getCurrentSession()
-    const cancelledEngine = this.queryEngine
-    const activeRequest = this.activeRequest
+  /**
+   * 仅停止指定会话的生成任务，不影响其他后台会话。
+   *
+   * @param sessionId - 要停止的会话；省略时停止当前 UI 会话
+   * @returns 被停止的会话
+   */
+  async stopGeneration(sessionId = this.currentSessionId || undefined): Promise<Session | null> {
+    if (!sessionId) return null
+    const session = this.getSession(sessionId)
+    const runtime = this.sessionRuntimes.get(sessionId)
+    const cancelledEngine = runtime?.engine
+    const activeRequest = runtime?.activeRequest
     cancelledEngine?.cancel('用户停止生成')
     if (session) void this.planModeManager.completePlan(session.id)
-    this.activeRequestController?.abort('用户停止生成')
-    this.directGenerationController?.abort('用户停止生成')
-    void this.agentCoordinator.cancelAllAgents('用户停止生成').catch(error => {
+    runtime?.requestController?.abort('用户停止生成')
+    runtime?.directGenerationController?.abort('用户停止生成')
+    void this.agentCoordinator.cancelAgentsForSession(sessionId, '用户停止生成').catch(error => {
       console.error('Failed to finish cancelling sub agents:', error)
     })
 
     // 停止必须立即响应。请求与子 Agent 的持久化收尾留在后台完成，不能阻塞
     // chat.stop 的响应；否则不可中断的第三方工具会让 UI 一直显示运行中。
     const releaseCancelledEngine = () => {
-      if (this.queryEngine === cancelledEngine) this.queryEngine = undefined
+      if (runtime && runtime.engine === cancelledEngine) runtime.engine = undefined
     }
     void activeRequest?.then(releaseCancelledEngine, releaseCancelledEngine)
 
@@ -613,14 +672,6 @@ export class ChatService {
     return session
   }
 
-  private async settleActiveRequestBeforeSessionSwitch(): Promise<void> {
-    const activeRequest = this.activeRequest
-    if (!activeRequest) return
-
-    this.queryEngine?.cancel('切换会话')
-    await activeRequest.catch(() => undefined)
-  }
-
   notifyTaskList(): void {
     this.taskManager.notifyTaskList()
   }
@@ -633,7 +684,14 @@ export class ChatService {
    * 否则下次发消息会复用旧快照，导致仍走旧协议端点。
    */
   invalidateEngine(): void {
-    this.queryEngine = undefined
+    this.invalidateCurrentSessionEngine()
+  }
+
+  /** 使当前会话的缓存引擎失效；运行中的引擎保留到本轮结束。 */
+  private invalidateCurrentSessionEngine(): void {
+    if (!this.currentSessionId) return
+    const runtime = this.sessionRuntimes.get(this.currentSessionId)
+    if (runtime && !runtime.activeRequest) runtime.engine = undefined
   }
 
   getMcpManager(): MCPConnectionManager {
@@ -666,39 +724,46 @@ export class ChatService {
     inlineSegments: InlineMessageSegment[] = [],
     messageId?: string
   ): Promise<void> {
-    const previousRequest = this.activeRequest
+    const sessionId = this.currentSessionId
+    if (!sessionId) throw new Error('No active session')
+    const runtime = this.getSessionRuntime(sessionId)
+    const previousRequest = runtime.activeRequest
     const requestController = new AbortController()
-    const request = this.requestQueue
+    const request = runtime.requestQueue
       .catch(() => undefined)
       .then(async () => {
         if (previousRequest) {
           await previousRequest.catch(() => undefined)
         }
         if (requestController.signal.aborted) return
-        await this.runMessage(
-          content,
-          attachments,
-          inlineSegments,
-          messageId,
-          requestController.signal
+        await this.taskManager.runInSession(sessionId, () =>
+          this.runMessage(
+            sessionId,
+            content,
+            attachments,
+            inlineSegments,
+            messageId,
+            requestController.signal
+          )
         )
       })
-    this.requestQueue = request
-    this.activeRequest = request
-    this.activeRequestController = requestController
+    runtime.requestQueue = request
+    runtime.activeRequest = request
+    runtime.requestController = requestController
     try {
       await request
     } finally {
-      if (this.activeRequest === request) {
-        this.activeRequest = undefined
+      if (runtime.activeRequest === request) {
+        runtime.activeRequest = undefined
       }
-      if (this.activeRequestController === requestController) {
-        this.activeRequestController = undefined
+      if (runtime.requestController === requestController) {
+        runtime.requestController = undefined
       }
     }
   }
 
   private async runMessage(
+    sessionId: string,
     content: string,
     attachments: (string | AttachmentContext)[] = [],
     inlineSegments: InlineMessageSegment[] = [],
@@ -706,10 +771,11 @@ export class ChatService {
     requestSignal?: AbortSignal
   ): Promise<void> {
     // 1. 验证会话
-    const session = this.getCurrentSession()
+    const session = this.getSession(sessionId)
     if (!session) {
       throw new Error('No active session')
     }
+    const runtime = this.getSessionRuntime(sessionId)
 
     // Memory 虽在扩展启动后后台加载，但首个 Query 必须等待它就绪，
     // 避免用户刚启动就提问时漏掉项目记忆。
@@ -719,7 +785,10 @@ export class ChatService {
     const commandResult = await this.resolveSlashCommand(content, session, messageId)
     if (commandResult.handled) {
       this.saveSessions()
-      this.agentEventCallback?.({ type: 'status', state: 'idle', verb: 'command_completed' })
+      this.agentEventCallback?.(
+        { type: 'status', state: 'idle', verb: 'command_completed' },
+        session.id
+      )
       return
     }
 
@@ -735,8 +804,14 @@ export class ChatService {
     )
     const sourceMessageId = messageId || this.generateId()
     if (!interruptedContext) {
-      void this.memoryManager.captureUserMessage(content, session.workDir, sourceMessageId)
-        .catch(error => console.warn('Memory extraction failed:', error instanceof Error ? error.message : 'unknown'))
+      void this.memoryManager
+        .captureUserMessage(content, session.workDir, sourceMessageId)
+        .catch(error =>
+          console.warn(
+            'Memory extraction failed:',
+            error instanceof Error ? error.message : 'unknown'
+          )
+        )
     }
     const requestContext =
       interruptedContext ||
@@ -761,6 +836,7 @@ export class ChatService {
       phase: 'planning',
       updatedAt: Date.now(),
     }
+    this.agentEventCallback?.({ type: 'status', state: 'thinking', verb: 'started' }, session.id)
     const requestContract = shouldIncludeRequestContract(requestContext, {
       continuation: Boolean(interruptedContext),
     })
@@ -772,7 +848,7 @@ export class ChatService {
     const messageContent = [composedPrompt.modelContent, recoveryInstruction, requestContract]
       .filter(Boolean)
       .join('\n\n')
-    this.memoryQuery = commandResult.content
+    runtime.memoryQuery = commandResult.content
     const userContentBlocks = this.buildUserContentBlocks(messageContent, attachmentContexts, true)
 
     // 检测是否为 openai_image 格式的 Provider —— 不需要初始化 QueryEngine
@@ -781,7 +857,7 @@ export class ChatService {
 
     // 3. 初始化 QueryEngine（openai_image 格式不需要）
     if (!isDirectImageGen) {
-      await this.initializeQueryEngine()
+      await this.initializeQueryEngine(session, runtime)
     }
     if (requestSignal?.aborted) return
 
@@ -826,13 +902,13 @@ export class ChatService {
     }
 
     // 标记为流式接收中
-    this.isStreaming = true
+    runtime.isStreaming = true
 
     try {
       // openai_image 格式 Provider —— 直接走图片生成路径
       if (isDirectImageGen && activeProvider) {
         const controller = new AbortController()
-        this.directGenerationController = controller
+        runtime.directGenerationController = controller
         try {
           await this.handleDirectImageGeneration(
             commandResult.content,
@@ -841,8 +917,8 @@ export class ChatService {
             controller.signal
           )
         } finally {
-          if (this.directGenerationController === controller) {
-            this.directGenerationController = undefined
+          if (runtime.directGenerationController === controller) {
+            runtime.directGenerationController = undefined
           }
         }
         requestContext.status = 'completed'
@@ -851,12 +927,12 @@ export class ChatService {
           session.activeRun.status = 'completed'
           session.activeRun.updatedAt = Date.now()
         }
-        this.isStreaming = false
+        runtime.isStreaming = false
         return
       }
 
       // 4. 调用 QueryEngine 发送消息
-      const engine = this.queryEngine!
+      const engine = runtime.engine!
       const cancelEngine = () => engine.cancel('用户停止生成')
       if (requestSignal?.aborted) {
         throw new QueryCancelledError('用户停止生成')
@@ -913,11 +989,18 @@ export class ChatService {
       }
       this.saveSessions()
       if (completed) {
-        void this.memoryManager.archiveScope('task', requestContext.id, session.workDir)
+        void this.memoryManager
+          .archiveScope('task', requestContext.id, session.workDir)
           .catch(error => console.error('Failed to archive task memory:', error))
         if (lastMessage?.role === 'assistant') {
-          void this.memoryManager.captureAssistantReply(lastMessage.content, session.workDir, lastMessage.id)
-            .catch(error => console.warn('Memory extraction failed:', error instanceof Error ? error.message : 'unknown'))
+          void this.memoryManager
+            .captureAssistantReply(lastMessage.content, session.workDir, lastMessage.id)
+            .catch(error =>
+              console.warn(
+                'Memory extraction failed:',
+                error instanceof Error ? error.message : 'unknown'
+              )
+            )
         }
       }
     } catch (error) {
@@ -927,9 +1010,9 @@ export class ChatService {
       // 先补齐 QueryEngine 里未闭合的 tool_use，再把修复后的完整历史同步回会话。
       // 否则两边状态分叉：会话只多了一条错误消息，而 engine 留着孤儿 tool_use，
       // 之后每次「继续」都会被 API 以 400 拒绝，且损坏的历史还会被持久化。
-      if (this.queryEngine) {
-        this.queryEngine.closeDanglingToolCalls()
-        session.messages = this.queryEngine.getMessages()
+      if (runtime.engine) {
+        runtime.engine.closeDanglingToolCalls()
+        session.messages = runtime.engine.getMessages()
         this.restoreDisplayedCommand(
           session.messages,
           commandResult.content,
@@ -994,19 +1077,19 @@ export class ChatService {
 
       // 发送状态更新事件，通知前端错误已发生，状态变为 idle
       if (this.agentEventCallback) {
-        this.agentEventCallback({
-          type: 'status',
-          state: 'idle',
-          verb: 'errored',
-        })
+        this.agentEventCallback(
+          {
+            type: 'status',
+            state: 'idle',
+            verb: 'errored',
+          },
+          session.id
+        )
       }
     } finally {
       // 标记为非流式接收
-      this.isStreaming = false
-      if (this.persistenceDirtyWhileStreaming) {
-        this.persistenceDirtyWhileStreaming = false
-        this.saveSessions()
-      }
+      runtime.isStreaming = false
+      this.saveSessions()
     }
   }
 
@@ -1030,8 +1113,8 @@ export class ChatService {
       phase: 'start' as const,
       prompt,
     }
-    this.recordAgentEvent(startEvent)
-    this.agentEventCallback?.(startEvent)
+    this.recordAgentEvent(session, startEvent)
+    this.agentEventCallback?.(startEvent, session.id)
 
     try {
       if (!provider.baseUrl) {
@@ -1110,8 +1193,8 @@ export class ChatService {
         prompt,
         image: { base64, mime, path: savedPath, name },
       }
-      this.recordAgentEvent(completeEvent)
-      this.agentEventCallback?.(completeEvent)
+      this.recordAgentEvent(session, completeEvent)
+      this.agentEventCallback?.(completeEvent, session.id)
     } catch (error) {
       if (signal.aborted) {
         throw new QueryCancelledError('用户停止生成')
@@ -1137,7 +1220,7 @@ export class ChatService {
       }
     } finally {
       // 3. 发送 message_complete 事件
-      this.agentEventCallback?.({ type: 'message_complete' })
+      this.agentEventCallback?.({ type: 'message_complete' }, session.id)
       session.updatedAt = Date.now()
       session.messageCount = session.messages.length
       this.saveSessions()
@@ -1151,11 +1234,17 @@ export class ChatService {
   ): Promise<{ handled: boolean; content: string; displayContent?: string }> {
     if (/^\/(?:memory|remember)(?:\s|$)/.test(content.trim())) {
       const commandMessage: Message = {
-        id: messageId || this.generateId(), role: 'user', content, timestamp: Date.now(),
+        id: messageId || this.generateId(),
+        role: 'user',
+        content,
+        timestamp: Date.now(),
       }
       session.messages.push(commandMessage)
       this.appendOrUpdateTranscript(session, {
-        id: commandMessage.id, type: 'user_text', content, timestamp: commandMessage.timestamp,
+        id: commandMessage.id,
+        type: 'user_text',
+        content,
+        timestamp: commandMessage.timestamp,
       })
       let message: string
       try {
@@ -1163,11 +1252,19 @@ export class ChatService {
       } catch (error) {
         message = `记忆操作失败：${error instanceof Error ? error.message : '未知错误'}`
       }
-      const response: Message = { id: this.generateId(), role: 'assistant', content: message, timestamp: Date.now() }
+      const response: Message = {
+        id: this.generateId(),
+        role: 'assistant',
+        content: message,
+        timestamp: Date.now(),
+      }
       session.messages.push(response)
       this.appendOrUpdateTranscript(session, {
-        id: response.id, type: 'assistant_text', content: response.content,
-        timestamp: response.timestamp, model: this.getCurrentModel(),
+        id: response.id,
+        type: 'assistant_text',
+        content: response.content,
+        timestamp: response.timestamp,
+        model: this.getCurrentModel(),
       })
       session.updatedAt = Date.now()
       session.messageCount = session.messages.length
@@ -1207,7 +1304,7 @@ export class ChatService {
       session.transcript = []
       session.tokenUsage = undefined
       session.compactSummary = undefined
-      this.queryEngine = undefined
+      this.getSessionRuntime(session.id).engine = undefined
       session.updatedAt = Date.now()
       session.messageCount = 0
     }
@@ -1223,11 +1320,14 @@ export class ChatService {
         result.message = '压缩失败：未配置可用 Provider'
       } else {
         try {
-          this.agentEventCallback?.({
-            type: 'system_notification',
-            subtype: 'compact_started',
-            data: { message: '上下文正在压缩' },
-          })
+          this.agentEventCallback?.(
+            {
+              type: 'system_notification',
+              subtype: 'compact_started',
+              data: { message: '上下文正在压缩' },
+            },
+            session.id
+          )
 
           const summaryModel = provider.models.haiku || this.getCurrentModel()
           const apiClient = createApiClient({
@@ -1246,22 +1346,28 @@ export class ChatService {
           session.messages = [summaryMessage, ...session.messages.slice(-10)]
           session.updatedAt = Date.now()
           session.messageCount = session.messages.length
-          this.queryEngine = undefined
+          this.getSessionRuntime(session.id).engine = undefined
           result.message = '已使用模型生成会话摘要并压缩上下文'
 
-          this.agentEventCallback?.({
-            type: 'system_notification',
-            subtype: 'compact_complete',
-            data: { message: '上下文已自动压缩' },
-          })
+          this.agentEventCallback?.(
+            {
+              type: 'system_notification',
+              subtype: 'compact_complete',
+              data: { message: '上下文已自动压缩' },
+            },
+            session.id
+          )
         } catch (error) {
           result.message = `压缩失败：${error instanceof Error ? error.message : '未知错误'}`
           // 通知前端复位压缩状态，避免 UI 永久卡在"正在压缩"
-          this.agentEventCallback?.({
-            type: 'system_notification',
-            subtype: 'compact_complete',
-            data: { message: result.message, success: false },
-          })
+          this.agentEventCallback?.(
+            {
+              type: 'system_notification',
+              subtype: 'compact_complete',
+              data: { message: result.message, success: false },
+            },
+            session.id
+          )
         }
       }
     }
@@ -1272,18 +1378,17 @@ export class ChatService {
       content: result.message,
       timestamp: Date.now(),
     }
-    const activeSession = this.getCurrentSession()
-    activeSession?.messages.push(assistantMessage)
-    if (activeSession) {
-      this.appendOrUpdateTranscript(activeSession, {
+    session.messages.push(assistantMessage)
+    if (session) {
+      this.appendOrUpdateTranscript(session, {
         id: assistantMessage.id,
         type: 'assistant_text',
         content: assistantMessage.content,
         timestamp: assistantMessage.timestamp,
         model: this.getCurrentModel(),
       })
-      activeSession.updatedAt = Date.now()
-      activeSession.messageCount = activeSession.messages.length
+      session.updatedAt = Date.now()
+      session.messageCount = session.messages.length
     }
 
     if (this.messageCallback) {
@@ -1296,22 +1401,37 @@ export class ChatService {
   private async handleMemoryCommand(command: string, workspace: string): Promise<string> {
     if (command.startsWith('/remember ')) {
       const result = await this.memoryManager.remember(`记住${command.slice(10).trim()}`, workspace)
-      return { saved: '已保存记忆', pending: '已创建待确认候选', conflict: '发现冲突，请通过 /memory pending 查看', ignored: '请输入要记住的内容' }[result]
+      return {
+        saved: '已保存记忆',
+        pending: '已创建待确认候选',
+        conflict: '发现冲突，请通过 /memory pending 查看',
+        ignored: '请输入要记住的内容',
+      }[result]
     }
     const [, action = 'list', ...parts] = command.split(/\s+/)
     const id = parts[0]
     if (action === 'list') {
       const items = this.memoryManager.list({ workspace, status: 'active' })
-      return items.length ? items.map(item => `${item.id} [${item.scope}/${item.kind}] ${item.description} · 置信度 ${item.confidence} · ${item.updatedAt}`).join('\n') : '暂无有效记忆'
+      return items.length
+        ? items
+            .map(
+              item =>
+                `${item.id} [${item.scope}/${item.kind}] ${item.description} · 置信度 ${item.confidence} · ${item.updatedAt}`
+            )
+            .join('\n')
+        : '暂无有效记忆'
     }
     if (action === 'pending') {
       const items = this.memoryManager.pending(workspace)
       return items.length
-        ? items.map(item => `${item.id} [${item.scope}/${item.kind}] ${item.description}`).join('\n')
+        ? items
+            .map(item => `${item.id} [${item.scope}/${item.kind}] ${item.description}`)
+            .join('\n')
         : '暂无待确认候选。用户明确要求“记住”的内容会直接保存，请使用 /memory list 查看。'
     }
     if (action === 'show' && id) {
-      const item = this.memoryManager.list({ workspace }).find(record => record.id === id) ||
+      const item =
+        this.memoryManager.list({ workspace }).find(record => record.id === id) ||
         this.memoryManager.pending(workspace).find(record => record.id === id)
       return item ? JSON.stringify(item, null, 2) : '未找到记忆'
     }
@@ -1499,10 +1619,16 @@ export class ChatService {
   }
 
   private buildMemoryContext(session: Session): string {
-    const mentionedPath = this.memoryQuery.match(/(?:src|webview|packages)[\\/][\w./\\-]+/)?.[0]
-    const modulePath = mentionedPath ? path.resolve(session.workDir, mentionedPath) : session.workDir
+    const memoryQuery = this.getSessionRuntime(session.id).memoryQuery
+    const mentionedPath = memoryQuery.match(/(?:src|webview|packages)[\\/][\w./\\-]+/)?.[0]
+    const modulePath = mentionedPath
+      ? path.resolve(session.workDir, mentionedPath)
+      : session.workDir
     const memories = this.memoryManager.retrieve({
-      query: this.memoryQuery || session.messages.filter(message => message.role === 'user').at(-1)?.content || '',
+      query:
+        memoryQuery ||
+        session.messages.filter(message => message.role === 'user').at(-1)?.content ||
+        '',
       workspace: session.workDir,
       modulePath,
       sessionId: session.id,
@@ -1524,17 +1650,11 @@ export class ChatService {
    *
    * Phase 2 Week 2: 集成真实 API
    */
-  private async initializeQueryEngine() {
+  private async initializeQueryEngine(session: Session, runtime: SessionRuntime) {
     // 获取当前 Provider
     const provider = this.providerService.getActiveProvider()
     if (!provider) {
       throw new Error('No active provider configured. Please add a provider first.')
-    }
-
-    // 获取当前会话
-    const session = this.getCurrentSession()
-    if (!session) {
-      throw new Error('No active session')
     }
 
     const toolProfile = this.toolProfileService?.resolve()
@@ -1566,32 +1686,32 @@ export class ChatService {
       toolSnapshot: toolProfile?.toolSnapshot,
       isDevelopment: this.context.extensionMode === vscode.ExtensionMode.Development,
     })
-    this.queryEngine = engine
+    runtime.engine = engine
 
     // 设置流式回调
     engine.onMessage((delta, isComplete) => {
-      if (this.queryEngine !== engine) return
+      if (runtime.engine !== engine) return
       if (this.streamCallback) {
-        this.streamCallback(delta, isComplete)
+        this.streamCallback(delta, isComplete, session.id)
       }
     })
 
     engine.onAgentEvent((event: AgentServerEvent) => {
-      if (this.queryEngine !== engine) return
-      const recordedEvent = this.recordAgentEvent(event)
-      this.agentEventCallback?.(recordedEvent)
+      if (runtime.engine !== engine) return
+      const recordedEvent = this.recordAgentEvent(session, event)
+      this.agentEventCallback?.(recordedEvent, session.id)
     })
 
     // 设置完成回调
     engine.onComplete(_message => {
-      if (this.queryEngine !== engine) return
+      if (runtime.engine !== engine) return
       // 可以在这里做一些清理工作
       console.log('Query completed')
     })
 
     // 设置错误回调
     engine.onError(error => {
-      if (this.queryEngine !== engine) return
+      if (runtime.engine !== engine) return
       console.error('QueryEngine error:', error)
     })
   }
@@ -1641,8 +1761,11 @@ export class ChatService {
     this.saveSessions()
   }
 
-  private recordPermissionResponse(response: { requestId: string; approved: boolean }): void {
-    const session = this.getCurrentSession()
+  private recordPermissionResponse(
+    sessionId: string,
+    response: { requestId: string; approved: boolean }
+  ): void {
+    const session = this.getSession(sessionId)
     if (!session?.transcript) return
 
     const block = session.transcript.find(
@@ -1657,12 +1780,15 @@ export class ChatService {
     this.saveSessions(true)
   }
 
-  private recordInteractionResponse(response: {
-    requestId: string
-    answered: boolean
-    answers?: unknown
-  }): void {
-    const session = this.getCurrentSession()
+  private recordInteractionResponse(
+    sessionId: string,
+    response: {
+      requestId: string
+      answered: boolean
+      answers?: unknown
+    }
+  ): void {
+    const session = this.getSession(sessionId)
     if (!session?.transcript) return
 
     const block = session.transcript.find(
@@ -1677,9 +1803,7 @@ export class ChatService {
     this.saveSessions(true)
   }
 
-  private recordAgentEvent(event: AgentServerEvent): AgentServerEvent {
-    const session = this.getCurrentSession()
-    if (!session) return event
+  private recordAgentEvent(session: Session, event: AgentServerEvent): AgentServerEvent {
     let emittedEvent = event
 
     const now = Date.now()
@@ -1688,7 +1812,7 @@ export class ChatService {
       case 'content_delta':
         if (typeof event.text === 'string') {
           // 正文和思考交错时，每次正文开始都结束当前 thinking 段。
-          if (this.activeThinkingBlockId) {
+          if (this.activeThinkingBlockIds.has(session.id)) {
             this.finalizeCurrentThinkingSegment(session)
           }
           const existing = session.transcript?.find(
@@ -1707,8 +1831,12 @@ export class ChatService {
         break
 
       case 'content_discard':
-        this.transcriptDeltaBuffers.delete('streaming-assistant')
-        this.transcriptDeltaFlushAt.delete('streaming-assistant')
+        this.transcriptDeltaBuffers.delete(
+          this.transcriptBufferKey(session.id, 'streaming-assistant')
+        )
+        this.transcriptDeltaFlushAt.delete(
+          this.transcriptBufferKey(session.id, 'streaming-assistant')
+        )
         session.transcript = (session.transcript || []).filter(
           block => block.id !== 'streaming-assistant'
         )
@@ -1747,6 +1875,11 @@ export class ChatService {
         break
 
       case 'permission_request':
+        emittedEvent = {
+          ...event,
+          deferred: session.id !== this.currentSessionId || undefined,
+          requestedAt: now,
+        }
         this.appendOrUpdateTranscript(session, {
           id: event.requestId,
           type: 'permission_request',
@@ -1755,6 +1888,8 @@ export class ChatService {
           toolUseId: event.toolUseId,
           input: event.input,
           description: event.description,
+          deferred: session.id !== this.currentSessionId || undefined,
+          requestedAt: now,
           timestamp: now,
           responseState: 'pending',
         })
@@ -1774,11 +1909,22 @@ export class ChatService {
                 ? 'cancelled'
                 : 'denied'
           block.expired = block.responseState === 'expired'
+          if (
+            session.id !== this.currentSessionId &&
+            (block.responseState === 'expired' || block.responseState === 'cancelled')
+          ) {
+            block.deferred = true
+          }
         }
         break
       }
 
       case 'interaction_request':
+        emittedEvent = {
+          ...event,
+          deferred: session.id !== this.currentSessionId || undefined,
+          requestedAt: now,
+        }
         this.appendOrUpdateTranscript(session, {
           id: event.requestId,
           type: 'interaction_request',
@@ -1787,6 +1933,8 @@ export class ChatService {
           toolUseId: event.toolUseId,
           input: event.input,
           description: event.description,
+          deferred: session.id !== this.currentSessionId || undefined,
+          requestedAt: now,
           timestamp: now,
           responseState: 'pending',
         })
@@ -1794,7 +1942,7 @@ export class ChatService {
 
       case 'thinking': {
         const blockId = event.blockId || 'streaming-thinking'
-        this.activeThinkingBlockId = blockId
+        this.activeThinkingBlockIds.set(session.id, blockId)
         const existing = session.transcript?.find(
           (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
             block.type === 'thinking' && block.id === blockId
@@ -1906,6 +2054,17 @@ export class ChatService {
     session.transcript.splice(index, 1, block)
   }
 
+  /**
+   * 为流式缓冲生成会话级键，避免并行会话共用固定 block ID 时串写。
+   *
+   * @param sessionId - 会话 ID
+   * @param blockId - transcript 块 ID
+   * @returns 会话隔离的缓冲键
+   */
+  private transcriptBufferKey(sessionId: string, blockId: string): string {
+    return `${sessionId}:${blockId}`
+  }
+
   private bufferTranscriptDelta(
     session: Session,
     id: string,
@@ -1914,33 +2073,37 @@ export class ChatService {
     existing: Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }> | undefined,
     blockType: 'assistant_text' | 'thinking'
   ): void {
-    const pending = `${this.transcriptDeltaBuffers.get(id) || ''}${delta}`
-    const lastFlush = this.transcriptDeltaFlushAt.get(id) || 0
+    const bufferKey = this.transcriptBufferKey(session.id, id)
+    const pending = `${this.transcriptDeltaBuffers.get(bufferKey) || ''}${delta}`
+    const lastFlush = this.transcriptDeltaFlushAt.get(bufferKey) || 0
     const shouldFlush = !existing || pending.length >= 4096 || timestamp - lastFlush >= 100
     if (!shouldFlush) {
-      this.transcriptDeltaBuffers.set(id, pending)
+      this.transcriptDeltaBuffers.set(bufferKey, pending)
       return
     }
 
-    this.transcriptDeltaBuffers.delete(id)
-    this.transcriptDeltaFlushAt.set(id, timestamp)
+    this.transcriptDeltaBuffers.delete(bufferKey)
+    this.transcriptDeltaFlushAt.set(bufferKey, timestamp)
     this.appendOrUpdateTranscript(session, {
       id,
       type: blockType,
       content: `${existing?.content || ''}${pending}`,
       timestamp: existing?.timestamp || timestamp,
-      ...(blockType === 'assistant_text' ? { model: this.getCurrentModel() } : {}),
+      ...(blockType === 'assistant_text'
+        ? { model: session.runtimeConfig?.model || this.getCurrentModel() }
+        : {}),
     } as AgentTranscriptBlock)
   }
 
   private flushTranscriptDelta(session: Session, id: string): void {
-    const pending = this.transcriptDeltaBuffers.get(id)
+    const bufferKey = this.transcriptBufferKey(session.id, id)
+    const pending = this.transcriptDeltaBuffers.get(bufferKey)
     if (!pending) return
     const block = session.transcript?.find(
       item => item.id === id && (item.type === 'assistant_text' || item.type === 'thinking')
     ) as Extract<AgentTranscriptBlock, { type: 'assistant_text' | 'thinking' }> | undefined
     if (block) block.content += pending
-    this.transcriptDeltaBuffers.delete(id)
+    this.transcriptDeltaBuffers.delete(bufferKey)
   }
 
   private markToolTranscriptComplete(session: Session, toolUseId: string, isError: boolean): void {
@@ -1977,20 +2140,16 @@ export class ChatService {
   }
 
   private finalizeCurrentThinkingSegment(session: Session): void {
-    const blockId = this.activeThinkingBlockId || 'streaming-thinking'
-    this.activeThinkingBlockId = undefined
+    const blockId = this.activeThinkingBlockIds.get(session.id) || 'streaming-thinking'
+    this.activeThinkingBlockIds.delete(session.id)
     this.flushTranscriptDelta(session, blockId)
-    this.transcriptDeltaFlushAt.delete(blockId)
+    this.transcriptDeltaFlushAt.delete(this.transcriptBufferKey(session.id, blockId))
     const streamingThinking = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
         block.type === 'thinking' && block.id === blockId
     )
     // 旧协议没有 blockId，仍需把固定临时 ID 定型；新协议的 ID 从首个 delta 起就稳定。
-    if (
-      blockId === 'streaming-thinking' &&
-      streamingThinking &&
-      streamingThinking.content.trim()
-    ) {
+    if (blockId === 'streaming-thinking' && streamingThinking && streamingThinking.content.trim()) {
       streamingThinking.id = this.generateId()
     }
   }

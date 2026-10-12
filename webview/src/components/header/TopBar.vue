@@ -32,9 +32,6 @@ function toggleHistory() {
 }
 
 function selectSession(sessionId: string) {
-  if (['thinking', 'running', 'waiting_permission', 'waiting_interaction'].includes(chatStore.chatState)) {
-    chatStore.stopGeneration()
-  }
   chatStore.openSession(sessionId)
   historyOpen.value = false
 }
@@ -69,7 +66,12 @@ onUnmounted(() => document.removeEventListener('mousedown', handleDocumentClick)
     </div>
 
     <div ref="historyWrap" class="top-bar__right">
-      <button class="history-trigger" :class="{ active: historyOpen }" title="历史会话" @click="toggleHistory">
+      <button
+        class="history-trigger"
+        :class="{ active: historyOpen }"
+        title="历史会话"
+        @click="toggleHistory"
+      >
         <History />
       </button>
       <HistorySessionPopover

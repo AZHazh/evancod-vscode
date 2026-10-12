@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import {
   Check,
+  Clock3,
   CircleCheck,
   CircleX,
   FilePenLine,
@@ -21,6 +22,8 @@ const props = defineProps<{
   toolName: string
   input: unknown
   description?: string
+  deferred?: boolean
+  requestedAt?: number
   responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
 }>()
 
@@ -93,6 +96,15 @@ const statusText = computed(() => {
   return isEditLike.value ? '等待审批' : 'awaiting approval'
 })
 const statusClass = computed(() => responseState.value)
+const deferredNotice = computed(() => {
+  if (responseState.value === 'expired') {
+    return '该请求在你查看其他会话期间未得到处理，现已超时。'
+  }
+  if (responseState.value === 'cancelled') {
+    return '该请求在你查看其他会话期间一直等待，现已取消或失效。'
+  }
+  return '该请求在你查看其他会话期间一直等待，可能已经接近超时。'
+})
 function approvePermission() {
   if (submitting.value) return
   submitting.value = true
@@ -163,6 +175,11 @@ function denyPermission() {
           {{ description }}
         </div>
       </div>
+    </div>
+
+    <div v-if="deferred" class="permission-card__deferred-notice">
+      <Clock3 :size="14" />
+      <span>{{ deferredNotice }}</span>
     </div>
 
     <div class="permission-card__body">
@@ -605,6 +622,25 @@ function denyPermission() {
   flex-direction: column;
   gap: 8px;
   padding: 0 10px 12px;
+}
+
+.permission-card__deferred-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 10px 10px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--chat-color-warning);
+  background: color-mix(in srgb, var(--chat-color-warning) 10%, transparent);
+  color: var(--chat-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.permission-card__deferred-notice svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--chat-color-warning);
 }
 
 .permission-card__path-row {

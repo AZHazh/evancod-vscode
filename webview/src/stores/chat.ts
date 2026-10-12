@@ -13,6 +13,7 @@ import type {
   SessionListItem,
   MessageSkill,
   InlineMessageSegment,
+  SessionAgentRuntimeSnapshot,
 } from '@/types'
 
 import { reorderTranscript } from '@/utils/messageGrouping'
@@ -123,6 +124,7 @@ export const useChatStore = defineStore('chat', () => {
     {
       response: {
         requestId: string
+        sessionId?: string
         approved: boolean
         reason?: string
         updatedInput?: unknown
@@ -265,6 +267,7 @@ export const useChatStore = defineStore('chat', () => {
       case 'session.restored':
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
+        agentStore.setActiveSession(message.data.session?.id || null)
         sessions.value = message.data.sessions
         syncUiMessagesFromSession()
         break
@@ -272,11 +275,14 @@ export const useChatStore = defineStore('chat', () => {
       case 'session.created':
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
+        agentStore.setActiveSession(message.data.session.id)
         // 新会话没有用户/助手消息时只是草稿，不显示在历史列表中。
         // 第一条消息到达后，扩展会通过 session.list 将它加入列表。
-        if (message.data.session.messages?.some((item: { role?: string }) =>
-          item.role === 'user' || item.role === 'assistant'
-        )) {
+        if (
+          message.data.session.messages?.some(
+            (item: { role?: string }) => item.role === 'user' || item.role === 'assistant'
+          )
+        ) {
           sessions.value = [
             message.data.session,
             ...sessions.value.filter(session => session.id !== message.data.session.id),
@@ -309,7 +315,15 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'agent.event':
+        // 后台会话仍会持续产生事件；只渲染当前会话，完整状态由扩展写入对应 Session。
+        if (message.data.sessionId && message.data.sessionId !== currentSession.value?.id) {
+          break
+        }
         handleAgentEvent(message.data)
+        break
+
+      case 'session.runtime.snapshot':
+        restoreSessionRuntimeSnapshot(message.data as SessionAgentRuntimeSnapshot)
         break
 
       case 'error':
@@ -336,6 +350,8 @@ export const useChatStore = defineStore('chat', () => {
         tokenUsage: existing?.tokenUsage,
         compactSummary: existing?.compactSummary,
         attachments: existing?.attachments,
+        activeRun: existing?.activeRun,
+        isRunning: item.isRunning,
         messageCount: existing?.messageCount ?? existing?.messages?.length ?? 0,
       })
     }
@@ -350,11 +366,16 @@ export const useChatStore = defineStore('chat', () => {
       openAgentResultToolUseId.value = null
       activeThinkingMessageId.value = null
       tokenUsage.value = null
+      pendingPermission.value = null
+      chatState.value = 'idle'
       return
     }
 
     // 会话切换/新建时不能沿用上一个会话的运行态；同会话增量更新才保留它们。
     if (!preserveRuntime) {
+      ignorePermissionRequests = false
+      stopRequested = false
+      pendingPermission.value = null
       agentTaskNotifications.value = {}
       expandedStateById.value = {}
       openAgentResultToolUseId.value = null
@@ -367,6 +388,10 @@ export const useChatStore = defineStore('chat', () => {
       tokenUsage.value =
         currentSession.value.tokenUsage ||
         estimateHistoricalUsage(currentSession.value, contextWindow)
+      chatState.value =
+        currentSession.value.activeRun?.status === 'running' || currentSession.value.isRunning
+          ? 'thinking'
+          : 'idle'
     }
 
     // 性能优化：如果是追加模式且已有消息，只处理新增的部分
@@ -404,7 +429,7 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
     }
-    agentStore.restoreFromNotifications(agentTaskNotifications.value)
+    agentStore.restoreFromNotifications(agentTaskNotifications.value, currentSession.value.id)
 
     if (currentSession.value.transcript?.length) {
       // 流式过程中，保留前端流式构建的临时消息，不要用后端 transcript 完全重建
@@ -423,6 +448,17 @@ export const useChatStore = defineStore('chat', () => {
 
       const reordered = reorderTranscript(currentSession.value.transcript) as UIMessage[]
       let rebuiltMessages = reordered.map(message => {
+        if (
+          !preserveRuntime &&
+          (message.type === 'permission_request' || message.type === 'interaction_request') &&
+          message.responseState === 'pending'
+        ) {
+          return {
+            ...message,
+            deferred: true,
+            requestedAt: message.requestedAt || message.timestamp,
+          }
+        }
         if (message.type !== 'image_generation') return message
         if (message.image?.base64) return message
         const cached = existingImageBase64.get(message.imageId)
@@ -474,6 +510,7 @@ export const useChatStore = defineStore('chat', () => {
       streamingAssistantIndex = -1
       streamingThinkingIndex = -1
       toolUseIndexCache.clear()
+      if (!preserveRuntime) restorePendingRequestState()
       return
     }
 
@@ -570,6 +607,44 @@ export const useChatStore = defineStore('chat', () => {
     streamingAssistantIndex = -1
     streamingThinkingIndex = -1
     toolUseIndexCache.clear()
+    if (!preserveRuntime) restorePendingRequestState()
+  }
+
+  /** 从当前消息列表重新计算等待状态，确保切回会话后操作卡片仍可响应。 */
+  function restorePendingRequestState() {
+    const pendingRequests = uiMessages.value
+      .filter(
+        message =>
+          (message.type === 'permission_request' || message.type === 'interaction_request') &&
+          message.responseState === 'pending'
+      )
+      .sort((left, right) => left.timestamp - right.timestamp)
+    const latest = pendingRequests[pendingRequests.length - 1]
+
+    const latestPermission = [...pendingRequests]
+      .reverse()
+      .find(message => message.type === 'permission_request')
+    pendingPermission.value =
+      latestPermission?.type === 'permission_request'
+        ? {
+            requestId: latestPermission.requestId,
+            toolName: latestPermission.toolName,
+            toolUseId: latestPermission.toolUseId,
+            input: latestPermission.input,
+            description: latestPermission.description,
+          }
+        : null
+
+    if (latest?.type === 'permission_request') chatState.value = 'waiting_permission'
+    else if (latest?.type === 'interaction_request') chatState.value = 'waiting_interaction'
+  }
+
+  /** 应用指定会话的运行快照；非当前会话只更新 Agent 分桶。 */
+  function restoreSessionRuntimeSnapshot(snapshot: SessionAgentRuntimeSnapshot) {
+    agentStore.replaceSessionAgents(snapshot.sessionId, snapshot.agents)
+    if (snapshot.sessionId !== currentSession.value?.id) return
+    for (const event of snapshot.pendingEvents) handleAgentEvent(event)
+    restorePendingRequestState()
   }
 
   function removeReconciledOptimisticMessages(nextMessages: UIMessage[]) {
@@ -745,21 +820,24 @@ export const useChatStore = defineStore('chat', () => {
             type: 'permission_response',
             data: {
               requestId: event.requestId,
+              sessionId: currentSession.value?.id,
               approved: false,
               reason: '用户已停止生成',
             },
           })
           break
         }
-        pendingPermission.value = {
-          requestId: event.requestId,
-          toolName: event.toolName,
-          toolUseId: event.toolUseId,
-          input: event.input,
-          description: event.description,
+        if (!event.responseState || event.responseState === 'pending') {
+          pendingPermission.value = {
+            requestId: event.requestId,
+            toolName: event.toolName,
+            toolUseId: event.toolUseId,
+            input: event.input,
+            description: event.description,
+          }
+          chatState.value = 'waiting_permission'
         }
-        chatState.value = 'waiting_permission'
-        uiMessages.value.push({
+        const permissionMessage: UIMessage = {
           id: event.requestId,
           type: 'permission_request',
           requestId: event.requestId,
@@ -767,28 +845,27 @@ export const useChatStore = defineStore('chat', () => {
           toolUseId: event.toolUseId,
           input: event.input,
           description: event.description,
-          timestamp: Date.now(),
-          responseState: 'pending',
-        })
+          deferred: event.deferred,
+          requestedAt: event.requestedAt,
+          timestamp: event.requestedAt || Date.now(),
+          responseState: event.responseState || 'pending',
+        }
+        const permissionIndex = uiMessages.value.findIndex(
+          message => message.type === 'permission_request' && message.requestId === event.requestId
+        )
+        if (permissionIndex === -1) uiMessages.value.push(permissionMessage)
+        else uiMessages.value.splice(permissionIndex, 1, permissionMessage)
         break
 
       case 'permission_response': {
         clearPermissionResponseRetry(event.requestId)
         const cancelled =
-          !event.approved &&
-          (event.reason?.includes('停止') || event.reason?.includes('失效'))
+          !event.approved && (event.reason?.includes('停止') || event.reason?.includes('失效'))
         const expired =
-          !event.approved &&
-          (event.reason?.includes('timed out') || event.reason?.includes('超时'))
+          !event.approved && (event.reason?.includes('timed out') || event.reason?.includes('超时'))
         updatePermissionResponseState(
           event.requestId,
-          event.approved
-            ? 'approved'
-            : expired
-              ? 'expired'
-              : cancelled
-                ? 'cancelled'
-                : 'denied'
+          event.approved ? 'approved' : expired ? 'expired' : cancelled ? 'cancelled' : 'denied'
         )
         if (pendingPermission.value?.requestId === event.requestId) {
           pendingPermission.value = null
@@ -798,8 +875,10 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'interaction_request':
-        chatState.value = 'waiting_interaction'
-        uiMessages.value.push({
+        if (!event.responseState || event.responseState === 'pending') {
+          chatState.value = 'waiting_interaction'
+        }
+        const interactionMessage: UIMessage = {
           id: event.requestId,
           type: 'interaction_request',
           requestId: event.requestId,
@@ -807,9 +886,16 @@ export const useChatStore = defineStore('chat', () => {
           toolUseId: event.toolUseId,
           input: event.input,
           description: event.description,
-          timestamp: Date.now(),
-          responseState: 'pending',
-        })
+          deferred: event.deferred,
+          requestedAt: event.requestedAt,
+          timestamp: event.requestedAt || Date.now(),
+          responseState: event.responseState || 'pending',
+        }
+        const interactionIndex = uiMessages.value.findIndex(
+          message => message.type === 'interaction_request' && message.requestId === event.requestId
+        )
+        if (interactionIndex === -1) uiMessages.value.push(interactionMessage)
+        else uiMessages.value.splice(interactionIndex, 1, interactionMessage)
         break
 
       case 'thinking':
@@ -1119,7 +1205,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!notification) return
 
     agentTaskNotifications.value[notification.toolUseId] = notification
-    agentStore.applyNotification(notification)
+    agentStore.applyNotification(notification, currentSession.value?.id)
     if (currentSession.value) {
       currentSession.value.agentTaskNotifications = {
         ...(currentSession.value.agentTaskNotifications || {}),
@@ -1320,7 +1406,9 @@ export const useChatStore = defineStore('chat', () => {
     stopRequested = false
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
-    const isBuiltinCommand = /^\/(clear|clean|new|compact|help|memory|remember)(\s|$)/i.test(trimmed)
+    const isBuiltinCommand = /^\/(clear|clean|new|compact|help|memory|remember)(\s|$)/i.test(
+      trimmed
+    )
 
     const messageSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     const optimisticId = `optimistic-user-${messageSuffix}`
@@ -1431,13 +1519,17 @@ export const useChatStore = defineStore('chat', () => {
     updatedInput?: unknown
     rule?: 'once' | 'always'
   }) {
+    const sessionResponse = {
+      ...response,
+      sessionId: currentSession.value?.id,
+    }
     clearPermissionResponseRetry(response.requestId)
     const request =
       pendingPermission.value?.requestId === response.requestId
         ? { ...pendingPermission.value }
         : undefined
     pendingPermissionResponses.set(response.requestId, {
-      response,
+      response: sessionResponse,
       request,
       retryIndex: 0,
     })
@@ -1446,12 +1538,13 @@ export const useChatStore = defineStore('chat', () => {
       pendingPermission.value = null
     }
     chatState.value = response.approved ? 'thinking' : 'idle'
-    postPermissionResponse(response)
+    postPermissionResponse(sessionResponse)
     schedulePermissionResponseRetry(response.requestId)
   }
 
   function postPermissionResponse(response: {
     requestId: string
+    sessionId?: string
     approved: boolean
     reason?: string
     updatedInput?: unknown
@@ -1515,7 +1608,7 @@ export const useChatStore = defineStore('chat', () => {
     )
     vscode.postMessage({
       type: 'interaction_response',
-      data: toPlainJsonSafe(response),
+      data: toPlainJsonSafe({ ...response, sessionId: currentSession.value?.id }),
     })
     chatState.value = response.answered ? 'thinking' : 'idle'
   }

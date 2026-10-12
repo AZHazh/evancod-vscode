@@ -1,5 +1,7 @@
 export interface PermissionResponseData {
   requestId: string
+  /** 请求所属会话，用于并行会话下精确路由。 */
+  sessionId?: string
   approved: boolean
   reason?: string
   updatedInput?: unknown
@@ -22,11 +24,12 @@ export class PermissionResponseCache {
     private readonly now: () => number = Date.now
   ) {}
 
-  get(requestId: string): PermissionResponseData | undefined {
-    const entry = this.entries.get(requestId)
+  get(requestId: string, sessionId?: string): PermissionResponseData | undefined {
+    const key = this.getKey(requestId, sessionId)
+    const entry = this.entries.get(key)
     if (!entry) return undefined
     if (entry.expiresAt <= this.now()) {
-      this.entries.delete(requestId)
+      this.entries.delete(key)
       return undefined
     }
     return entry.response
@@ -34,7 +37,7 @@ export class PermissionResponseCache {
 
   set(response: PermissionResponseData): void {
     this.pruneExpired()
-    this.entries.set(response.requestId, {
+    this.entries.set(this.getKey(response.requestId, response.sessionId), {
       response: { ...response },
       expiresAt: this.now() + this.ttlMs,
     })
@@ -45,5 +48,10 @@ export class PermissionResponseCache {
     for (const [requestId, entry] of this.entries) {
       if (entry.expiresAt <= now) this.entries.delete(requestId)
     }
+  }
+
+  /** @returns 会话和请求组成的缓存键，兼容没有 sessionId 的旧协议。 */
+  private getKey(requestId: string, sessionId?: string): string {
+    return `${sessionId || 'legacy'}:${requestId}`
   }
 }

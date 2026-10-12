@@ -241,7 +241,13 @@ export function createBuiltinToolRegistry(): ToolRegistry {
     capabilities: ['execute', 'interactive'],
     create: context =>
       context.agentCoordinator &&
-      new AgentTool(context.agentCoordinator, context.cwd, context.provider, context.model),
+      new AgentTool(
+        context.agentCoordinator,
+        context.cwd,
+        context.provider,
+        context.model,
+        context.sessionId
+      ),
   })
   registerBuiltin(registry, {
     name: 'mcp',

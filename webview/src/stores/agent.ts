@@ -6,7 +6,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { AgentTaskNotification } from '@/types'
 
-export type AgentType = 'explore' | 'analyze' | 'research'
+export type AgentType = string
 export type AgentStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
 export interface AgentInfo {
@@ -25,8 +25,12 @@ export interface AgentInfo {
 }
 
 export const useAgentStore = defineStore('agent', () => {
-  // 状态
-  const agents = ref<AgentInfo[]>([])
+  const activeSessionId = ref<string | null>(null)
+  const agentsBySession = ref<Record<string, AgentInfo[]>>({})
+  const agents = computed(() => {
+    const sessionId = activeSessionId.value
+    return sessionId ? agentsBySession.value[sessionId] || [] : []
+  })
 
   // 计算属性
   const runningAgents = computed(() => {
@@ -46,7 +50,10 @@ export const useAgentStore = defineStore('agent', () => {
   })
 
   const visibleAgents = computed(() => {
-    return [...agents.value].sort((a, b) => Number(new Date(b.endTime || b.startTime)) - Number(new Date(a.endTime || a.startTime)))
+    return [...agents.value].sort(
+      (a, b) =>
+        Number(new Date(b.endTime || b.startTime)) - Number(new Date(a.endTime || a.startTime))
+    )
   })
 
   const stats = computed(() => {
@@ -59,28 +66,64 @@ export const useAgentStore = defineStore('agent', () => {
     }
   })
 
-  // 方法
-  function addAgent(agent: AgentInfo) {
+  /** 切换 Agent 面板当前展示的会话，不修改其他会话的状态。 */
+  function setActiveSession(sessionId: string | null) {
+    activeSessionId.value = sessionId
+    if (sessionId && !agentsBySession.value[sessionId]) {
+      agentsBySession.value[sessionId] = []
+    }
+  }
+
+  /**
+   * 合并指定会话的扩展端快照。
+   *
+   * transcript 恢复出的旧版完成通知可能没有 sessionId，因此保留快照中未出现的
+   * 历史项；相同 ID 始终以扩展端运行快照为准。
+   */
+  function replaceSessionAgents(sessionId: string, sessionAgents: AgentInfo[]) {
+    const merged = new Map(
+      (agentsBySession.value[sessionId] || []).map(agent => [agent.id, { ...agent }])
+    )
+    for (const agent of sessionAgents) {
+      merged.set(agent.id, { ...merged.get(agent.id), ...agent })
+    }
+    agentsBySession.value[sessionId] = Array.from(merged.values())
+  }
+
+  /** @returns 指定会话的可变 Agent 列表；没有会话上下文时返回 undefined。 */
+  function getSessionAgents(sessionId?: string): AgentInfo[] | undefined {
+    const targetSessionId = sessionId || activeSessionId.value
+    if (!targetSessionId) return undefined
+    return (agentsBySession.value[targetSessionId] ||= [])
+  }
+
+  /** 将 Agent 启动事件写入它所属的会话。 */
+  function addAgent(agent: AgentInfo, sessionId?: string) {
+    const sessionAgents = getSessionAgents(sessionId)
+    if (!sessionAgents) return
     const normalized: AgentInfo = {
       ...agent,
       status: agent.status || 'running',
     }
-    const index = agents.value.findIndex(a => a.id === normalized.id)
+    const index = sessionAgents.findIndex(a => a.id === normalized.id)
     if (index === -1) {
-      agents.value.push(normalized)
+      sessionAgents.push(normalized)
       return
     }
-    agents.value[index] = { ...agents.value[index], ...normalized }
+    sessionAgents[index] = { ...sessionAgents[index], ...normalized }
   }
 
-  function updateAgent(agentId: string, updates: Partial<AgentInfo>) {
-    const index = agents.value.findIndex(a => a.id === agentId)
+  /** 更新指定会话的 Agent，允许完成事件先于启动事件被前端接收。 */
+  function updateAgent(agentId: string, updates: Partial<AgentInfo>, sessionId?: string) {
+    const sessionAgents = getSessionAgents(sessionId)
+    if (!sessionAgents) return
+    const index = sessionAgents.findIndex(a => a.id === agentId)
     if (index !== -1) {
-      agents.value[index] = { ...agents.value[index], ...updates }
+      sessionAgents[index] = { ...sessionAgents[index], ...updates }
       return
     }
 
-    agents.value.push({
+    sessionAgents.push({
       id: agentId,
       type: updates.type || 'explore',
       description: updates.description || agentId,
@@ -90,22 +133,31 @@ export const useAgentStore = defineStore('agent', () => {
     })
   }
 
-  function applyNotification(notification: AgentTaskNotification) {
-    updateAgent(notification.taskId, {
-      id: notification.taskId,
-      toolUseId: notification.toolUseId,
-      status: notification.status,
-      summary: notification.summary,
-      fullOutput: notification.result,
-      outputFile: notification.outputFile,
-      duration: notification.usage?.durationMs,
-      endTime: notification.timestamp || Date.now(),
-    })
+  /** 将工具通知恢复为对应会话的 Agent 完成状态。 */
+  function applyNotification(notification: AgentTaskNotification, sessionId?: string) {
+    updateAgent(
+      notification.taskId,
+      {
+        id: notification.taskId,
+        toolUseId: notification.toolUseId,
+        status: notification.status,
+        summary: notification.summary,
+        fullOutput: notification.result,
+        outputFile: notification.outputFile,
+        duration: notification.usage?.durationMs,
+        endTime: notification.timestamp || Date.now(),
+      },
+      sessionId
+    )
   }
 
-  function restoreFromNotifications(notifications: Record<string, AgentTaskNotification>) {
+  /** 批量恢复指定会话持久化的 Agent 通知。 */
+  function restoreFromNotifications(
+    notifications: Record<string, AgentTaskNotification>,
+    sessionId?: string
+  ) {
     for (const notification of Object.values(notifications)) {
-      applyNotification(notification)
+      applyNotification(notification, sessionId)
     }
   }
 
@@ -114,15 +166,20 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function clearCompleted() {
-    agents.value = agents.value.filter(a => a.status === 'running')
+    const sessionId = activeSessionId.value
+    if (!sessionId) return
+    agentsBySession.value[sessionId] = agents.value.filter(a => a.status === 'running')
   }
 
   function clearAll() {
-    agents.value = []
+    const sessionId = activeSessionId.value
+    if (sessionId) agentsBySession.value[sessionId] = []
   }
 
   return {
     // 状态
+    activeSessionId,
+    agentsBySession,
     agents,
 
     // 计算属性
@@ -134,12 +191,14 @@ export const useAgentStore = defineStore('agent', () => {
     stats,
 
     // 方法
+    setActiveSession,
+    replaceSessionAgents,
     addAgent,
     updateAgent,
     applyNotification,
     restoreFromNotifications,
     getAgent,
     clearCompleted,
-    clearAll
+    clearAll,
   }
 })

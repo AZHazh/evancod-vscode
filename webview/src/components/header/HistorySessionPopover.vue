@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { LoaderCircle } from 'lucide-vue-next'
 import { formatRelativeTime } from '@/lib/time'
 import type { Session } from '@/types'
 
@@ -37,8 +38,21 @@ const filteredSessions = computed(() => {
           :class="{ active: session.id === activeSessionId }"
           @click="emit('select', session.id)"
         >
-          <div class="title">{{ session.name }}</div>
-          <div class="meta">{{ formatRelativeTime(session.updatedAt) }} · {{ session.messageCount ?? session.messages.length }} 条消息</div>
+          <div class="title-row">
+            <LoaderCircle
+              v-if="
+                session.isRunning === true ||
+                (session.isRunning === undefined && session.activeRun?.status === 'running')
+              "
+              class="running-icon"
+              aria-label="运行中"
+            />
+            <div class="title">{{ session.name }}</div>
+          </div>
+          <div class="meta">
+            {{ formatRelativeTime(session.updatedAt) }} ·
+            {{ session.messageCount ?? session.messages.length }} 条消息
+          </div>
           <div class="path">{{ session.workDir }}</div>
         </button>
         <div v-if="!filteredSessions.length" class="empty">没有历史会话</div>
@@ -101,6 +115,27 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.running-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--vscode-progressBar-background, #0e70c0);
+  animation: history-session-spin 0.9s linear infinite;
+}
+
+@keyframes history-session-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .meta,

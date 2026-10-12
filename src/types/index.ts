@@ -201,6 +201,9 @@ export type AgentTranscriptBlock =
       toolUseId?: string
       input: unknown
       description?: string
+      /** 会话恢复时提示该请求曾在后台等待。 */
+      deferred?: boolean
+      requestedAt?: number
       timestamp: number
       expired?: boolean
       responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
@@ -213,8 +216,11 @@ export type AgentTranscriptBlock =
       toolUseId?: string
       input: unknown
       description?: string
+      /** 会话恢复时提示该请求曾在后台等待。 */
+      deferred?: boolean
+      requestedAt?: number
       timestamp: number
-      responseState?: 'pending' | 'answered' | 'cancelled'
+      responseState?: 'pending' | 'answered' | 'cancelled' | 'expired'
       responseAnswers?: unknown
     }
 

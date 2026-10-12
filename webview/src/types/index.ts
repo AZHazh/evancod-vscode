@@ -81,6 +81,8 @@ export interface SessionListItem {
   createdAt: string
   modifiedAt: string
   messageCount: number
+  /** 扩展进程中是否仍有该会话的 Agent 请求在执行。 */
+  isRunning?: boolean
 }
 
 export interface ContentBlock {
@@ -162,6 +164,8 @@ export interface Session {
   attachments?: AttachmentContext[]
   requestContexts?: RequestContext[]
   activeRun?: RunState
+  /** 历史列表使用的轻量运行态，由 session.list 同步。 */
+  isRunning?: boolean
   // 性能优化：缓存消息数量，避免每次遍历计算
   messageCount?: number
 }
@@ -272,8 +276,10 @@ export type UIMessage =
       toolUseId?: string
       input: unknown
       description?: string
-      timestamp: number
+      deferred?: boolean
+      requestedAt?: number
       responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
+      timestamp: number
     }
   | {
       id: string
@@ -283,8 +289,10 @@ export type UIMessage =
       toolUseId?: string
       input: unknown
       description?: string
+      deferred?: boolean
+      requestedAt?: number
+      responseState?: 'pending' | 'answered' | 'cancelled' | 'expired'
       timestamp: number
-      responseState?: 'pending' | 'answered' | 'cancelled'
       responseAnswers?: unknown
     }
   | {
@@ -323,6 +331,36 @@ export interface AgentTaskNotification {
   cwd?: string
   isolation?: 'none' | 'worktree'
   worktreePath?: string
+}
+
+/** 扩展端下发的会话级子 Agent 展示状态。 */
+export interface SessionAgentInfo {
+  id: string
+  sessionId: string
+  type: string
+  description: string
+  status: 'running' | 'completed' | 'failed' | 'stopped'
+  startTime: string | number
+  endTime?: string | number
+  duration?: number
+  summary?: string
+  fullOutput?: string
+  error?: string
+  toolUseId?: string
+  outputFile?: string
+  mode?: 'foreground' | 'background'
+  isolation?: 'none' | 'worktree'
+  cwd?: string
+}
+
+/** 切换会话时恢复 Agent 列表和权限/交互卡片的快照。 */
+export interface SessionAgentRuntimeSnapshot {
+  sessionId: string
+  agents: SessionAgentInfo[]
+  /** 包含仍在等待，以及用户离开期间已超时或取消的请求。 */
+  pendingEvents: Array<
+    Extract<AgentServerEvent, { type: 'permission_request' | 'interaction_request' }>
+  >
 }
 
 export interface BashRuntimeState {
@@ -371,6 +409,9 @@ export type AgentServerEvent =
       toolUseId?: string
       input: unknown
       description?: string
+      deferred?: boolean
+      requestedAt?: number
+      responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
     }
   | {
       type: 'permission_response'
@@ -387,6 +428,9 @@ export type AgentServerEvent =
       toolUseId?: string
       input: unknown
       description?: string
+      deferred?: boolean
+      requestedAt?: number
+      responseState?: 'pending' | 'answered' | 'cancelled' | 'expired'
     }
   | { type: 'thinking'; text: string; blockId?: string }
   | {

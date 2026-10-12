@@ -33,10 +33,22 @@ export interface TaskItem {
 }
 
 export const useTaskStore = defineStore('task', () => {
-  // 状态
-  const tasks = ref<TaskItem[]>([])
-  const loading = ref(false)
-  const selectedTaskId = ref<string | null>(null)
+  const activeSessionId = ref<string | null>(null)
+  const tasksBySession = ref<Record<string, TaskItem[]>>({})
+  const loadingBySession = ref<Record<string, boolean>>({})
+  const selectedTaskIdBySession = ref<Record<string, string | null>>({})
+  const tasks = computed(() => {
+    const sessionId = activeSessionId.value
+    return sessionId ? tasksBySession.value[sessionId] || [] : []
+  })
+  const loading = computed(() => {
+    const sessionId = activeSessionId.value
+    return sessionId ? loadingBySession.value[sessionId] || false : false
+  })
+  const selectedTaskId = computed(() => {
+    const sessionId = activeSessionId.value
+    return sessionId ? selectedTaskIdBySession.value[sessionId] || null : null
+  })
 
   // 计算属性
   const selectedTask = computed(() => {
@@ -72,54 +84,83 @@ export const useTaskStore = defineStore('task', () => {
     }
   })
 
-  // 方法
-  function setTasks(newTasks: TaskItem[]) {
-    // 兜底过滤 deleted 任务，避免历史 deleted 任务被恢复显示
-    tasks.value = newTasks.filter(t => t.status !== 'deleted')
+  /** 切换任务面板当前展示的会话，不清理其他会话任务。 */
+  function setActiveSession(sessionId: string | null) {
+    activeSessionId.value = sessionId
+    if (!sessionId) return
+    tasksBySession.value[sessionId] ||= []
+    selectedTaskIdBySession.value[sessionId] ??= null
   }
 
-  function addTask(task: TaskItem) {
+  /** @returns 指定会话的任务列表；没有会话上下文时返回 undefined。 */
+  function getSessionTasks(sessionId?: string): TaskItem[] | undefined {
+    const targetSessionId = sessionId || activeSessionId.value
+    if (!targetSessionId) return undefined
+    return (tasksBySession.value[targetSessionId] ||= [])
+  }
+
+  /** 使用服务端列表替换指定会话的任务快照。 */
+  function setTasks(newTasks: TaskItem[], sessionId?: string) {
+    const targetSessionId = sessionId || activeSessionId.value
+    if (!targetSessionId) return
+    // 兜底过滤 deleted 任务，避免历史 deleted 任务被恢复显示
+    tasksBySession.value[targetSessionId] = newTasks.filter(t => t.status !== 'deleted')
+    loadingBySession.value[targetSessionId] = false
+  }
+
+  /** 将新增任务写入其所属会话。 */
+  function addTask(task: TaskItem, sessionId?: string) {
+    const sessionTasks = getSessionTasks(sessionId || task.sessionId)
+    if (!sessionTasks) return
     // deleted 任务视为移除
     if (task.status === 'deleted') {
-      removeTask(task.id)
+      removeTask(task.id, sessionId || task.sessionId)
       return
     }
 
-    const existingIndex = tasks.value.findIndex(t => t.id === task.id)
+    const existingIndex = sessionTasks.findIndex(t => t.id === task.id)
     if (existingIndex === -1) {
-      tasks.value.push(task)
+      sessionTasks.push(task)
       return
     }
 
-    tasks.value[existingIndex] = task
+    sessionTasks[existingIndex] = task
   }
 
-  function updateTask(taskId: string, updates: Partial<TaskItem>) {
+  /** 更新指定会话中的任务。 */
+  function updateTask(taskId: string, updates: Partial<TaskItem>, sessionId?: string) {
+    const sessionTasks = getSessionTasks(sessionId || updates.sessionId)
+    if (!sessionTasks) return
     // 更新为 deleted 时直接移除，而不是保留一条 deleted 记录
     if (updates.status === 'deleted') {
-      removeTask(taskId)
+      removeTask(taskId, sessionId || updates.sessionId)
       return
     }
 
-    const index = tasks.value.findIndex(t => t.id === taskId)
+    const index = sessionTasks.findIndex(t => t.id === taskId)
     if (index !== -1) {
-      tasks.value[index] = { ...tasks.value[index], ...updates }
+      sessionTasks[index] = { ...sessionTasks[index], ...updates }
     }
   }
 
-  function removeTask(taskId: string) {
-    const index = tasks.value.findIndex(t => t.id === taskId)
+  /** 从指定会话移除任务。 */
+  function removeTask(taskId: string, sessionId?: string) {
+    const targetSessionId = sessionId || activeSessionId.value
+    const sessionTasks = getSessionTasks(targetSessionId || undefined)
+    if (!targetSessionId || !sessionTasks) return
+    const index = sessionTasks.findIndex(t => t.id === taskId)
     if (index !== -1) {
-      tasks.value.splice(index, 1)
+      sessionTasks.splice(index, 1)
     }
     // 若删除的是当前选中任务，清空选中
-    if (selectedTaskId.value === taskId) {
-      selectedTaskId.value = null
+    if (selectedTaskIdBySession.value[targetSessionId] === taskId) {
+      selectedTaskIdBySession.value[targetSessionId] = null
     }
   }
 
   function selectTask(taskId: string | null) {
-    selectedTaskId.value = taskId
+    const sessionId = activeSessionId.value
+    if (sessionId) selectedTaskIdBySession.value[sessionId] = taskId
   }
 
   function getTaskById(taskId: string): TaskItem | undefined {
@@ -128,16 +169,20 @@ export const useTaskStore = defineStore('task', () => {
 
   // 请求任务列表
   async function fetchTasks() {
-    loading.value = true
+    const sessionId = activeSessionId.value
+    if (!sessionId) return
+    loadingBySession.value[sessionId] = true
     // 发送消息到 Extension
     window.vscode?.postMessage({
       type: 'task.list.request',
-      data: null,
+      data: { sessionId },
     })
   }
 
   return {
     // 状态
+    activeSessionId,
+    tasksBySession,
     tasks,
     loading,
     selectedTaskId,
@@ -151,6 +196,7 @@ export const useTaskStore = defineStore('task', () => {
     stats,
 
     // 方法
+    setActiveSession,
     setTasks,
     addTask,
     updateTask,

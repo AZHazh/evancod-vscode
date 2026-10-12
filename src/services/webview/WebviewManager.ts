@@ -28,10 +28,7 @@ import { PlanModeManager } from '../plan/PlanModeManager'
 import { AgentCoordinator } from '../agent/AgentCoordinator'
 import type { AgentServerEvent } from '../../types/messages'
 import { performanceLog } from '../../utils/performanceLogger'
-import {
-  PermissionResponseCache,
-  type PermissionResponseData,
-} from './PermissionResponseCache'
+import { PermissionResponseCache, type PermissionResponseData } from './PermissionResponseCache'
 import type { ToolProfileScope, ToolProfileService } from '../tools/ToolProfileService'
 import type {
   AgentDefinitionInput,
@@ -88,7 +85,16 @@ export class WebviewManager implements vscode.WebviewViewProvider {
    * 这是一串异步操作 + 序列化开销，导致从点击到回调执行有明显延迟。
    * 改为纯内存 Map 后，查找和执行都是同步的，去除所有 async/await 和序列化。
    */
-  private permissionCallbacks = new Map<string, (response: { requestId: string; approved: boolean; reason?: string; updatedInput?: unknown; rule?: 'once' | 'always' }) => void>()
+  private permissionCallbacks = new Map<
+    string,
+    (response: {
+      requestId: string
+      approved: boolean
+      reason?: string
+      updatedInput?: unknown
+      rule?: 'once' | 'always'
+    }) => void
+  >()
   private permissionResponseCache = new PermissionResponseCache()
 
   /**
@@ -136,7 +142,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [
-        vscode.Uri.file(path.join(this.context.extensionPath, 'webview', 'dist'))
+        vscode.Uri.file(path.join(this.context.extensionPath, 'webview', 'dist')),
       ],
     }
     webviewView.webview.html = this.getHtmlContent(webviewView.webview)
@@ -153,15 +159,19 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       this.resolveVueReady = resolve
     })
 
-    webviewView.onDidDispose(() => {
-      if (this.view !== webviewView) return
-      this.view = undefined
-      this.webview = undefined
-      this.vueReadyPromise = undefined
-      this.resolveVueReady = undefined
-      this.disposables.forEach(d => d.dispose())
-      this.disposables = []
-    }, undefined, this.disposables)
+    webviewView.onDidDispose(
+      () => {
+        if (this.view !== webviewView) return
+        this.view = undefined
+        this.webview = undefined
+        this.vueReadyPromise = undefined
+        this.resolveVueReady = undefined
+        this.disposables.forEach(d => d.dispose())
+        this.disposables = []
+      },
+      undefined,
+      this.disposables
+    )
   }
 
   /**
@@ -228,328 +238,347 @@ export class WebviewManager implements vscode.WebviewViewProvider {
 
           // 根据消息类型路由到不同的处理器
           switch (message.type) {
-          case 'ready': {
-            // Webview 准备就绪，发送初始数据
-            // 这是 Webview 加载后发送的第一条消息
+            case 'ready': {
+              // Webview 准备就绪，发送初始数据
+              // 这是 Webview 加载后发送的第一条消息
 
-            const shouldCreateFreshSession = this.createFreshSessionOnReady
-            this.createFreshSessionOnReady = false
+              const shouldCreateFreshSession = this.createFreshSessionOnReady
+              this.createFreshSessionOnReady = false
 
-            let session = this.chatService.getCurrentSession()
-            if (shouldCreateFreshSession || !session) {
-              console.log('[WebviewManager] Creating a fresh session for the Webview')
-              session = await this.chatService.createNewSession()
-            }
-
-            this.postMessage({
-              type: 'session.restored',
-              data: {
-                session: await this.chatService.hydrateSessionImages(session),
-                sessions: this.chatService.getSessions(),
-              },
-            })
-            this.postMessage({
-              type: 'slash.commands',
-              data: {
-                commands: this.chatService.getSlashCommands(),
-              },
-            })
-            this.postMessage({
-              type: 'skills.list',
-              data: {
-                skills: this.chatService.getSkills(),
-              },
-            })
-            this.sendSessionList()
-            this.postRuntimeState()
-            // 会话恢复后主动刷新当前会话任务列表，避免重新打开对话后任务丢失
-            this.chatService.notifyTaskList()
-
-            // 标记 Vue 应用已准备就绪
-            if (this.resolveVueReady) {
-              this.resolveVueReady()
-              this.resolveVueReady = undefined
-            }
-            break
-          }
-
-          case 'chat.send': {
-            if (
-              typeof message.data?.content === 'string' &&
-              /^\/(?:create-agent|create\s+agent|creat\s+agent)$/i.test(
-                message.data.content.trim()
-              )
-            ) {
-              this.postMessage({ type: 'settings.open', data: { section: 'create-agent' } })
-              break
-            }
-            // 处理用户发送消息
-            const requestSessionId = this.chatService.getCurrentSession()?.id
-            try {
-              await this.chatService.sendMessage(
-                message.data.content,
-                message.data.files || message.data.images || [],
-                message.data.inlineSegments || [],
-                message.data.messageId
-              )
-              // 切换会话期间，旧请求完成后不能把旧消息推回新会话。
-              const currentSession = this.chatService.getCurrentSession()
-              if (currentSession && currentSession.id === requestSessionId) {
-                const sessionMessages = currentSession.messages
-                const hydratedSession = await this.chatService.hydrateSessionImages(currentSession)
-                this.postMessage({
-                  type: 'chat.messages.update',
-                  data: {
-                    session: hydratedSession,
-                    messages: sessionMessages,
-                  },
-                })
+              let session = this.chatService.getCurrentSession()
+              if (shouldCreateFreshSession || !session) {
+                console.log('[WebviewManager] Creating a fresh session for the Webview')
+                session = await this.chatService.createNewSession()
               }
-              this.sendSessionList()
-            } catch (error) {
-              this.postMessage({
-                type: 'error',
-                data: {
-                  message: error instanceof Error ? error.message : 'Unknown error',
-                },
-              })
-            }
-            break
-          }
 
-          case 'chat.stop': {
-            const requestSessionId = message.data?.sessionId
-            const session = await this.chatService.stopGeneration()
-            // 停止请求也可能与会话切换并发；旧会话完成后不再覆盖新会话 UI。
-            if (this.chatService.getCurrentSession()?.id === requestSessionId) {
-              this.postMessage({
-                type: 'agent.event',
-                data: { type: 'status', state: 'idle', verb: 'stopped' },
-              })
-              this.postMessage({
-                type: 'chat.messages.update',
-                data: {
-                  session,
-                  messages: session?.messages || [],
-                },
-              })
-            }
-            this.sendSessionList()
-            break
-          }
-
-          case 'runtime.set':
-            this.chatService.setRuntimeOptions(message.data)
-            this.postRuntimeState()
-            break
-
-          case 'runtime.reset':
-            this.chatService.resetRuntime()
-            this.postRuntimeState()
-            break
-
-          case 'tools.registry.list.request':
-          case 'tool-preferences.load.request':
-            this.postToolProfileState(message.data?.scope)
-            break
-
-          case 'tool-preferences.save.request':
-            await this.handleToolProfileSave(message.data)
-            break
-
-          case 'tool-preferences.reset.request':
-            await this.handleToolProfileReset(message.data?.scope)
-            break
-
-          case 'agent.registry.list.request':
-            this.postAgentDefinitions()
-            break
-
-          case 'agent.definition.validate.request':
-            this.handleAgentDefinitionValidate(message.data)
-            break
-
-          case 'agent.draft.generate.request':
-            await this.handleAgentDraftGenerate(message.data)
-            break
-
-          case 'agent.definition.save.request':
-            await this.handleAgentDefinitionSave(message.data)
-            break
-
-          case 'agent.definition.delete.request':
-            await this.handleAgentDefinitionDelete(message.data)
-            break
-
-          case 'mcp.servers.list.request':
-            this.postMcpServers()
-            break
-
-          case 'mcp.server.refresh.request':
-            await this.handleMcpRefresh(message.data?.name)
-            break
-
-          case 'mcp.server.save.request':
-            await this.handleMcpSave(message.data)
-            break
-
-          case 'mcp.server.enable.request':
-            await this.handleMcpEnable(message.data)
-            break
-
-          case 'mcp.server.delete.request':
-            await this.handleMcpDelete(message.data?.name)
-            break
-
-          case 'file.pick':
-            await this.handleFilePick()
-            break
-
-          case 'file.open':
-            await this.handleFileOpen(message.data?.path, message.data?.line)
-            break
-
-          case 'workspace.pick':
-            await this.handleWorkspacePick(message.data?.query)
-            break
-
-          case 'filesystem.search':
-            await this.handleFilesystemSearch(message.data?.query)
-            break
-
-          case 'filesystem.browse':
-            await this.handleFilesystemBrowse(message.data?.dirPath)
-            break
-
-          case 'slash.commands.request':
-            this.postMessage({
-              type: 'slash.commands',
-              data: {
-                commands: this.chatService.getSlashCommands(),
-              },
-            })
-            break
-
-          case 'skills.request':
-            this.postMessage({
-              type: 'skills.list',
-              data: {
-                skills: this.chatService.getSkills(),
-              },
-            })
-            break
-
-          case 'session.new': {
-            // 创建新会话
-            const newSession = await this.chatService.createNewSession()
-
-            // 通知 Webview 新会话已创建
-            this.postMessage({
-              type: 'session.created',
-              data: { session: newSession },
-            })
-            this.sendSessionList()
-            this.postRuntimeState()
-            break
-          }
-
-          case 'session.load': {
-            const loaded = await this.chatService.loadSession(message.data.sessionId)
-            if (loaded) {
               this.postMessage({
                 type: 'session.restored',
                 data: {
-                  session: await this.chatService.hydrateSessionImages(loaded),
+                  session: await this.chatService.hydrateSessionImages(session),
                   sessions: this.chatService.getSessions(),
+                },
+              })
+              this.sendSessionRuntimeSnapshot(session.id)
+              const currentPlan = this.planModeManager?.getCurrentPlan(session.id)
+              if (currentPlan && currentPlan.state === 'planning') {
+                this.sendPlanSubmitted(currentPlan, session.id)
+              }
+              this.postMessage({
+                type: 'slash.commands',
+                data: {
+                  commands: this.chatService.getSlashCommands(),
+                },
+              })
+              this.postMessage({
+                type: 'skills.list',
+                data: {
+                  skills: this.chatService.getSkills(),
                 },
               })
               this.sendSessionList()
               this.postRuntimeState()
+              // 会话恢复后主动刷新当前会话任务列表，避免重新打开对话后任务丢失
+              this.chatService.notifyTaskList()
+
+              // 标记 Vue 应用已准备就绪
+              if (this.resolveVueReady) {
+                this.resolveVueReady()
+                this.resolveVueReady = undefined
+              }
+              break
             }
-            break
+
+            case 'chat.send': {
+              if (
+                typeof message.data?.content === 'string' &&
+                /^\/(?:create-agent|create\s+agent|creat\s+agent)$/i.test(
+                  message.data.content.trim()
+                )
+              ) {
+                this.postMessage({ type: 'settings.open', data: { section: 'create-agent' } })
+                break
+              }
+              // 处理用户发送消息
+              const requestSessionId = this.chatService.getCurrentSession()?.id
+              try {
+                await this.chatService.sendMessage(
+                  message.data.content,
+                  message.data.files || message.data.images || [],
+                  message.data.inlineSegments || [],
+                  message.data.messageId
+                )
+                // 切换会话期间，旧请求完成后不能把旧消息推回新会话。
+                const currentSession = this.chatService.getCurrentSession()
+                if (currentSession && currentSession.id === requestSessionId) {
+                  const sessionMessages = currentSession.messages
+                  const hydratedSession =
+                    await this.chatService.hydrateSessionImages(currentSession)
+                  this.postMessage({
+                    type: 'chat.messages.update',
+                    data: {
+                      session: hydratedSession,
+                      messages: sessionMessages,
+                    },
+                  })
+                }
+                this.sendSessionList()
+              } catch (error) {
+                this.postMessage({
+                  type: 'error',
+                  data: {
+                    message: error instanceof Error ? error.message : 'Unknown error',
+                  },
+                })
+              }
+              break
+            }
+
+            case 'chat.stop': {
+              const requestSessionId = message.data?.sessionId
+              const session = await this.chatService.stopGeneration(requestSessionId)
+              // 停止请求也可能与会话切换并发；旧会话完成后不再覆盖新会话 UI。
+              if (this.chatService.getCurrentSession()?.id === requestSessionId) {
+                this.postMessage({
+                  type: 'agent.event',
+                  data: { type: 'status', state: 'idle', verb: 'stopped' },
+                })
+                this.postMessage({
+                  type: 'chat.messages.update',
+                  data: {
+                    session,
+                    messages: session?.messages || [],
+                  },
+                })
+              }
+              this.sendSessionList()
+              break
+            }
+
+            case 'runtime.set':
+              this.chatService.setRuntimeOptions(message.data)
+              this.postRuntimeState()
+              break
+
+            case 'runtime.reset':
+              this.chatService.resetRuntime()
+              this.postRuntimeState()
+              break
+
+            case 'tools.registry.list.request':
+            case 'tool-preferences.load.request':
+              this.postToolProfileState(message.data?.scope)
+              break
+
+            case 'tool-preferences.save.request':
+              await this.handleToolProfileSave(message.data)
+              break
+
+            case 'tool-preferences.reset.request':
+              await this.handleToolProfileReset(message.data?.scope)
+              break
+
+            case 'agent.registry.list.request':
+              this.postAgentDefinitions()
+              break
+
+            case 'agent.definition.validate.request':
+              this.handleAgentDefinitionValidate(message.data)
+              break
+
+            case 'agent.draft.generate.request':
+              await this.handleAgentDraftGenerate(message.data)
+              break
+
+            case 'agent.definition.save.request':
+              await this.handleAgentDefinitionSave(message.data)
+              break
+
+            case 'agent.definition.delete.request':
+              await this.handleAgentDefinitionDelete(message.data)
+              break
+
+            case 'mcp.servers.list.request':
+              this.postMcpServers()
+              break
+
+            case 'mcp.server.refresh.request':
+              await this.handleMcpRefresh(message.data?.name)
+              break
+
+            case 'mcp.server.save.request':
+              await this.handleMcpSave(message.data)
+              break
+
+            case 'mcp.server.enable.request':
+              await this.handleMcpEnable(message.data)
+              break
+
+            case 'mcp.server.delete.request':
+              await this.handleMcpDelete(message.data?.name)
+              break
+
+            case 'file.pick':
+              await this.handleFilePick()
+              break
+
+            case 'file.open':
+              await this.handleFileOpen(message.data?.path, message.data?.line)
+              break
+
+            case 'workspace.pick':
+              await this.handleWorkspacePick(message.data?.query)
+              break
+
+            case 'filesystem.search':
+              await this.handleFilesystemSearch(message.data?.query)
+              break
+
+            case 'filesystem.browse':
+              await this.handleFilesystemBrowse(message.data?.dirPath)
+              break
+
+            case 'slash.commands.request':
+              this.postMessage({
+                type: 'slash.commands',
+                data: {
+                  commands: this.chatService.getSlashCommands(),
+                },
+              })
+              break
+
+            case 'skills.request':
+              this.postMessage({
+                type: 'skills.list',
+                data: {
+                  skills: this.chatService.getSkills(),
+                },
+              })
+              break
+
+            case 'session.new': {
+              // 创建新会话
+              const newSession = await this.chatService.createNewSession()
+              if (this.chatService.getCurrentSession()?.id !== newSession.id) {
+                this.sendSessionList()
+                break
+              }
+
+              // 通知 Webview 新会话已创建
+              this.postMessage({
+                type: 'session.created',
+                data: { session: newSession },
+              })
+              this.sendSessionRuntimeSnapshot(newSession.id)
+              this.sendSessionList()
+              this.postRuntimeState()
+              break
+            }
+
+            case 'session.load': {
+              const loaded = await this.chatService.loadSession(message.data.sessionId)
+              if (loaded) {
+                this.postMessage({
+                  type: 'session.restored',
+                  data: {
+                    session: await this.chatService.hydrateSessionImages(loaded),
+                    sessions: this.chatService.getSessions(),
+                  },
+                })
+                this.sendSessionRuntimeSnapshot(loaded.id)
+                this.sendSessionList()
+                this.postRuntimeState()
+                const plan = this.planModeManager?.getCurrentPlan(loaded.id)
+                if (plan && plan.state === 'planning') this.sendPlanSubmitted(plan, loaded.id)
+              }
+              break
+            }
+
+            case 'session.list.request':
+              this.sendSessionList()
+              break
+
+            case 'session.delete': {
+              await this.chatService.deleteSession(message.data.sessionId)
+              this.postMessage({
+                type: 'session.restored',
+                data: {
+                  session: await this.chatService.hydrateSessionImages(
+                    this.chatService.getCurrentSession()
+                  ),
+                  sessions: this.chatService.getSessions(),
+                },
+              })
+              const currentSessionId = this.chatService.getCurrentSession()?.id
+              if (currentSessionId) this.sendSessionRuntimeSnapshot(currentSessionId)
+              this.sendSessionList()
+              this.postRuntimeState()
+              break
+            }
+
+            // ============ Task 相关消息 ============
+            case 'task.list.request':
+              // 请求任务列表
+              await this.handleTaskListRequest(message.data?.sessionId)
+              break
+
+            case 'task.update':
+              // 更新任务
+              await this.handleTaskUpdate(message.data)
+              break
+
+            // ============ Plan 相关消息 ============
+            case 'plan.approve':
+              // 批准计划
+              await this.handlePlanApprove(message.data)
+              break
+
+            case 'plan.reject':
+              // 拒绝计划
+              await this.handlePlanReject(message.data)
+              break
+
+            // ============ Agent 相关消息 ============
+            case 'permission_response':
+              await this.handlePermissionResponse(message.data)
+              break
+
+            case 'interaction_response':
+              this.handleInteractionResponse(message.data)
+              break
+
+            case 'task.list.refresh':
+              this.chatService.notifyTaskList()
+              break
+
+            case 'agent.cancel':
+              // 取消 Agent
+              await this.handleAgentCancel(message.data)
+              break
+
+            case 'bash.cancel':
+              await this.handleBashCancel(message.data)
+              break
+
+            case 'image.save':
+              await this.handleImageSave(message.data)
+              break
+
+            default:
+              // 未知消息类型，记录警告
+              console.warn('Unknown message type:', message.type)
+              break
           }
-
-          case 'session.list.request':
-            this.sendSessionList()
-            break
-
-          case 'session.delete':
-            await this.chatService.deleteSession(message.data.sessionId)
-            this.postMessage({
-              type: 'session.restored',
-              data: {
-                session: await this.chatService.hydrateSessionImages(this.chatService.getCurrentSession()),
-                sessions: this.chatService.getSessions(),
-              },
-            })
-            this.sendSessionList()
-            this.postRuntimeState()
-            break
-
-          // ============ Task 相关消息 ============
-          case 'task.list.request':
-            // 请求任务列表
-            await this.handleTaskListRequest()
-            break
-
-          case 'task.update':
-            // 更新任务
-            await this.handleTaskUpdate(message.data)
-            break
-
-          // ============ Plan 相关消息 ============
-          case 'plan.approve':
-            // 批准计划
-            await this.handlePlanApprove(message.data)
-            break
-
-          case 'plan.reject':
-            // 拒绝计划
-            await this.handlePlanReject(message.data)
-            break
-
-          // ============ Agent 相关消息 ============
-          case 'permission_response':
-            await this.handlePermissionResponse(message.data)
-            break
-
-          case 'interaction_response':
-            this.handleInteractionResponse(message.data)
-            break
-
-          case 'task.list.refresh':
-            this.chatService.notifyTaskList()
-            break
-
-          case 'agent.cancel':
-            // 取消 Agent
-            await this.handleAgentCancel(message.data)
-            break
-
-          case 'bash.cancel':
-            await this.handleBashCancel(message.data)
-            break
-
-          case 'image.save':
-            await this.handleImageSave(message.data)
-            break
-
-          default:
-            // 未知消息类型，记录警告
-            console.warn('Unknown message type:', message.type)
-            break
-        }
-      },
-      undefined,
-      this.disposables // 将监听器添加到可释放资源列表
-    )
+        },
+        undefined,
+        this.disposables // 将监听器添加到可释放资源列表
+      )
     })
   }
 
   private setupChatEventForwarding() {
     // 高频事件跨进程发送前再做一次短窗口合并。缓冲区保持原始事件顺序，
     // 只合并相邻且同类型的事件，避免 content/thinking/bash 之间被重新排序。
-    let pendingEvents: AgentServerEvent[] = []
+    let pendingEvents: Array<{ event: AgentServerEvent; sessionId: string }> = []
     let flushTimer: NodeJS.Timeout | undefined
     const FLUSH_INTERVAL_MS = 50
 
@@ -560,25 +589,26 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       }
       const events = pendingEvents
       pendingEvents = []
-      for (const event of events) {
-        this.sendAgentEvent(event)
+      for (const item of events) {
+        this.sendAgentEvent(item.event, item.sessionId)
       }
     }
 
-    const enqueueHighFrequencyEvent = (event: AgentServerEvent) => {
-      const last = pendingEvents[pendingEvents.length - 1]
+    const enqueueHighFrequencyEvent = (event: AgentServerEvent, sessionId: string) => {
+      const lastItem = pendingEvents[pendingEvents.length - 1]
+      const last = lastItem?.sessionId === sessionId ? lastItem.event : undefined
 
       if (event.type === 'content_delta' && typeof event.text === 'string') {
         if (last?.type === 'content_delta' && typeof last.text === 'string' && !last.toolInput) {
           last.text += event.text
         } else {
-          pendingEvents.push({ ...event })
+          pendingEvents.push({ event: { ...event }, sessionId })
         }
       } else if (event.type === 'thinking') {
         if (last?.type === 'thinking' && last.blockId === event.blockId) {
           last.text += event.text
         } else {
-          pendingEvents.push({ ...event })
+          pendingEvents.push({ event: { ...event }, sessionId })
         }
       } else if (event.type === 'bash_output') {
         if (
@@ -589,7 +619,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
         ) {
           last.text += event.text
         } else {
-          pendingEvents.push({ ...event })
+          pendingEvents.push({ event: { ...event }, sessionId })
         }
       }
 
@@ -598,18 +628,19 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       }
     }
 
-    this.chatService.onAgentEvent(event => {
+    this.chatService.onAgentEvent((event, sessionId) => {
       if (
         (event.type === 'content_delta' && typeof event.text === 'string' && !event.toolInput) ||
         event.type === 'thinking' ||
         event.type === 'bash_output'
       ) {
-        enqueueHighFrequencyEvent(event)
+        enqueueHighFrequencyEvent(event, sessionId)
         return
       }
 
       flushPending()
-      this.sendAgentEvent(event)
+      this.sendAgentEvent(event, sessionId)
+      if (event.type === 'status') this.sendSessionList()
     })
   }
 
@@ -628,7 +659,10 @@ export class WebviewManager implements vscode.WebviewViewProvider {
   }): Promise<void> {
     if (!this.toolProfileService) return
     const scope: ToolProfileScope = data?.scope === 'global' ? 'global' : 'workspace'
-    if (!Array.isArray(data?.enabledTools) || !data.enabledTools.every(id => typeof id === 'string')) {
+    if (
+      !Array.isArray(data?.enabledTools) ||
+      !data.enabledTools.every(id => typeof id === 'string')
+    ) {
       this.postMessage({
         type: 'tool-preferences.error',
         data: { message: '工具偏好格式无效' },
@@ -679,7 +713,9 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     })
   }
 
-  private async handleAgentDraftGenerate(data: { answers?: Record<string, unknown> }): Promise<void> {
+  private async handleAgentDraftGenerate(data: {
+    answers?: Record<string, unknown>
+  }): Promise<void> {
     const provider = this.providerService.getActiveProvider()
     if (!provider) {
       this.postMessage({
@@ -792,15 +828,18 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   }
 
   private postMcpServers(): void {
-    const servers = this.chatService.getMcpManager().getServerInfoList().map(server => ({
-      ...server,
-      config: {
-        ...server.config,
-        env: server.config.env
-          ? Object.fromEntries(Object.keys(server.config.env).map(key => [key, '********']))
-          : undefined,
-      },
-    }))
+    const servers = this.chatService
+      .getMcpManager()
+      .getServerInfoList()
+      .map(server => ({
+        ...server,
+        config: {
+          ...server.config,
+          env: server.config.env
+            ? Object.fromEntries(Object.keys(server.config.env).map(key => [key, '********']))
+            : undefined,
+        },
+      }))
     this.postMessage({
       type: 'mcp.servers.list.response',
       data: { servers, configError: this.chatService.getMcpManager().getConfigError() },
@@ -884,10 +923,16 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
    * 处理生成图片的“下载/保存”：弹出系统保存对话框，将工作区中的图片
    * 复制到用户选择的位置；若源文件缺失则用 base64 兜底写出。
    */
-  private async handleImageSave(data: { path?: string; name?: string; base64?: string; mime?: string }): Promise<void> {
+  private async handleImageSave(data: {
+    path?: string
+    name?: string
+    base64?: string
+    mime?: string
+  }): Promise<void> {
     try {
       const workDir = this.chatService.getCurrentSession()?.workDir || ''
-      const defaultName = data.name || (data.path ? path.basename(data.path) : 'generated-image.png')
+      const defaultName =
+        data.name || (data.path ? path.basename(data.path) : 'generated-image.png')
 
       // 计算默认保存位置：优先用户工作区根目录
       const defaultUri = workDir
@@ -980,10 +1025,7 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
    * @param cwd - git 工作目录（工作区根路径）
    * @returns 未被 gitignore 排除的文件列表
    */
-  private async filterGitIgnored(
-    files: vscode.Uri[],
-    cwd: string
-  ): Promise<vscode.Uri[]> {
+  private async filterGitIgnored(files: vscode.Uri[], cwd: string): Promise<vscode.Uri[]> {
     if (files.length === 0) return files
 
     // 用绝对路径喂给 git check-ignore，避免相对路径解析歧义
@@ -1003,7 +1045,10 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
             return
           }
           const set = new Set(
-            stdout.split('\0').map(p => p.trim()).filter(Boolean)
+            stdout
+              .split('\0')
+              .map(p => p.trim())
+              .filter(Boolean)
           )
           resolve(set)
         }
@@ -1028,7 +1073,11 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     }
 
     const pattern = query?.trim() ? `**/*${query.trim()}*` : '**/*'
-    const found = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist}/**', 300)
+    const found = await vscode.workspace.findFiles(
+      pattern,
+      '**/{node_modules,.git,out,dist}/**',
+      300
+    )
     const files = (await this.filterGitIgnored(found, workspaceFolder.uri.fsPath)).slice(0, 100)
     const picked = await vscode.window.showQuickPick(
       files.map(file => ({
@@ -1064,7 +1113,11 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
 
     const normalizedQuery = query?.trim() || ''
     const pattern = normalizedQuery ? `**/*${normalizedQuery}*` : '**/*'
-    const found = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git,out,dist,build}/**', 300)
+    const found = await vscode.workspace.findFiles(
+      pattern,
+      '**/{node_modules,.git,out,dist,build}/**',
+      300
+    )
     const files = (await this.filterGitIgnored(found, workspaceFolder.uri.fsPath)).slice(0, 100)
     this.postMessage({
       type: 'filesystem.search.results',
@@ -1090,7 +1143,10 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     const targetPath = dirPath?.trim() || rootPath
     const normalizedRoot = path.resolve(rootPath)
     const normalizedTarget = path.resolve(targetPath)
-    if (normalizedTarget !== normalizedRoot && !normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`)) {
+    if (
+      normalizedTarget !== normalizedRoot &&
+      !normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`)
+    ) {
       this.postMessage({
         type: 'error',
         data: { message: '只能浏览当前工作区内的文件' },
@@ -1099,7 +1155,11 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     }
 
     if (normalizedTarget === normalizedRoot) {
-      const found = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,dist,build}/**', 300)
+      const found = await vscode.workspace.findFiles(
+        '**/*',
+        '**/{node_modules,.git,out,dist,build}/**',
+        300
+      )
       const files = (await this.filterGitIgnored(found, rootPath)).slice(0, 100)
       this.postMessage({
         type: 'filesystem.browse.results',
@@ -1142,7 +1202,12 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
           workDir: session.workDir,
           createdAt: new Date(session.createdAt).toISOString(),
           modifiedAt: new Date(session.updatedAt).toISOString(),
-          messageCount: session.messages.filter(message => message.role === 'user' || message.role === 'assistant').length,
+          messageCount: session.messages.filter(
+            message => message.role === 'user' || message.role === 'assistant'
+          ).length,
+          isRunning:
+            this.chatService.isSessionRunning(session.id) ||
+            Boolean(this.agentCoordinator?.isSessionRunning(session.id)),
         })),
       },
     })
@@ -1151,15 +1216,17 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   /**
    * 处理任务列表请求
    */
-  private async handleTaskListRequest(): Promise<void> {
+  private async handleTaskListRequest(sessionId?: string): Promise<void> {
     try {
       if (!this.taskManager) {
         console.warn('TaskManager not available')
         return
       }
 
+      const currentSessionId = this.chatService.getCurrentSession()?.id
+      if (sessionId && sessionId !== currentSessionId) return
       const tasks = this.taskManager.listTasks()
-      this.sendTaskList(tasks)
+      this.sendTaskList(tasks, currentSessionId)
     } catch (error) {
       console.error('Failed to handle task list request:', error)
     }
@@ -1175,17 +1242,16 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
         return
       }
 
-      const task = await this.taskManager.updateTask(data.taskId, {
-        status: data.status as any
+      await this.taskManager.updateTask(data.taskId, {
+        status: data.status as any,
       })
-      this.sendTaskUpdated(task)
     } catch (error) {
       console.error('Failed to handle task update:', error)
       this.postMessage({
         type: 'error',
         data: {
-          message: error instanceof Error ? error.message : 'Failed to update task'
-        }
+          message: error instanceof Error ? error.message : 'Failed to update task',
+        },
       })
     }
   }
@@ -1193,22 +1259,28 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   /**
    * 处理计划批准
    */
-  private async handlePlanApprove(data: { planId: string }): Promise<void> {
+  private async handlePlanApprove(data: { planId: string; sessionId?: string }): Promise<void> {
     try {
       if (!this.planModeManager) {
         console.warn('PlanModeManager not available')
         return
       }
 
+      if (
+        data.sessionId &&
+        this.planModeManager.getCurrentPlan(data.sessionId)?.id !== data.planId
+      ) {
+        throw new Error('计划不属于当前响应的会话')
+      }
       await this.planModeManager.approvePlan(data.planId)
-      this.sendPlanApproved(data.planId)
+      this.sendPlanApproved(data.planId, data.sessionId)
     } catch (error) {
       console.error('Failed to handle plan approve:', error)
       this.postMessage({
         type: 'error',
         data: {
-          message: error instanceof Error ? error.message : 'Failed to approve plan'
-        }
+          message: error instanceof Error ? error.message : 'Failed to approve plan',
+        },
       })
     }
   }
@@ -1216,22 +1288,32 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   /**
    * 处理计划拒绝
    */
-  private async handlePlanReject(data: { planId: string; reason: string }): Promise<void> {
+  private async handlePlanReject(data: {
+    planId: string
+    sessionId?: string
+    reason: string
+  }): Promise<void> {
     try {
       if (!this.planModeManager) {
         console.warn('PlanModeManager not available')
         return
       }
 
+      if (
+        data.sessionId &&
+        this.planModeManager.getCurrentPlan(data.sessionId)?.id !== data.planId
+      ) {
+        throw new Error('计划不属于当前响应的会话')
+      }
       await this.planModeManager.rejectPlan(data.planId, data.reason)
-      this.sendPlanRejected(data.planId, data.reason)
+      this.sendPlanRejected(data.planId, data.reason, data.sessionId)
     } catch (error) {
       console.error('Failed to handle plan reject:', error)
       this.postMessage({
         type: 'error',
         data: {
-          message: error instanceof Error ? error.message : 'Failed to reject plan'
-        }
+          message: error instanceof Error ? error.message : 'Failed to reject plan',
+        },
       })
     }
   }
@@ -1246,13 +1328,13 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
         approved: data.approved,
       })
 
-      const cachedResponse = this.permissionResponseCache.get(data.requestId)
+      const cachedResponse = this.permissionResponseCache.get(data.requestId, data.sessionId)
       if (cachedResponse) {
         performanceLog('permission.webview_response.replayed', {
           requestId: data.requestId,
           approved: cachedResponse.approved,
         })
-        this.sendAgentEvent({ type: 'permission_response', ...cachedResponse })
+        this.sendAgentEvent({ type: 'permission_response', ...cachedResponse }, data.sessionId)
         return
       }
 
@@ -1274,7 +1356,7 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
             reason: '权限请求已失效或所属任务已停止',
           }
       if (handled) this.permissionResponseCache.set(response)
-      this.sendAgentEvent({ type: 'permission_response', ...response })
+      this.sendAgentEvent({ type: 'permission_response', ...response }, data.sessionId)
     } catch (error) {
       console.error('Failed to handle permission response:', error)
     }
@@ -1296,7 +1378,10 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
       const position = targetLine
         ? new vscode.Position(targetLine - 1, Math.max((reference.column || 1) - 1, 0))
         : undefined
-      await vscode.window.showTextDocument(document, { preview: false, selection: position ? new vscode.Range(position, position) : undefined })
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        selection: position ? new vscode.Range(position, position) : undefined,
+      })
       await vscode.commands.executeCommand('revealInExplorer', uri)
       if (position) {
         const editor = vscode.window.activeTextEditor
@@ -1331,7 +1416,11 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     const addRoot = (root: string | undefined) => {
       if (!root) return
       const resolved = path.resolve(root)
-      if (!roots.some(item => path.normalize(item).toLowerCase() === path.normalize(resolved).toLowerCase())) {
+      if (
+        !roots.some(
+          item => path.normalize(item).toLowerCase() === path.normalize(resolved).toLowerCase()
+        )
+      ) {
         roots.push(resolved)
       }
     }
@@ -1401,6 +1490,7 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
 
   private handleInteractionResponse(data: {
     requestId: string
+    sessionId?: string
     answered: boolean
     answers?: unknown
     reason?: string
@@ -1454,10 +1544,27 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     void this.webview?.postMessage(message)
   }
 
-  sendAgentEvent(event: AgentServerEvent): void {
+  sendAgentEvent(event: AgentServerEvent, sessionId?: string): void {
     this.postMessage({
       type: 'agent.event',
-      data: event,
+      data: sessionId ? { ...event, sessionId } : event,
+    })
+  }
+
+  /**
+   * 发送指定会话的子 Agent 运行快照。
+   *
+   * 快照始终在 session.restored/session.created 之后发送，确保前端先切换
+   * 活动会话，再恢复该会话的 Agent 和待处理请求。
+   */
+  private sendSessionRuntimeSnapshot(sessionId: string): void {
+    this.postMessage({
+      type: 'session.runtime.snapshot',
+      data: this.agentCoordinator?.getSessionRuntimeSnapshot(sessionId) || {
+        sessionId,
+        agents: [],
+        pendingEvents: [],
+      },
     })
   }
 
@@ -1478,70 +1585,70 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   /**
    * 发送任务创建消息
    */
-  sendTaskCreated(task: any): void {
+  sendTaskCreated(task: any, sessionId?: string): void {
     this.postMessage({
       type: 'task.created',
-      data: { task }
+      data: { task, sessionId: sessionId || task.sessionId },
     })
   }
 
   /**
    * 发送任务更新消息
    */
-  sendTaskUpdated(task: any): void {
+  sendTaskUpdated(task: any, sessionId?: string): void {
     this.postMessage({
       type: 'task.updated',
-      data: { task }
+      data: { task, sessionId: sessionId || task.sessionId },
     })
   }
 
   /**
    * 发送任务列表消息
    */
-  sendTaskList(tasks: any[]): void {
+  sendTaskList(tasks: any[], sessionId?: string): void {
     this.postMessage({
       type: 'task.list',
-      data: { tasks }
+      data: { tasks, sessionId },
     })
   }
 
   /**
    * 发送任务删除消息
    */
-  sendTaskDeleted(taskId: string): void {
+  sendTaskDeleted(taskId: string, sessionId?: string): void {
     this.postMessage({
       type: 'task.deleted',
-      data: { taskId }
+      data: { taskId, sessionId },
     })
   }
 
   /**
    * 发送计划提交消息
    */
-  sendPlanSubmitted(plan: any): void {
+  sendPlanSubmitted(plan: any, sessionId?: string): void {
     this.postMessage({
       type: 'plan.submitted',
-      data: { plan }
+      data: { plan, sessionId },
     })
   }
 
   /**
    * 发送计划批准消息
    */
-  sendPlanApproved(planId: string): void {
+  sendPlanApproved(planId: string, sessionId?: string): void {
     this.postMessage({
       type: 'plan.approved',
-      data: { planId }
+      data: { planId, sessionId },
     })
   }
 
   /**
    * 发送计划拒绝消息
    */
-  sendPlanRejected(planId: string, reason: string): void {
+  sendPlanRejected(planId: string, reason: string, sessionId?: string): void {
     this.postMessage({
       type: 'plan.rejected',
-      data: { planId, reason }
+      data: { planId, reason, sessionId },
     })
   }
 
@@ -1551,28 +1658,30 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
   sendQuestionAsk(question: any): void {
     this.postMessage({
       type: 'question.ask',
-      data: { question }
+      data: { question },
     })
   }
 
   /**
    * 发送 Agent 启动消息
    */
-  sendAgentStarted(agent: any): void {
+  sendAgentStarted(agent: any, sessionId?: string): void {
     this.postMessage({
       type: 'agent.started',
-      data: { agent }
+      data: { agent, sessionId },
     })
+    this.sendSessionList()
   }
 
   /**
    * 发送 Agent 完成消息
    */
-  sendAgentCompleted(agent: any): void {
+  sendAgentCompleted(agent: any, sessionId?: string): void {
     this.postMessage({
       type: 'agent.completed',
-      data: { agent }
+      data: { agent, sessionId },
     })
+    this.sendSessionList()
   }
 
   /**

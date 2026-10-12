@@ -36,8 +36,12 @@ export interface Plan {
 }
 
 export const usePlanStore = defineStore('plan', () => {
-  // 状态
-  const currentPlan = ref<Plan | null>(null)
+  const activeSessionId = ref<string | null>(null)
+  const plansBySession = ref<Record<string, Plan | null>>({})
+  const currentPlan = computed(() => {
+    const sessionId = activeSessionId.value
+    return sessionId ? plansBySession.value[sessionId] || null : null
+  })
   const showApprovalDialog = ref(false)
 
   // 计算属性
@@ -55,9 +59,17 @@ export const usePlanStore = defineStore('plan', () => {
     return currentPlan.value?.risks.filter(r => r.level === 'high') || []
   })
 
-  // 方法
-  function setPlan(plan: Plan) {
-    currentPlan.value = plan
+  /** 切换计划面板当前展示的会话。 */
+  function setActiveSession(sessionId: string | null) {
+    activeSessionId.value = sessionId
+    showApprovalDialog.value = false
+  }
+
+  /** 替换指定会话的计划快照。 */
+  function setPlan(plan: Plan | null, sessionId?: string) {
+    const targetSessionId = sessionId || activeSessionId.value
+    if (!targetSessionId) return
+    plansBySession.value[targetSessionId] = plan
     showApprovalDialog.value = false
   }
 
@@ -71,8 +83,9 @@ export const usePlanStore = defineStore('plan', () => {
     window.vscode?.postMessage({
       type: 'plan.approve',
       data: {
-        planId: currentPlan.value.id
-      }
+        planId: currentPlan.value.id,
+        sessionId: activeSessionId.value || undefined,
+      },
     })
 
     showApprovalDialog.value = false
@@ -89,34 +102,42 @@ export const usePlanStore = defineStore('plan', () => {
       type: 'plan.reject',
       data: {
         planId: currentPlan.value.id,
-        reason
-      }
+        sessionId: activeSessionId.value || undefined,
+        reason,
+      },
     })
 
     showApprovalDialog.value = false
   }
 
   function clearPlan() {
-    currentPlan.value = null
+    const sessionId = activeSessionId.value
+    if (sessionId) plansBySession.value[sessionId] = null
     showApprovalDialog.value = false
   }
 
-  function markAsApproved(planId: string) {
-    if (currentPlan.value && currentPlan.value.id === planId) {
-      currentPlan.value.state = 'approved'
-      currentPlan.value.approvedAt = new Date().toISOString()
+  function markAsApproved(planId: string, sessionId?: string) {
+    const targetSessionId = sessionId || activeSessionId.value
+    const plan = targetSessionId ? plansBySession.value[targetSessionId] : null
+    if (plan && plan.id === planId) {
+      plan.state = 'approved'
+      plan.approvedAt = new Date().toISOString()
     }
   }
 
-  function markAsRejected(planId: string, reason: string) {
-    if (currentPlan.value && currentPlan.value.id === planId) {
-      currentPlan.value.state = 'rejected'
-      currentPlan.value.rejectedReason = reason
+  function markAsRejected(planId: string, reason: string, sessionId?: string) {
+    const targetSessionId = sessionId || activeSessionId.value
+    const plan = targetSessionId ? plansBySession.value[targetSessionId] : null
+    if (plan && plan.id === planId) {
+      plan.state = 'rejected'
+      plan.rejectedReason = reason
     }
   }
 
   return {
     // 状态
+    activeSessionId,
+    plansBySession,
     currentPlan,
     showApprovalDialog,
 
@@ -129,11 +150,12 @@ export const usePlanStore = defineStore('plan', () => {
     highRisks,
 
     // 方法
+    setActiveSession,
     setPlan,
     approvePlan,
     rejectPlan,
     clearPlan,
     markAsApproved,
-    markAsRejected
+    markAsRejected,
   }
 })

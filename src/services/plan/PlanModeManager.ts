@@ -32,7 +32,7 @@ import * as path from 'path'
 
 // 前向声明，避免循环依赖
 interface IWebviewManager {
-  sendPlanSubmitted(plan: Plan): void
+  sendPlanSubmitted(plan: Plan, sessionId?: string): void
 }
 
 /**
@@ -115,7 +115,7 @@ const PLAN_MODE_ALLOWED_TOOLS = [
 
   // Plan Mode 工具
   'enter_plan_mode',
-  'exit_plan_mode'
+  'exit_plan_mode',
 ]
 
 export class PlanModeManager {
@@ -188,7 +188,7 @@ export class PlanModeManager {
       tasks: [],
       steps: [],
       risks: [],
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     }
 
     // 设置当前计划
@@ -231,7 +231,7 @@ export class PlanModeManager {
 
     // 发送消息到 Webview
     if (this.webviewManager) {
-      this.webviewManager.sendPlanSubmitted(session.plan)
+      this.webviewManager.sendPlanSubmitted(session.plan, sessionId)
     }
 
     // 返回计划，等待用户审批
@@ -347,7 +347,7 @@ export class PlanModeManager {
     if (!session) {
       return { approved: false, reason: '计划不存在或已结束' }
     }
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       session.approvalCallback = (approved: boolean, reason?: string) => {
         resolve({ approved, reason })
       }
@@ -438,7 +438,7 @@ export class PlanModeManager {
         }
         if (task.risks && task.risks.length > 0) {
           lines.push(`- 风险:`)
-          task.risks.forEach((risk) => {
+          task.risks.forEach(risk => {
             lines.push(`  - ${risk}`)
           })
         }
@@ -460,7 +460,7 @@ export class PlanModeManager {
     if (plan.risks.length > 0) {
       lines.push('## 风险评估')
       lines.push('')
-      plan.risks.forEach((risk) => {
+      plan.risks.forEach(risk => {
         const levelIcon = risk.level === 'high' ? '🔴' : risk.level === 'medium' ? '🟡' : '🟢'
         lines.push(`### ${levelIcon} ${risk.level.toUpperCase()} - ${risk.description}`)
         lines.push('')
@@ -483,7 +483,7 @@ export class PlanModeManager {
       inactive: '未激活',
       planning: '🔄 规划中',
       approved: '✅ 已批准',
-      rejected: '❌ 已拒绝'
+      rejected: '❌ 已拒绝',
     }
     return stateMap[state] || state
   }

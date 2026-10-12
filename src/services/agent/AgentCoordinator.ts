@@ -31,7 +31,11 @@ import { LocalAgentTaskStore } from '../../tasks/LocalAgentTask'
 import { TaskNotificationQueue } from './TaskNotificationQueue'
 import { AgentWorktreeManager, type WorktreeLease } from './AgentWorktreeManager'
 import type { PermissionMode, Provider } from '../../types'
-import type { AgentServerEvent } from '../../types/messages'
+import type {
+  AgentServerEvent,
+  SessionAgentInfo,
+  SessionAgentRuntimeSnapshot,
+} from '../../types/messages'
 import type { TaskManager } from '../task/TaskManager'
 import type { PlanModeManager } from '../plan/PlanModeManager'
 import type { MCPConnectionManager } from '../mcp/MCPConnectionManager'
@@ -49,9 +53,9 @@ import type { ToolProfileService } from '../tools/ToolProfileService'
 
 // 前向声明，避免循环依赖
 interface IWebviewManager {
-  sendAgentStarted(agent: any): void
-  sendAgentCompleted(result: SubAgentResult): void
-  sendAgentEvent(event: AgentServerEvent): void
+  sendAgentStarted(agent: any, sessionId?: string): void
+  sendAgentCompleted(result: SubAgentResult, sessionId?: string): void
+  sendAgentEvent(event: AgentServerEvent, sessionId?: string): void
 }
 
 /**
@@ -68,6 +72,9 @@ export type ExecutionMode = 'foreground' | 'background'
  * 子 Agent 配置
  */
 export interface SubAgentConfig {
+  /** 发起子 Agent 的会话 ID。 */
+  sessionId?: string
+
   /** Agent ID */
   id: string
 
@@ -134,6 +141,17 @@ export interface SubAgentResult {
   cancelled?: boolean
 }
 
+type PermissionRequestEvent = Extract<AgentServerEvent, { type: 'permission_request' }>
+type InteractionRequestEvent = Extract<AgentServerEvent, { type: 'interaction_request' }>
+
+interface PendingAgentRequest<TEvent extends PermissionRequestEvent | InteractionRequestEvent> {
+  agentId: string
+  sessionId?: string
+  engine: QueryEngine
+  event: TEvent
+  requestedAt: number
+}
+
 /**
  * 运行中的子 Agent
  */
@@ -158,6 +176,9 @@ export class AgentCoordinator {
   /** 已完成的 Agent 结果 */
   private completedResults: Map<string, SubAgentResult> = new Map()
 
+  /** 按 Agent ID 缓存可恢复的展示状态，sessionId 决定其会话归属。 */
+  private readonly agentSnapshots = new Map<string, SessionAgentInfo>()
+
   /** Webview 管理器（可选，用于发送消息到 UI） */
   private webviewManager?: IWebviewManager
 
@@ -168,11 +189,21 @@ export class AgentCoordinator {
   private readonly toolProfileService?: ToolProfileService
   private readonly permissionRequests = new Map<
     string,
-    { agentId: string; engine: QueryEngine }
+    PendingAgentRequest<PermissionRequestEvent>
   >()
   private readonly interactionRequests = new Map<
     string,
-    { agentId: string; engine: QueryEngine }
+    PendingAgentRequest<InteractionRequestEvent>
+  >()
+  /** 切换期间已超时/取消的权限卡片，保留到对应 Agent 历史被清理。 */
+  private readonly deferredPermissionEvents = new Map<
+    string,
+    Omit<PendingAgentRequest<PermissionRequestEvent>, 'engine'>
+  >()
+  /** 切换期间已超时/取消的交互卡片，保留到对应 Agent 历史被清理。 */
+  private readonly deferredInteractionEvents = new Map<
+    string,
+    Omit<PendingAgentRequest<InteractionRequestEvent>, 'engine'>
   >()
   private sharedServices?: {
     taskManager?: TaskManager
@@ -226,24 +257,48 @@ export class AgentCoordinator {
   async restorePersistedTasks(): Promise<void> {
     const tasks = await this.taskStore.list()
     for (const task of tasks) {
+      let restoredTask = task
       if (task.status === 'running') {
-        await this.taskStore.update(task.id, {
+        restoredTask = await this.taskStore.update(task.id, {
           status: 'stopped',
           completedAt: new Date().toISOString(),
           error: 'Agent was interrupted by VS Code reload before completion.',
         })
-        continue
       }
 
-      if (task.status === 'completed' || task.status === 'failed') {
+      if (restoredTask.status === 'completed' || restoredTask.status === 'failed') {
         const fullOutput = await this.taskStore.readOutput(task.id)
         this.completedResults.set(task.id, {
           id: task.id,
-          success: task.status === 'completed',
-          summary: task.summary || (task.status === 'completed' ? 'Agent 执行完成' : 'Agent 执行失败'),
+          success: restoredTask.status === 'completed',
+          summary:
+            restoredTask.summary ||
+            (restoredTask.status === 'completed' ? 'Agent 执行完成' : 'Agent 执行失败'),
           fullOutput,
-          error: task.error,
-          duration: task.durationMs || 0,
+          error: restoredTask.error,
+          duration: restoredTask.durationMs || 0,
+        })
+      }
+
+      if (restoredTask.sessionId) {
+        this.agentSnapshots.set(restoredTask.id, {
+          id: restoredTask.id,
+          sessionId: restoredTask.sessionId,
+          type: restoredTask.type,
+          description: restoredTask.description,
+          status: restoredTask.status,
+          startTime: restoredTask.startedAt,
+          endTime: restoredTask.completedAt,
+          duration: restoredTask.durationMs,
+          summary: restoredTask.summary,
+          fullOutput:
+            restoredTask.status === 'completed' || restoredTask.status === 'failed'
+              ? await this.taskStore.readOutput(restoredTask.id)
+              : undefined,
+          error: restoredTask.error,
+          toolUseId: restoredTask.toolUseId,
+          outputFile: restoredTask.outputFile,
+          cwd: restoredTask.cwd,
         })
       }
     }
@@ -260,9 +315,10 @@ export class AgentCoordinator {
     if (!definition) throw new Error(`未找到 Agent 定义: ${config.type}`)
     if (!definition.enabled) throw new Error(`Agent 已禁用: ${config.type}`)
 
-    const worktree = config.isolation === 'worktree'
-      ? await this.worktreeManager.prepare({ agentId: config.id, cwd: config.cwd })
-      : undefined
+    const worktree =
+      config.isolation === 'worktree'
+        ? await this.worktreeManager.prepare({ agentId: config.id, cwd: config.cwd })
+        : undefined
     const effectiveCwd = worktree?.worktreePath || config.cwd
 
     const runtimeProfile = this.toolProfileService
@@ -300,6 +356,7 @@ export class AgentCoordinator {
 
     await this.taskStore.create({
       id: config.id,
+      sessionId: config.sessionId,
       toolUseId: config.toolUseId,
       type: config.type,
       description: config.description,
@@ -310,6 +367,21 @@ export class AgentCoordinator {
       startedAt,
       updatedAt: startedAt,
     })
+
+    if (config.sessionId) {
+      this.agentSnapshots.set(config.id, {
+        id: config.id,
+        sessionId: config.sessionId,
+        type: config.type,
+        description: config.description,
+        status: 'running',
+        startTime,
+        toolUseId: config.toolUseId,
+        mode: config.mode,
+        isolation: config.isolation || 'none',
+        cwd: effectiveCwd,
+      })
+    }
 
     const activity = { touch: () => undefined }
     const emitSubAgentEvent = async (event: AgentServerEvent) => {
@@ -322,31 +394,63 @@ export class AgentCoordinator {
       activity.touch()
       void emitSubAgentEvent(event)
       if (event.type === 'permission_request') {
-        this.permissionRequests.set(event.requestId, { agentId: config.id, engine })
-        this.webviewManager?.sendAgentEvent({
+        const requestedAt = Date.now()
+        const requestEvent: PermissionRequestEvent = {
           ...event,
           description: event.description
             ? `子 Agent「${config.description}」：${event.description}`
             : `子 Agent「${config.description}」请求执行 ${event.toolName}`,
+          requestedAt,
+        }
+        this.permissionRequests.set(event.requestId, {
+          agentId: config.id,
+          sessionId: config.sessionId,
+          engine,
+          event: requestEvent,
+          requestedAt,
         })
+        this.webviewManager?.sendAgentEvent(requestEvent, config.sessionId)
       } else if (event.type === 'interaction_request') {
-        this.interactionRequests.set(event.requestId, { agentId: config.id, engine })
-        this.webviewManager?.sendAgentEvent({
+        const requestedAt = Date.now()
+        const requestEvent: InteractionRequestEvent = {
           ...event,
           description: `子 Agent「${config.description}」需要用户输入`,
+          requestedAt,
+        }
+        this.interactionRequests.set(event.requestId, {
+          agentId: config.id,
+          sessionId: config.sessionId,
+          engine,
+          event: requestEvent,
+          requestedAt,
         })
-      } else if (
-        event.type === 'tool_use_complete' ||
-        event.type === 'tool_result'
-      ) {
-        this.webviewManager?.sendAgentEvent({
-          ...event,
-          parentToolUseId: event.parentToolUseId || config.toolUseId,
-        })
+        this.webviewManager?.sendAgentEvent(requestEvent, config.sessionId)
+      } else if (event.type === 'tool_use_complete' || event.type === 'tool_result') {
+        this.webviewManager?.sendAgentEvent(
+          {
+            ...event,
+            parentToolUseId: event.parentToolUseId || config.toolUseId,
+          },
+          config.sessionId
+        )
       } else if (event.type === 'bash_output' || event.type === 'bash_status') {
-        this.webviewManager?.sendAgentEvent(event)
+        this.webviewManager?.sendAgentEvent(event, config.sessionId)
       } else if (event.type === 'permission_response') {
-        this.webviewManager?.sendAgentEvent(event)
+        const pending = this.permissionRequests.get(event.requestId)
+        if (
+          pending &&
+          !event.approved &&
+          (event.reason?.includes('timed out') || event.reason?.includes('超时'))
+        ) {
+          this.deferredPermissionEvents.set(event.requestId, {
+            agentId: pending.agentId,
+            sessionId: pending.sessionId,
+            requestedAt: pending.requestedAt,
+            event: { ...pending.event, responseState: 'expired' },
+          })
+        }
+        this.permissionRequests.delete(event.requestId)
+        this.webviewManager?.sendAgentEvent(event, config.sessionId)
       }
     })
 
@@ -369,15 +473,18 @@ export class AgentCoordinator {
 
     // 发送启动消息到 Webview
     if (this.webviewManager) {
-      this.webviewManager.sendAgentStarted({
-        id: config.id,
-        type: config.type,
-        description: config.description,
-        mode: config.mode,
-        isolation: config.isolation || 'none',
-        cwd: effectiveCwd,
-        startTime
-      })
+      this.webviewManager.sendAgentStarted(
+        {
+          id: config.id,
+          type: config.type,
+          description: config.description,
+          mode: config.mode,
+          isolation: config.isolation || 'none',
+          cwd: effectiveCwd,
+          startTime,
+        },
+        config.sessionId
+      )
     }
 
     // 根据执行模式返回
@@ -389,7 +496,7 @@ export class AgentCoordinator {
       return result
     } else {
       // 后台模式：立即返回 Agent ID
-      promise.then((result) => {
+      promise.then(result => {
         void this.finalizeAgent(config, result)
       })
       return config.id
@@ -450,7 +557,7 @@ export class AgentCoordinator {
         success: true,
         summary,
         fullOutput: message.content,
-        duration
+        duration,
       }
     } catch (error) {
       const duration = Date.now() - startTime
@@ -479,7 +586,7 @@ export class AgentCoordinator {
         success: false,
         summary: 'Agent 执行失败',
         error: error instanceof Error ? error.message : String(error),
-        duration
+        duration,
       }
     } finally {
       activity.touch = () => undefined
@@ -505,7 +612,12 @@ export class AgentCoordinator {
     if (running?.finalized) return
     if (running) running.finalized = true
 
-    const finalStatus = running?.cancelRequested || result.cancelled ? 'stopped' : result.success ? 'completed' : 'failed'
+    const finalStatus =
+      running?.cancelRequested || result.cancelled
+        ? 'stopped'
+        : result.success
+          ? 'completed'
+          : 'failed'
     const finalResult: SubAgentResult = {
       ...result,
       success: finalStatus === 'completed',
@@ -516,7 +628,9 @@ export class AgentCoordinator {
 
     this.completedResults.set(config.id, finalResult)
 
-    const outputText = finalResult.success ? finalResult.fullOutput || finalResult.summary : finalResult.error || finalResult.summary
+    const outputText = finalResult.success
+      ? finalResult.fullOutput || finalResult.summary
+      : finalResult.error || finalResult.summary
     const outputFile = await this.taskStore.writeOutput(config.id, outputText || '')
     const completedAt = new Date().toISOString()
 
@@ -529,6 +643,27 @@ export class AgentCoordinator {
       error: finalResult.error,
     })
 
+    if (config.sessionId) {
+      this.agentSnapshots.set(config.id, {
+        id: config.id,
+        sessionId: config.sessionId,
+        type: config.type,
+        description: config.description,
+        status: finalStatus,
+        startTime: running?.startTime || Date.now() - finalResult.duration,
+        endTime: completedAt,
+        duration: finalResult.duration,
+        summary: finalResult.summary,
+        fullOutput: finalResult.fullOutput,
+        error: finalResult.error,
+        toolUseId: config.toolUseId,
+        outputFile,
+        mode: config.mode,
+        isolation: config.isolation || 'none',
+        cwd: running?.effectiveCwd || config.cwd,
+      })
+    }
+
     let cleanupWarning: string | undefined
     if (running?.worktree) {
       cleanupWarning = await this.worktreeManager.cleanup(running.worktree)
@@ -540,12 +675,13 @@ export class AgentCoordinator {
     }
 
     this.runningAgents.delete(config.id)
+    this.archivePendingRequests(config.id, finalStatus === 'stopped' ? 'cancelled' : 'expired')
     this.clearPermissionRequests(config.id)
     this.clearInteractionRequests(config.id)
 
     if (!this.webviewManager) return
 
-    this.webviewManager.sendAgentCompleted(finalResult)
+    this.webviewManager.sendAgentCompleted(finalResult, config.sessionId)
     const notification = this.taskNotificationQueue.buildAgentNotification({
       taskId: finalResult.id,
       toolUseId: config.toolUseId,
@@ -557,18 +693,25 @@ export class AgentCoordinator {
         durationMs: finalResult.duration,
       },
       description: config.description,
-      error: cleanupWarning ? (finalResult.error ? `${finalResult.error}\n\n${cleanupWarning}` : cleanupWarning) : finalResult.error,
+      error: cleanupWarning
+        ? finalResult.error
+          ? `${finalResult.error}\n\n${cleanupWarning}`
+          : cleanupWarning
+        : finalResult.error,
       cwd: running?.effectiveCwd || config.cwd,
       isolation: config.isolation || 'none',
       worktreePath: running?.worktree?.worktreePath,
     })
     if (notification) {
-      this.webviewManager.sendAgentEvent({
-        type: 'system_notification',
-        subtype: 'task_notification',
-        message: `Agent "${config.description}" ${finalStatus}`,
-        data: notification,
-      })
+      this.webviewManager.sendAgentEvent(
+        {
+          type: 'system_notification',
+          subtype: 'task_notification',
+          message: `Agent "${config.description}" ${finalStatus}`,
+          data: notification,
+        },
+        config.sessionId
+      )
     }
   }
 
@@ -613,6 +756,13 @@ export class AgentCoordinator {
     return Array.from(this.runningAgents.keys())
   }
 
+  /** @returns 指定会话是否仍有运行中的子 Agent。 */
+  isSessionRunning(sessionId: string): boolean {
+    return Array.from(this.runningAgents.values()).some(
+      running => running.config.sessionId === sessionId
+    )
+  }
+
   /**
    * 列出所有已完成的 Agent
    *
@@ -623,34 +773,90 @@ export class AgentCoordinator {
   }
 
   /**
+   * 返回指定会话的可恢复运行快照。
+   *
+   * 待处理及后台超时/取消的请求标记为 deferred，前端据此提示用户：请求
+   * 在查看其他会话期间一直等待，并没有被转移到当前会话。
+   *
+   * @param sessionId - 要恢复的会话 ID
+   * @returns 子 Agent 列表和待恢复的权限/交互卡片
+   */
+  getSessionRuntimeSnapshot(sessionId: string): SessionAgentRuntimeSnapshot {
+    const agents = Array.from(this.agentSnapshots.values()).filter(
+      agent => agent.sessionId === sessionId
+    )
+    const pendingEvents: Array<PermissionRequestEvent | InteractionRequestEvent> = []
+
+    for (const request of this.permissionRequests.values()) {
+      if (request.sessionId !== sessionId) continue
+      pendingEvents.push({
+        ...request.event,
+        deferred: true,
+        requestedAt: request.requestedAt,
+      })
+    }
+    for (const request of this.interactionRequests.values()) {
+      if (request.sessionId !== sessionId) continue
+      pendingEvents.push({
+        ...request.event,
+        deferred: true,
+        requestedAt: request.requestedAt,
+      })
+    }
+    for (const request of this.deferredPermissionEvents.values()) {
+      if (request.sessionId !== sessionId) continue
+      pendingEvents.push({
+        ...request.event,
+        deferred: true,
+        requestedAt: request.requestedAt,
+      })
+    }
+    for (const request of this.deferredInteractionEvents.values()) {
+      if (request.sessionId !== sessionId) continue
+      pendingEvents.push({
+        ...request.event,
+        deferred: true,
+        requestedAt: request.requestedAt,
+      })
+    }
+
+    pendingEvents.sort((left, right) => (left.requestedAt || 0) - (right.requestedAt || 0))
+    return { sessionId, agents, pendingEvents }
+  }
+
+  /**
    * 将权限响应路由到发起请求的子 Agent。
    *
    * @returns 是否命中了子 Agent 的待处理权限请求
    */
   handlePermissionResponse(response: {
     requestId: string
+    sessionId?: string
     approved: boolean
     reason?: string
     updatedInput?: unknown
     rule?: 'once' | 'always'
   }): boolean {
     const request = this.permissionRequests.get(response.requestId)
-    if (!request) return false
+    if (!request || (response.sessionId && request.sessionId !== response.sessionId)) return false
 
     this.permissionRequests.delete(response.requestId)
+    this.deferredPermissionEvents.delete(response.requestId)
     return request.engine.handlePermissionResponse(response)
   }
 
   handleInteractionResponse(response: {
     requestId: string
+    sessionId?: string
     answered: boolean
     answers?: unknown
     reason?: string
   }): boolean {
     const request = this.interactionRequests.get(response.requestId)
-    if (!request) return false
+    if (!request || (response.sessionId && request.sessionId !== response.sessionId)) return false
 
     this.interactionRequests.delete(response.requestId)
+    this.deferredInteractionEvents.delete(response.requestId)
     request.engine.handleInteractionResponse(response)
     return true
   }
@@ -666,6 +872,7 @@ export class AgentCoordinator {
 
     running.cancelRequested = true
     running.engine.cancel(reason)
+    this.archivePendingRequests(agentId, 'cancelled')
     this.clearPermissionRequests(agentId)
     this.clearInteractionRequests(agentId)
   }
@@ -678,6 +885,29 @@ export class AgentCoordinator {
     for (const running of runningAgents) {
       this.cancelAgent(running.id, reason)
     }
+
+    await Promise.allSettled(
+      runningAgents.map(async running => {
+        const result = await running.promise
+        await this.finalizeAgent(running.config, result)
+      })
+    )
+  }
+
+  /**
+   * 取消并等待指定会话创建的全部子 Agent，其他会话继续执行。
+   *
+   * @param sessionId - 所属会话 ID
+   * @param reason - 取消原因
+   */
+  async cancelAgentsForSession(
+    sessionId: string,
+    reason = 'Agent cancelled by user'
+  ): Promise<void> {
+    const runningAgents = Array.from(this.runningAgents.values()).filter(
+      running => running.config.sessionId === sessionId
+    )
+    for (const running of runningAgents) this.cancelAgent(running.id, reason)
 
     await Promise.allSettled(
       runningAgents.map(async running => {
@@ -704,6 +934,30 @@ export class AgentCoordinator {
   }
 
   /**
+   * 在 Agent 因超时或停止结束时，把仍在等待的请求转为可恢复的只读卡片。
+   */
+  private archivePendingRequests(agentId: string, state: 'cancelled' | 'expired'): void {
+    for (const [requestId, request] of this.permissionRequests) {
+      if (request.agentId !== agentId) continue
+      this.deferredPermissionEvents.set(requestId, {
+        agentId,
+        sessionId: request.sessionId,
+        requestedAt: request.requestedAt,
+        event: { ...request.event, responseState: state },
+      })
+    }
+    for (const [requestId, request] of this.interactionRequests) {
+      if (request.agentId !== agentId) continue
+      this.deferredInteractionEvents.set(requestId, {
+        agentId,
+        sessionId: request.sessionId,
+        requestedAt: request.requestedAt,
+        event: { ...request.event, responseState: state },
+      })
+    }
+  }
+
+  /**
    * 清理已完成的 Agent 结果
    *
    * @param agentId - Agent ID（可选，不提供则清理所有）
@@ -711,8 +965,22 @@ export class AgentCoordinator {
   clearResults(agentId?: string): void {
     if (agentId) {
       this.completedResults.delete(agentId)
+      if (this.agentSnapshots.get(agentId)?.status !== 'running') {
+        this.agentSnapshots.delete(agentId)
+      }
+      for (const [requestId, request] of this.deferredPermissionEvents) {
+        if (request.agentId === agentId) this.deferredPermissionEvents.delete(requestId)
+      }
+      for (const [requestId, request] of this.deferredInteractionEvents) {
+        if (request.agentId === agentId) this.deferredInteractionEvents.delete(requestId)
+      }
     } else {
       this.completedResults.clear()
+      for (const [id, agent] of this.agentSnapshots) {
+        if (agent.status !== 'running') this.agentSnapshots.delete(id)
+      }
+      this.deferredPermissionEvents.clear()
+      this.deferredInteractionEvents.clear()
     }
   }
 
@@ -723,10 +991,7 @@ export class AgentCoordinator {
    * @param description - Agent 描述
    * @returns 系统提示词
    */
-  private buildSystemPrompt(
-    definition: Readonly<AgentDefinition>,
-    description: string
-  ): string {
+  private buildSystemPrompt(definition: Readonly<AgentDefinition>, description: string): string {
     const basePrompt = `你是一个专门的子 Agent，负责执行特定的任务。
 
 任务描述：${description}
@@ -795,10 +1060,7 @@ export class AgentCoordinator {
       if (normalizedSummary) return normalizedSummary
       console.warn(`[AgentCoordinator] Agent ${config.id} 摘要模型返回空内容，使用完整输出`)
     } catch (error) {
-      console.warn(
-        `[AgentCoordinator] Agent ${config.id} 语义摘要生成失败，使用完整输出:`,
-        error
-      )
+      console.warn(`[AgentCoordinator] Agent ${config.id} 语义摘要生成失败，使用完整输出:`, error)
     }
 
     return `摘要生成失败，以下为子 Agent 的完整结果：\n\n${normalizedOutput}`
@@ -815,7 +1077,10 @@ export class AgentCoordinator {
 
     this.runningAgents.clear()
     this.completedResults.clear()
+    this.agentSnapshots.clear()
     this.permissionRequests.clear()
     this.interactionRequests.clear()
+    this.deferredPermissionEvents.clear()
+    this.deferredInteractionEvents.clear()
   }
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { CircleCheck, CircleHelp, CircleX, Play, X } from 'lucide-vue-next'
+import { CircleCheck, CircleHelp, CircleX, Clock3, Play, X } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import OptionSelector from '@/components/agent/OptionSelector.vue'
 import CustomInput from '@/components/agent/CustomInput.vue'
@@ -26,7 +26,9 @@ interface UserAnswer {
 const props = defineProps<{
   requestId: string
   input: unknown
-  responseState?: 'pending' | 'answered' | 'cancelled'
+  deferred?: boolean
+  requestedAt?: number
+  responseState?: 'pending' | 'answered' | 'cancelled' | 'expired'
   responseAnswers?: unknown
 }>()
 
@@ -97,6 +99,13 @@ const allAnswered = computed(() =>
     return answer.selectedOptions.length > 0 || answer.customInput.trim().length > 0
   })
 )
+const deferredNotice = computed(() =>
+  state.value === 'expired'
+    ? '该问题在你查看其他会话期间未得到处理，现已超时。'
+    : state.value === 'cancelled'
+      ? '该问题在你查看其他会话期间一直等待，现已取消或失效。'
+      : '该问题在你查看其他会话期间一直等待，可能已经接近超时。'
+)
 
 function submit() {
   if (state.value !== 'pending' || !allAnswered.value) return
@@ -133,9 +142,14 @@ function cancel() {
       <CircleHelp :size="14" />
       <h3>Evancod 需要你的输入</h3>
       <span v-if="state !== 'pending'" class="question-card__status">
-        {{ state === 'answered' ? '已回答' : '已取消' }}
+        {{ state === 'answered' ? '已回答' : state === 'expired' ? '已超时' : '已取消' }}
       </span>
     </header>
+
+    <div v-if="deferred" class="question-card__deferred-notice">
+      <Clock3 :size="14" />
+      <span>{{ deferredNotice }}</span>
+    </div>
 
     <nav v-if="questions.length > 1" class="question-card__tabs">
       <button
@@ -180,7 +194,13 @@ function cancel() {
     <div v-else class="question-card__complete">
       <CircleCheck v-if="state === 'answered'" :size="12" />
       <CircleX v-else :size="12" />
-      {{ state === 'answered' ? '答案已提交，任务将继续执行' : '问题已取消' }}
+      {{
+        state === 'answered'
+          ? '答案已提交，任务将继续执行'
+          : state === 'expired'
+            ? '问题已超时'
+            : '问题已取消'
+      }}
     </div>
   </section>
 </template>
@@ -217,6 +237,25 @@ function cancel() {
 .question-card__status {
   color: var(--vscode-descriptionForeground);
   font-size: 12px;
+}
+
+.question-card__deferred-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--vscode-editorWarning-foreground);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 10%, transparent);
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.question-card__deferred-notice svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--vscode-editorWarning-foreground);
 }
 
 .question-card__tabs {

@@ -21,6 +21,7 @@
  */
 
 import * as vscode from 'vscode'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { TaskStore } from '../../tasks/TaskStore'
 import type {
   CompletionEvidence,
@@ -32,10 +33,15 @@ import type {
 
 // 前向声明，避免循环依赖
 interface IWebviewManager {
-  sendTaskCreated(task: TaskItem): void
-  sendTaskUpdated(task: TaskItem): void
-  sendTaskDeleted(taskId: string): void
-  sendTaskList(tasks: TaskItem[]): void
+  sendTaskCreated(task: TaskItem, sessionId?: string): void
+  sendTaskUpdated(task: TaskItem, sessionId?: string): void
+  sendTaskDeleted(taskId: string, sessionId?: string): void
+  sendTaskList(tasks: TaskItem[], sessionId?: string): void
+}
+
+interface TaskSessionContext {
+  sessionId: string
+  activeRequestContext?: RequestContext
 }
 
 export class TaskManager {
@@ -48,8 +54,11 @@ export class TaskManager {
   /** 内存中的任务列表 */
   private tasks: Map<string, TaskItem> = new Map()
 
-  /** 持久化延迟定时器 */
-  private saveTimer?: NodeJS.Timeout
+  /** 每个会话独立的持久化延迟定时器 */
+  private saveTimers = new Map<string, NodeJS.Timeout>()
+
+  /** 已载入内存的会话，防止切回时用尚未落盘的旧数据覆盖后台更新。 */
+  private loadedSessionIds = new Set<string>()
 
   /** 延迟写入时间（毫秒） */
   private readonly SAVE_DELAY = 1000
@@ -62,6 +71,9 @@ export class TaskManager {
 
   /** 当前用户请求；只用于新任务自动继承，不创建独立持久化通道。 */
   private activeRequestContext?: RequestContext
+
+  /** 将异步 Agent 调用绑定到发起时的会话，不受 UI 切换影响。 */
+  private readonly sessionContext = new AsyncLocalStorage<TaskSessionContext>()
 
   /**
    * 构造函数
@@ -97,29 +109,57 @@ export class TaskManager {
   }
 
   setActiveRequestContext(context: RequestContext | undefined): void {
+    const scoped = this.sessionContext.getStore()
+    if (scoped) {
+      scoped.activeRequestContext = context
+      return
+    }
     this.activeRequestContext = context
   }
 
   getActiveRequestContext(): RequestContext | undefined {
-    return this.activeRequestContext
+    return this.sessionContext.getStore()?.activeRequestContext || this.activeRequestContext
+  }
+
+  /**
+   * 在指定会话的异步上下文中执行任务操作。
+   *
+   * @param sessionId - 请求所属会话 ID
+   * @param callback - 在会话上下文中运行的异步函数
+   * @returns callback 的返回值
+   */
+  runInSession<T>(sessionId: string, callback: () => Promise<T>): Promise<T> {
+    const activeRequestContext = this.sessionContext.getStore()?.activeRequestContext
+    return this.sessionContext.run({ sessionId, activeRequestContext }, callback)
   }
 
   getRequirementsForTask(task: TaskItem) {
-    if (!task.requestId || task.requestId !== this.activeRequestContext?.id) return []
+    const activeRequestContext = this.getActiveRequestContext()
+    if (!task.requestId || task.requestId !== activeRequestContext?.id) return []
     const ids = new Set(task.requirementIds || [])
-    return this.activeRequestContext.requirements.filter(item => ids.has(item.id))
+    return activeRequestContext.requirements.filter(item => ids.has(item.id))
+  }
+
+  /** @returns 当前异步请求所属会话；没有请求上下文时返回 UI 当前会话。 */
+  private getEffectiveSessionId(): string | null {
+    return this.sessionContext.getStore()?.sessionId || this.currentSessionId
   }
 
   /**
    * 获取当前会话的 TaskStore
    */
   private getCurrentTaskStore(): TaskStore | null {
-    if (!this.currentSessionId) return null
-    return this.taskStores.get(this.currentSessionId) || null
+    const sessionId = this.getEffectiveSessionId()
+    if (!sessionId) return null
+    if (!this.taskStores.has(sessionId)) {
+      this.taskStores.set(sessionId, new TaskStore(this.context, sessionId))
+    }
+    return this.taskStores.get(sessionId) || null
   }
 
   private isTaskInCurrentSession(task: TaskItem): boolean {
-    return !!this.currentSessionId && task.sessionId === this.currentSessionId
+    const sessionId = this.getEffectiveSessionId()
+    return !!sessionId && task.sessionId === sessionId
   }
 
   private listCurrentSessionTasks(includeDeleted = true): TaskItem[] {
@@ -136,24 +176,33 @@ export class TaskManager {
    * @returns 任务列表
    */
   async load(): Promise<TaskItem[]> {
+    const sessionId = this.getEffectiveSessionId()
     const taskStore = this.getCurrentTaskStore()
     if (!taskStore) {
       console.warn('Cannot load tasks: no current session')
       return []
     }
 
+    if (sessionId && this.loadedSessionIds.has(sessionId)) {
+      return this.listCurrentSessionTasks(false)
+    }
+
     try {
       const tasks = await taskStore.load()
 
       // 只加载当前会话的任务到内存
-      this.tasks.clear()
+      for (const [taskId, task] of this.tasks) {
+        if (task.sessionId === sessionId) this.tasks.delete(taskId)
+      }
       for (const task of tasks) {
-        if (task.sessionId === this.currentSessionId) {
+        if (task.sessionId === sessionId) {
           this.tasks.set(task.id, task)
         }
       }
 
-      return Array.from(this.tasks.values())
+      if (sessionId) this.loadedSessionIds.add(sessionId)
+
+      return Array.from(this.tasks.values()).filter(task => task.sessionId === sessionId)
     } catch (error) {
       console.error('Failed to load tasks:', error)
       return []
@@ -196,7 +245,7 @@ export class TaskManager {
     // 创建任务
     const task: TaskItem = {
       id,
-      sessionId: this.currentSessionId || undefined,
+      sessionId: this.getEffectiveSessionId() || undefined,
       subject: params.subject,
       description: params.description,
       status: 'pending',
@@ -207,9 +256,9 @@ export class TaskManager {
       createdAt: now,
       updatedAt: now,
       metadata: params.metadata,
-      requestId: this.activeRequestContext?.id,
-      requirementIds: this.activeRequestContext?.requirements.map(item => item.id) || [],
-      referenceIds: this.activeRequestContext?.references.map(item => item.id) || [],
+      requestId: this.getActiveRequestContext()?.id,
+      requirementIds: this.getActiveRequestContext()?.requirements.map(item => item.id) || [],
+      referenceIds: this.getActiveRequestContext()?.references.map(item => item.id) || [],
       completion: { state: 'none' },
     }
 
@@ -231,9 +280,7 @@ export class TaskManager {
     this.scheduleSave()
 
     // 发送消息到 Webview
-    if (this.webviewManager) {
-      this.webviewManager.sendTaskCreated(task)
-    }
+    this.webviewManager?.sendTaskCreated(task, task.sessionId)
 
     return task
   }
@@ -288,7 +335,7 @@ export class TaskManager {
           }
           task.updatedAt = now
           this.scheduleSave()
-          this.webviewManager?.sendTaskUpdated(task)
+          this.webviewManager?.sendTaskUpdated(task, task.sessionId)
           throw new Error(
             `Cannot complete task: every inherited user requirement needs completionEvidence. Missing: ${missing.join(', ')}`
           )
@@ -373,9 +420,7 @@ export class TaskManager {
     this.scheduleSave()
 
     // 发送消息到 Webview
-    if (this.webviewManager) {
-      this.webviewManager.sendTaskUpdated(task)
-    }
+    this.webviewManager?.sendTaskUpdated(task, task.sessionId)
 
     return task
   }
@@ -423,7 +468,8 @@ export class TaskManager {
   }
 
   notifyTaskList(): void {
-    this.webviewManager?.sendTaskList(this.listTasks())
+    const sessionId = this.getEffectiveSessionId()
+    if (sessionId) this.webviewManager?.sendTaskList(this.listTasks(), sessionId)
   }
 
   /**
@@ -468,16 +514,17 @@ export class TaskManager {
     this.scheduleSave()
 
     // 发送消息到 Webview
-    if (this.webviewManager) {
-      this.webviewManager.sendTaskDeleted(taskId)
-    }
+    this.webviewManager?.sendTaskDeleted(taskId, task.sessionId)
   }
 
   /**
    * 清空所有任务
    */
   async clearAllTasks(): Promise<void> {
-    this.tasks.clear()
+    const sessionId = this.getEffectiveSessionId()
+    for (const [taskId, task] of this.tasks) {
+      if (task.sessionId === sessionId) this.tasks.delete(taskId)
+    }
     await this.saveImmediate()
   }
 
@@ -542,13 +589,16 @@ export class TaskManager {
    * 使用 debounce 策略，避免频繁写入文件
    */
   private scheduleSave(): void {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer)
-    }
+    const sessionId = this.getEffectiveSessionId()
+    if (!sessionId) return
+    const existing = this.saveTimers.get(sessionId)
+    if (existing) clearTimeout(existing)
 
-    this.saveTimer = setTimeout(() => {
-      this.saveImmediate()
+    const timer = setTimeout(() => {
+      this.saveTimers.delete(sessionId)
+      void this.runInSession(sessionId, () => this.saveImmediate())
     }, this.SAVE_DELAY)
+    this.saveTimers.set(sessionId, timer)
   }
 
   /**
@@ -556,13 +606,14 @@ export class TaskManager {
    */
   private async saveImmediate(): Promise<void> {
     const taskStore = this.getCurrentTaskStore()
+    const sessionId = this.getEffectiveSessionId()
     if (!taskStore) {
       console.warn('Cannot save tasks: no current session')
       return
     }
 
     try {
-      const tasks = Array.from(this.tasks.values())
+      const tasks = Array.from(this.tasks.values()).filter(task => task.sessionId === sessionId)
       await taskStore.saveTasks(tasks)
       await this.workspaceState.update('tasks', {
         tasks,
@@ -579,9 +630,11 @@ export class TaskManager {
    * 清理定时器，立即持久化
    */
   async dispose(): Promise<void> {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer)
-    }
-    await this.saveImmediate()
+    const sessionIds = Array.from(this.saveTimers.keys())
+    for (const timer of this.saveTimers.values()) clearTimeout(timer)
+    this.saveTimers.clear()
+    await Promise.all(
+      sessionIds.map(sessionId => this.runInSession(sessionId, () => this.saveImmediate()))
+    )
   }
 }

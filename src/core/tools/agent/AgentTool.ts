@@ -37,7 +37,11 @@
  */
 
 import { Tool, ToolDefinition, ToolResult } from '../base/Tool'
-import type { AgentCoordinator, AgentType, ExecutionMode } from '../../../services/agent/AgentCoordinator'
+import type {
+  AgentCoordinator,
+  AgentType,
+  ExecutionMode,
+} from '../../../services/agent/AgentCoordinator'
 import type { Provider } from '../../../types'
 
 export class AgentTool extends Tool {
@@ -52,12 +56,14 @@ export class AgentTool extends Tool {
    * @param cwd - 工作目录
    * @param provider - Provider 配置
    * @param model - 模型
+   * @param sessionId - 发起工具调用的会话 ID
    */
   constructor(
     private coordinator: AgentCoordinator,
     private cwd: string,
     private provider: Provider,
-    private model: string
+    private model: string,
+    private sessionId?: string
   ) {
     super()
   }
@@ -81,57 +87,58 @@ export class AgentTool extends Tool {
           description: {
             type: 'string',
             description:
-              'Agent 任务描述，简洁明了地说明 Agent 要做什么，例如 "分析用户认证模块的实现"、"查找所有测试文件"'
+              'Agent 任务描述，简洁明了地说明 Agent 要做什么，例如 "分析用户认证模块的实现"、"查找所有测试文件"',
           },
           prompt: {
             type: 'string',
             description:
-              '具体的任务提示词，详细说明 Agent 应该执行什么操作、关注什么内容、输出什么格式。应该包含具体的文件路径、关键词、分析维度等。'
+              '具体的任务提示词，详细说明 Agent 应该执行什么操作、关注什么内容、输出什么格式。应该包含具体的文件路径、关键词、分析维度等。',
           },
           subagent_type: {
             type: 'string',
             description: '已启用的子 Agent 定义 ID。',
-            enum: definitions.map(definition => definition.id)
+            enum: definitions.map(definition => definition.id),
           },
           type: {
             type: 'string',
             description: '兼容旧字段。等同于 subagent_type。',
-            enum: definitions.map(definition => definition.id)
+            enum: definitions.map(definition => definition.id),
           },
           model: {
             type: 'string',
-            description: '可选模型覆盖。未提供时使用当前主 Agent 模型。'
+            description: '可选模型覆盖。未提供时使用当前主 Agent 模型。',
           },
           run_in_background: {
             type: 'boolean',
-            description: '是否后台运行。true 时立即返回 Agent ID，完成后通过 task_notification 通知。'
+            description:
+              '是否后台运行。true 时立即返回 Agent ID，完成后通过 task_notification 通知。',
           },
           mode: {
             type: 'string',
             description: '兼容旧字段。foreground 阻塞等待；background 后台运行。',
-            enum: ['foreground', 'background']
+            enum: ['foreground', 'background'],
           },
           name: {
             type: 'string',
-            description: '可选 Agent 名称，用于 UI 和调试标识。'
+            description: '可选 Agent 名称，用于 UI 和调试标识。',
           },
           team_name: {
             type: 'string',
-            description: '可选团队名称，用于并发 Agent 分组。'
+            description: '可选团队名称，用于并发 Agent 分组。',
           },
           isolation: {
             type: 'string',
             description:
               '可选隔离模式。none 使用当前工作目录；worktree 会创建临时 git worktree 隔离执行，要求 cwd 位于 git 仓库内。临时 worktree 的文件改动不会自动合并回主工作区。',
-            enum: ['none', 'worktree']
+            enum: ['none', 'worktree'],
           },
           cwd: {
             type: 'string',
-            description: '可选工作目录覆盖。未提供时使用当前工作区。'
-          }
+            description: '可选工作目录覆盖。未提供时使用当前工作区。',
+          },
         },
-        required: ['description', 'prompt']
-      }
+        required: ['description', 'prompt'],
+      },
     }
   }
 
@@ -141,19 +148,22 @@ export class AgentTool extends Tool {
    * @param args - 工具参数
    * @returns 执行结果
    */
-  async execute(args: {
-    type?: AgentType
-    subagent_type?: AgentType
-    description: string
-    prompt: string
-    mode?: ExecutionMode
-    run_in_background?: boolean
-    model?: string
-    name?: string
-    team_name?: string
-    isolation?: 'none' | 'worktree'
-    cwd?: string
-  }, context?: { toolUseId?: string }): Promise<ToolResult> {
+  async execute(
+    args: {
+      type?: AgentType
+      subagent_type?: AgentType
+      description: string
+      prompt: string
+      mode?: ExecutionMode
+      run_in_background?: boolean
+      model?: string
+      name?: string
+      team_name?: string
+      isolation?: 'none' | 'worktree'
+      cwd?: string
+    },
+    context?: { toolUseId?: string }
+  ): Promise<ToolResult> {
     try {
       const agentType = args.subagent_type || args.type || 'explore'
       const definition = this.coordinator.getAgentDefinition(agentType)
@@ -190,6 +200,7 @@ export class AgentTool extends Tool {
 
       // 启动子 Agent
       const result = await this.coordinator.startAgent({
+        sessionId: this.sessionId,
         id: agentId,
         type: agentType,
         description: args.description.trim(),
@@ -270,7 +281,7 @@ Agent ID: ${result}
           type: agentType,
           mode: 'background',
           isolation,
-          status: 'running'
+          status: 'running',
         })
       }
     } catch (error) {
@@ -299,7 +310,7 @@ Agent ID: ${result}
     const icons: Record<string, string> = {
       explore: '🔍',
       analyze: '🔬',
-      research: '📚'
+      research: '📚',
     }
     return icons[type] || '🤖'
   }

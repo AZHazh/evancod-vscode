@@ -57,6 +57,10 @@ export type AgentServerEvent =
       toolUseId?: string
       input: unknown
       description?: string
+      /** 从会话运行快照恢复，说明用户切换期间该请求一直在等待。 */
+      deferred?: boolean
+      requestedAt?: number
+      responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
     }
   | {
       type: 'interaction_request'
@@ -65,6 +69,10 @@ export type AgentServerEvent =
       toolUseId?: string
       input: unknown
       description?: string
+      /** 从会话运行快照恢复，说明用户切换期间该请求一直在等待。 */
+      deferred?: boolean
+      requestedAt?: number
+      responseState?: 'pending' | 'answered' | 'cancelled' | 'expired'
     }
   | {
       type: 'permission_response'
@@ -118,6 +126,36 @@ export type AgentServerEvent =
       taskId?: string
     }
 
+/** 可安全发送给 Webview 的会话级子 Agent 状态。 */
+export interface SessionAgentInfo {
+  id: string
+  sessionId: string
+  type: string
+  description: string
+  status: 'running' | 'completed' | 'failed' | 'stopped'
+  startTime: string | number
+  endTime?: string | number
+  duration?: number
+  summary?: string
+  fullOutput?: string
+  error?: string
+  toolUseId?: string
+  outputFile?: string
+  mode?: 'foreground' | 'background'
+  isolation?: 'none' | 'worktree'
+  cwd?: string
+}
+
+/** 会话切换后用于恢复子 Agent 和权限/交互卡片的轻量快照。 */
+export interface SessionAgentRuntimeSnapshot {
+  sessionId: string
+  agents: SessionAgentInfo[]
+  /** 包含仍在等待，以及用户离开期间已超时或取消的请求。 */
+  pendingEvents: Array<
+    Extract<AgentServerEvent, { type: 'permission_request' | 'interaction_request' }>
+  >
+}
+
 /**
  * Extension → Webview 消息类型
  *
@@ -143,6 +181,10 @@ export type ExtensionToWebviewMessage =
       data: {
         session: Session
       }
+    }
+  | {
+      type: 'session.runtime.snapshot'
+      data: SessionAgentRuntimeSnapshot
     }
   // === 聊天消息相关 ===
   | {
@@ -289,7 +331,7 @@ export type WebviewToExtensionMessage =
   | {
       type: 'chat.stop'
       data: {
-        messageId: string
+        sessionId?: string
       }
     }
   | {
@@ -313,10 +355,30 @@ export type WebviewToExtensionMessage =
       type: 'interaction_response'
       data: {
         requestId: string
+        sessionId?: string
         answered: boolean
         answers?: unknown
         reason?: string
       }
+    }
+  | {
+      type: 'permission_response'
+      data: {
+        requestId: string
+        sessionId?: string
+        approved: boolean
+        reason?: string
+        updatedInput?: unknown
+        rule?: 'once' | 'always'
+      }
+    }
+  | {
+      type: 'plan.approve'
+      data: { planId: string; sessionId?: string }
+    }
+  | {
+      type: 'plan.reject'
+      data: { planId: string; sessionId?: string; reason: string }
     }
   // === Provider 操作 ===
   | {
@@ -375,7 +437,7 @@ export type WebviewToExtensionMessage =
   // === Task 操作 ===
   | {
       type: 'task.list.request'
-      data: null
+      data: { sessionId?: string } | null
     }
   | {
       type: 'task.get'
