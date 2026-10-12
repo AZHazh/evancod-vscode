@@ -304,9 +304,26 @@ function convertOpenAIChatMessages(rawMessages: Message[]): any[] {
       continue
     }
 
-    // user
-    converted.push({ role: 'user', content: message.content })
+    // user：纯文本保持字符串；带图片时按 Chat Completions 多模态格式发送内容数组。
+    converted.push({ role: 'user', content: buildOpenAIChatUserContent(message) })
   }
 
   return converted
+}
+
+function buildOpenAIChatUserContent(message: Message): string | any[] {
+  if (!message.contentBlocks?.length) return message.content
+
+  return message.contentBlocks.map(block => {
+    if (block.type === 'image' && block.source) {
+      return {
+        type: 'image_url',
+        image_url: {
+          url: `data:${block.source.media_type};base64,${block.source.data}`,
+        },
+      }
+    }
+
+    return { type: 'text', text: block.text ?? '' }
+  })
 }

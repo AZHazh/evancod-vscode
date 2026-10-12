@@ -167,7 +167,6 @@ export type ExtensionToWebviewMessage =
       type: 'session.restored'
       data: {
         session: Session | null
-        sessions: Session[]
       }
     }
   | {

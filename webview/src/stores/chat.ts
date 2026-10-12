@@ -268,7 +268,6 @@ export const useChatStore = defineStore('chat', () => {
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         agentStore.setActiveSession(message.data.session?.id || null)
-        sessions.value = message.data.sessions
         syncUiMessagesFromSession()
         break
 
@@ -276,20 +275,7 @@ export const useChatStore = defineStore('chat', () => {
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         agentStore.setActiveSession(message.data.session.id)
-        // 新会话没有用户/助手消息时只是草稿，不显示在历史列表中。
-        // 第一条消息到达后，扩展会通过 session.list 将它加入列表。
-        if (
-          message.data.session.messages?.some(
-            (item: { role?: string }) => item.role === 'user' || item.role === 'assistant'
-          )
-        ) {
-          sessions.value = [
-            message.data.session,
-            ...sessions.value.filter(session => session.id !== message.data.session.id),
-          ]
-        } else {
-          sessions.value = sessions.value.filter(session => session.id !== message.data.session.id)
-        }
+        // 历史列表始终由紧随其后的 session.list 轻量消息维护。
         syncUiMessagesFromSession()
         break
 
@@ -333,29 +319,18 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function mergeSessionList(items: SessionListItem[]): Session[] {
-    const map = new Map(sessions.value.map(session => [session.id, session]))
-    const merged: Session[] = []
-    for (const item of items) {
-      const existing = map.get(item.id)
-      merged.push({
+    return items
+      .map(item => ({
         id: item.id,
         name: item.title,
         createdAt: new Date(item.createdAt).getTime(),
         updatedAt: new Date(item.modifiedAt).getTime(),
-        messages: existing?.messages || [],
-        workDir: item.workDir || existing?.workDir || '',
-        transcript: existing?.transcript,
-        agentTaskNotifications: existing?.agentTaskNotifications,
-        runtimeConfig: existing?.runtimeConfig,
-        tokenUsage: existing?.tokenUsage,
-        compactSummary: existing?.compactSummary,
-        attachments: existing?.attachments,
-        activeRun: existing?.activeRun,
+        messages: [],
+        workDir: item.workDir || '',
         isRunning: item.isRunning,
-        messageCount: existing?.messageCount ?? existing?.messages?.length ?? 0,
-      })
-    }
-    return merged.sort((a, b) => b.updatedAt - a.updatedAt)
+        messageCount: item.messageCount,
+      }))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
   function syncUiMessagesFromSession(preserveRuntime = false) {

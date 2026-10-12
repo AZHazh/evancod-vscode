@@ -8,7 +8,8 @@
  * 4. 清理过期会话
  *
  * 存储策略：
- * - 使用 VSCode 的 ExtensionContext.globalState
+ * - 优先使用 globalStorageUri 下的独立会话文件
+ * - 兼容旧版 ExtensionContext.globalState 并在完整迁移后清理
  * - 自动保存（每次消息后）
  * - 延迟写入（防止频繁 I/O）
  * - 增量持久化（只保存变更会话）
@@ -25,8 +26,12 @@
 import * as vscode from 'vscode'
 import * as fs from 'fs/promises'
 import * as path from 'path'
-import type { Session, Message } from '../../types'
+import type { Session } from '../../types'
 import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
+import {
+  prepareSessionForPersistence,
+  restoreSessionImageReferences,
+} from './sessionSerialization'
 
 /**
  * 持久化配置
@@ -67,9 +72,15 @@ export interface SessionData {
 }
 
 interface SessionIndex {
-  version: 2
+  version: 2 | 3
   currentSessionId: string | null
   sessionIds: string[]
+}
+
+interface FileLoadResult {
+  data: SessionData
+  allSessionFilesLoaded: boolean
+  needsRewrite: boolean
 }
 
 /**
@@ -133,8 +144,17 @@ export class SessionPersistenceService {
   async load(): Promise<SessionData> {
     try {
       if (this.fileStorageDir) {
-        const fileData = await this.loadFromFiles()
-        if (fileData) return fileData
+        const fileResult = await this.loadFromFiles()
+        if (fileResult) {
+          let fileStorageIsAuthoritative = fileResult.allSessionFilesLoaded
+          if (fileStorageIsAuthoritative && fileResult.needsRewrite) {
+            fileStorageIsAuthoritative = await this.rewriteLegacyFileStorage(fileResult.data)
+          }
+          if (fileStorageIsAuthoritative) {
+            await this.clearLegacyGlobalState()
+          }
+          return this.restoreRuntimeData(fileResult.data)
+        }
       }
 
       // 从 globalState 读取
@@ -151,7 +171,7 @@ export class SessionPersistenceService {
         const cleaned = this.cleanExpiredSessions({ sessions, currentSessionId: stored.currentSessionId })
         this.lastSavedSnapshot = new Map(Object.entries(cleaned.sessions).map(([id, session]) => [id, this.createSessionSnapshot(session)]))
         this.lastSavedCurrentSessionId = cleaned.currentSessionId
-        return cleaned
+        return this.restoreRuntimeData(cleaned)
       }
 
       const data = stored as SessionData | undefined
@@ -167,7 +187,7 @@ export class SessionPersistenceService {
       // 清理过期会话
       const cleaned = this.cleanExpiredSessions(data)
 
-      return cleaned
+      return this.restoreRuntimeData(cleaned)
     } catch (error) {
       console.error('加载会话失败:', error)
       return {
@@ -260,7 +280,7 @@ export class SessionPersistenceService {
       const previousIds = this.lastSavedSnapshot ? Array.from(this.lastSavedSnapshot.keys()) : []
       const removedIds = previousIds.filter(id => !currentSnapshot.has(id))
       const index: SessionIndex = {
-        version: 2,
+        version: 3,
         currentSessionId: limited.currentSessionId,
         sessionIds: Object.keys(limited.sessions),
       }
@@ -310,7 +330,7 @@ export class SessionPersistenceService {
     return path.join(this.fileStorageDir!, 'index.json')
   }
 
-  private async loadFromFiles(): Promise<SessionData | undefined> {
+  private async loadFromFiles(): Promise<FileLoadResult | undefined> {
     try {
       const index = JSON.parse(await fs.readFile(this.indexFilePath(), 'utf8')) as SessionIndex
       if (!isSessionIndex(index)) return undefined
@@ -330,7 +350,11 @@ export class SessionPersistenceService {
       const cleaned = this.cleanExpiredSessions({ sessions, currentSessionId: index.currentSessionId })
       this.lastSavedSnapshot = new Map(Object.entries(cleaned.sessions).map(([id, session]) => [id, this.createSessionSnapshot(session)]))
       this.lastSavedCurrentSessionId = cleaned.currentSessionId
-      return cleaned
+      return {
+        data: cleaned,
+        allSessionFilesLoaded: entries.every(([, session]) => session !== undefined),
+        needsRewrite: index.version < 3,
+      }
     } catch {
       return undefined
     }
@@ -346,7 +370,11 @@ export class SessionPersistenceService {
       Object.entries(changedSessions).map(async ([id, session]) => {
         const target = this.sessionFilePath(id)
         const temporary = `${target}.${process.pid}.tmp`
-        await fs.writeFile(temporary, JSON.stringify(session), 'utf8')
+        await fs.writeFile(
+          temporary,
+          JSON.stringify(prepareSessionForPersistence(session)),
+          'utf8'
+        )
         await fs.rename(temporary, target)
       })
     )
@@ -361,6 +389,81 @@ export class SessionPersistenceService {
     const temporaryIndex = `${indexPath}.${process.pid}.tmp`
     await fs.writeFile(temporaryIndex, JSON.stringify(index), 'utf8')
     await fs.rename(temporaryIndex, indexPath)
+  }
+
+  /**
+   * 文件存储已经完整可读后，删除迁移前遗留在 Memento 中的会话大对象。
+   * 只处理 evancod.sessions 命名空间，不影响模型、Provider 等小型全局配置。
+   */
+  private async clearLegacyGlobalState(): Promise<void> {
+    const startedAt = performance.now()
+    try {
+      const stored = this.context.globalState.get<SessionData | SessionIndex>(this.STORAGE_KEY)
+      const legacyKeys = new Set<string>()
+
+      if (isSessionIndex(stored)) {
+        stored.sessionIds.forEach(id => legacyKeys.add(this.sessionStorageKey(id)))
+      } else if (stored?.sessions && typeof stored.sessions === 'object') {
+        Object.keys(stored.sessions).forEach(id => legacyKeys.add(this.sessionStorageKey(id)))
+      }
+
+      for (const key of this.context.globalState.keys()) {
+        if (key.startsWith(`${this.STORAGE_KEY}.`)) legacyKeys.add(key)
+      }
+
+      if (stored === undefined && legacyKeys.size === 0) return
+
+      // 先移除可能包含全部历史会话的旧单体键，尽快降低后续 update 的序列化成本。
+      await this.context.globalState.update(this.STORAGE_KEY, undefined)
+      await Promise.all(
+        Array.from(legacyKeys, key => this.context.globalState.update(key, undefined))
+      )
+      performanceLog('persistence.globalState.cleanup', {
+        removedKeyCount: legacyKeys.size + 1,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...performanceSnapshot(),
+      })
+    } catch (error) {
+      console.warn(
+        '清理旧会话 globalState 失败，将在下次启动重试:',
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+  }
+
+  private async rewriteLegacyFileStorage(data: SessionData): Promise<boolean> {
+    const startedAt = performance.now()
+    try {
+      await this.writeFileSnapshot(data.sessions, [], {
+        version: 3,
+        currentSessionId: data.currentSessionId,
+        sessionIds: Object.keys(data.sessions),
+      })
+      performanceLog('persistence.files.migrate', {
+        sessionCount: Object.keys(data.sessions).length,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...performanceSnapshot(),
+      })
+      return true
+    } catch (error) {
+      console.warn(
+        '迁移旧会话文件失败，保留 globalState 作为备份:',
+        error instanceof Error ? error.message : String(error)
+      )
+      return false
+    }
+  }
+
+  private restoreRuntimeData(data: SessionData): SessionData {
+    return {
+      sessions: Object.fromEntries(
+        Object.entries(data.sessions).map(([id, session]) => [
+          id,
+          restoreSessionImageReferences(session),
+        ])
+      ),
+      currentSessionId: data.currentSessionId,
+    }
   }
 
   /**
@@ -549,5 +652,5 @@ export class SessionPersistenceService {
 function isSessionIndex(value: unknown): value is SessionIndex {
   if (!value || typeof value !== 'object') return false
   const record = value as Partial<SessionIndex>
-  return record.version === 2 && Array.isArray(record.sessionIds)
+  return (record.version === 2 || record.version === 3) && Array.isArray(record.sessionIds)
 }

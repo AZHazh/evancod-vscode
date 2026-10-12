@@ -255,7 +255,6 @@ export class WebviewManager implements vscode.WebviewViewProvider {
                 type: 'session.restored',
                 data: {
                   session: await this.chatService.hydrateSessionImages(session),
-                  sessions: this.chatService.getSessions(),
                 },
               })
               this.sendSessionRuntimeSnapshot(session.id)
@@ -481,7 +480,6 @@ export class WebviewManager implements vscode.WebviewViewProvider {
                   type: 'session.restored',
                   data: {
                     session: await this.chatService.hydrateSessionImages(loaded),
-                    sessions: this.chatService.getSessions(),
                   },
                 })
                 this.sendSessionRuntimeSnapshot(loaded.id)
@@ -505,7 +503,6 @@ export class WebviewManager implements vscode.WebviewViewProvider {
                   session: await this.chatService.hydrateSessionImages(
                     this.chatService.getCurrentSession()
                   ),
-                  sessions: this.chatService.getSessions(),
                 },
               })
               const currentSessionId = this.chatService.getCurrentSession()?.id

@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { normalizeOpenAIUsage } from '../core/services/api/shared'
+import { OpenAIChatClient } from '../core/services/api/OpenAIChatClient'
 import { OpenAIResponsesClient } from '../core/services/api/OpenAIResponsesClient'
 import { prepareToolResultForContext } from '../core/tools/execution/toolResultContext'
 import { ToolOrchestrator } from '../core/tools/execution/ToolOrchestrator'
@@ -29,7 +30,11 @@ import { ToolProfileService } from '../services/tools/ToolProfileService'
 import { AgentDefinitionStore } from '../services/agent/AgentDefinitionStore'
 import { MCPClient } from '../services/mcp/MCPClient'
 import { normalizeMcpInputSchema } from '../core/tools/mcp/MCPRemoteTool'
-import type { Message, Provider } from '../types'
+import {
+  prepareSessionForPersistence,
+  restoreSessionImageReferences,
+} from '../services/persistence/sessionSerialization'
+import type { Message, Provider, Session } from '../types'
 
 const originalFetch = globalThis.fetch
 const temporaryDirectories: string[] = []
@@ -458,6 +463,64 @@ describe('Agent runtime regression invariants', () => {
     assert.equal(usage?.lastPromptTokens, 4096)
   })
 
+  it('sends OpenAI Chat image blocks as image_url content parts', async () => {
+    let requestBody: any
+    globalThis.fetch = async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body || '{}'))
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const provider: Provider = {
+      id: 'openai-chat-vision-test',
+      name: 'openai-chat-vision-test',
+      type: 'custom',
+      apiFormat: 'openai_chat',
+      baseUrl: 'https://example.test',
+      apiKey: 'test',
+      models: { main: 'vision-model', sonnet: '', opus: '', haiku: '' },
+      createdAt: new Date(0).toISOString(),
+    }
+    const client = new OpenAIChatClient({ provider, model: 'vision-model' })
+    const messages: Message[] = [
+      {
+        id: 'plain-text',
+        role: 'user',
+        content: '保留纯文本格式',
+        timestamp: 1,
+      },
+      {
+        id: 'image-input',
+        role: 'user',
+        content: '识别这张图片',
+        timestamp: 2,
+        contentBlocks: [
+          { type: 'text', text: '识别这张图片' },
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: 'iVBORw0KGgo=',
+            },
+          },
+        ],
+      },
+    ]
+
+    assert.equal(await client.sendMessage(messages), 'ok')
+    assert.equal(requestBody.messages[0].content, '保留纯文本格式')
+    assert.deepEqual(requestBody.messages[1].content, [
+      { type: 'text', text: '识别这张图片' },
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' },
+      },
+    ])
+  })
+
   it('streams reasoning summaries and falls back when a gateway rejects summary', async () => {
     const requestBodies: any[] = []
     globalThis.fetch = async (_input, init) => {
@@ -735,5 +798,99 @@ describe('Agent runtime regression invariants', () => {
     assert.deepEqual(cache.get(first.requestId, first.sessionId), first)
     assert.deepEqual(cache.get(second.requestId, second.sessionId), second)
     assert.equal(cache.get(first.requestId, 'session-c'), undefined)
+  })
+
+  it('stores one canonical copy of user images and restores protocol image blocks', () => {
+    const imageData = 'base64-image-data'
+    const attachment = {
+      path: 'screen.png',
+      name: 'screen.png',
+      mime: 'image/png',
+      kind: 'image' as const,
+      base64: imageData,
+      size: 128,
+      inline: true,
+    }
+    const session: Session = {
+      id: 'session-with-image',
+      name: 'image test',
+      createdAt: 1,
+      updatedAt: 2,
+      workDir: 'C:\\workspace',
+      messages: [
+        {
+          id: 'user-image',
+          role: 'user',
+          content: 'inspect this image',
+          timestamp: 1,
+          attachments: [attachment],
+          contentBlocks: [
+            { type: 'text', text: 'inspect this image' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: imageData },
+            },
+          ],
+        },
+        {
+          id: 'tool-image',
+          role: 'tool',
+          content: 'tool image',
+          timestamp: 2,
+          contentBlocks: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'tool-image-data' },
+            },
+          ],
+        },
+      ],
+      transcript: [
+        {
+          id: 'user-image',
+          type: 'user_text',
+          content: 'inspect this image',
+          timestamp: 1,
+          attachments: [attachment],
+        },
+        {
+          id: 'generated-image',
+          type: 'image_generation',
+          imageId: 'generated-image',
+          timestamp: 2,
+          image: {
+            path: 'output/imagegen/generated.png',
+            mime: 'image/png',
+            base64: 'generated-image-data',
+          },
+        },
+      ],
+      attachments: [attachment],
+    }
+
+    const persisted = prepareSessionForPersistence(session)
+    assert.equal(persisted.messages[0].attachments?.[0].base64, imageData)
+    assert.equal(
+      persisted.messages[0].contentBlocks?.some(block => block.type === 'image'),
+      false
+    )
+    assert.equal(persisted.transcript?.[0].type === 'user_text'
+      ? persisted.transcript[0].attachments?.[0].base64
+      : undefined, undefined)
+    assert.equal(persisted.attachments?.[0].base64, undefined)
+    assert.equal(
+      persisted.transcript?.[1].type === 'image_generation'
+        ? persisted.transcript[1].image?.base64
+        : undefined,
+      undefined
+    )
+    assert.equal(persisted.messages[1].contentBlocks?.[0].source?.data, 'tool-image-data')
+
+    const restored = restoreSessionImageReferences(persisted)
+    assert.equal(restored.messages[0].contentBlocks?.[1].source?.data, imageData)
+    assert.equal(restored.transcript?.[0].type === 'user_text'
+      ? restored.transcript[0].attachments?.[0].base64
+      : undefined, imageData)
+    assert.equal(restored.attachments?.[0].base64, imageData)
   })
 })
