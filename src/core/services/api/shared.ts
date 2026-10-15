@@ -50,6 +50,8 @@ export interface ApiClientResponse {
   stopReason?: string
   /** 输出被限长截断，或流在明确完成事件之前结束。 */
   incomplete?: boolean
+  /** 引擎检测到输出退化为复读并主动中止了请求；内容已丢弃。 */
+  degenerate?: boolean
 }
 
 export interface ApiClientOptions {

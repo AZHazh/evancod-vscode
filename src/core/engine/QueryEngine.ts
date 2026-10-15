@@ -30,7 +30,7 @@ import type { Message, ToolCall, ContentBlock, TokenUsage } from '../../types'
 import type { Provider } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { createApiClient } from '../services/api'
-import type { ImageStreamEvent } from '../services/api'
+import type { ApiClientResponse, ImageStreamEvent } from '../services/api'
 import { saveGeneratedImages, timestampedImagePath } from '../tools/image/imageStorage'
 import { TaskManager } from '../../services/task/TaskManager'
 import { PlanModeManager } from '../../services/plan/PlanModeManager'
@@ -65,6 +65,11 @@ import { createBuiltinToolRegistry } from '../tools/registry/BuiltinToolRegistry
 import type { ToolRegistrySnapshot } from '../tools/registry/ToolRegistry'
 import type { ToolCapability, ToolSource } from '../tools/registry/ToolRegistry'
 import { RuntimeProfileResolver } from './RuntimeProfileResolver'
+import {
+  RepetitionDetector,
+  hasUnfulfilledActionPromise,
+  isDegenerateRepetition,
+} from './repetition'
 
 /**
  * QueryEngine 配置
@@ -379,11 +384,7 @@ export class QueryEngine {
     this.enqueueDelta('thinking', text, this.activeThinkingBlockId)
   }
 
-  private enqueueDelta(
-    type: 'content_delta' | 'thinking',
-    text: string,
-    blockId?: string
-  ): void {
+  private enqueueDelta(type: 'content_delta' | 'thinking', text: string, blockId?: string): void {
     if (!text) return
 
     const last = this.pendingDeltas[this.pendingDeltas.length - 1]
@@ -732,6 +733,13 @@ Skill 使用契约：
       // 直接输出总结，因此保留本轮查询的强制执行状态，直到至少成功调用一个
       // 写入或执行工具。
       let planExecutionRequired = false
+      // 下一次请求强制 tool_choice=required（仅生效一次）：用于复读退化恢复、
+      // 以及模型声明了要执行的动作却没有发出工具调用时。
+      let forceToolChoiceOnce = false
+      let degenerateRetryCount = 0
+      const MAX_DEGENERATE_RETRIES = 2
+      let promiseNudgeCount = 0
+      const MAX_PROMISE_NUDGES = 2
       let taskCompletionReviewRequested = false
       let taskWorkflowActive =
         isExplicitContinuationRequest(content) &&
@@ -746,15 +754,16 @@ Skill 使用契约：
           id: this.generateId(),
           role: 'user',
           content:
-            '[内部完成复核指令] 任务列表已全部完成，但当前工作流还不能立即结束。' +
-            '检查上一段回答中是否还有“现在验证、接下来编译、最后确认”等尚未执行的承诺；' +
-            '不要直接相信任务提交的完成证据，必须结合实际工作区、引用文件、git diff 和工具结果，' +
-            '逐项核对下面的原始用户要求。先根据实际改动类型和风险选择最小且充分的验证：' +
-            '纯文档或报告只核对文件内容、路径和差异，不运行编译、测试、构建或打包；' +
-            '代码、配置或样式改动运行受影响范围内的检查；仅在构建发布链路、跨模块公共契约受影响或用户明确要求时运行全量构建/打包。' +
-            '若任一要求未满足，调用 task_update 将对应任务退回 in_progress，继续修复并重新验证；' +
-            '全部满足后，对 completion.state=reviewing 的任务使用原证据再次调用 task_update completed，' +
-            '确认复核通过；再调用 task_list 确认状态并给出最终总结。不要只描述将要执行的动作。\n\n' +
+            '[内部完成复核] 任务列表已全部标记完成，进入最终复核。' +
+            '请对照下面的原始要求，结合实际工作区、git diff 和工具结果逐项核对，' +
+            '包括上一段回答中提到但尚未执行的验证步骤。' +
+            '按改动类型选择最小且充分的验证：纯文档或报告只核对内容、路径和差异；' +
+            '代码、配置或样式改动运行受影响范围内的检查；' +
+            '仅在构建发布链路、跨模块公共契约受影响或用户明确要求时运行全量构建/打包。\n' +
+            '接下来的回复以工具调用开始，二选一：\n' +
+            'A. 发现未满足的要求：调用 task_update 将对应任务设为 in_progress，然后直接修复并验证。\n' +
+            'B. 全部满足：对 completion.state=reviewing 的任务调用 task_update completed（沿用原证据），' +
+            '再调用 task_list，然后给出最终总结。\n\n' +
             this.buildTaskReviewContext(),
           timestamp: Date.now(),
           internal: true,
@@ -841,45 +850,70 @@ Skill 使用契约：
           serializedBytes: Buffer.byteLength(serializedRequest, 'utf8'),
         })
 
-        const continuingOutput = continuationCount > 0 || taskContinuationCount > 0
+        const continuingOutput =
+          continuationCount > 0 || taskContinuationCount > 0 || promiseNudgeCount > 0
         const apiStartedAt = performance.now()
-        const response = await this.apiClient.sendMessageStream(
-          requestMessages,
-          (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
-            if (this.cancelled) return
-            if (type === 'start') {
-              if (!continuingOutput) {
-                this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+        // 每次请求单独的 AbortController：检测到复读退化时只中止本次请求，
+        // 不影响整个查询的取消状态。用户取消时联动中止。
+        const requestController = new AbortController()
+        const abortRequest = () => requestController.abort()
+        this.abortController.signal.addEventListener('abort', abortRequest, { once: true })
+        const repetitionDetector = new RepetitionDetector()
+        const toolChoiceRequired =
+          this.requiresPlanToolUse() || planExecutionRequired || forceToolChoiceOnce
+        forceToolChoiceOnce = false
+        let response: ApiClientResponse
+        try {
+          response = await this.apiClient.sendMessageStream(
+            requestMessages,
+            (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
+              if (this.cancelled || requestController.signal.aborted) return
+              if (type === 'start') {
+                if (!continuingOutput) {
+                  this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
+                }
+                return
               }
-              return
-            }
 
-            if (type === 'thinking') {
-              // 思考增量：单独走 thinking 事件，交由 UI 折叠展示
-              // 性能优化：批量合并，每 32ms 发送一次
-              this.emitThinkingDelta(delta)
-              return
-            }
+              if (type === 'thinking' || type === 'delta') {
+                if (repetitionDetector.push(type, delta)) {
+                  console.warn('Detected degenerate repetition in model output, aborting request')
+                  requestController.abort()
+                  return
+                }
+              }
 
-            if (type === 'delta') {
-              // 性能优化：批量合并 content_delta，每 32ms 发送一次
-              this.emitContentDelta(delta)
-              return
-            }
+              if (type === 'thinking') {
+                // 思考增量：单独走 thinking 事件，交由 UI 折叠展示
+                // 性能优化：批量合并，每 32ms 发送一次
+                this.emitThinkingDelta(delta)
+                return
+              }
 
-            this.onMessageCallback?.('', true)
-          },
-          toolDefinitions,
-          {
-            signal: this.abortController.signal,
-            toolChoice:
-              this.requiresPlanToolUse() || planExecutionRequired ? 'required' : undefined,
-            onImageEvent: (event: ImageStreamEvent) => {
-              if (this.cancelled) return
-              this.handleImageStreamEvent(event, imageSavePromises)
+              if (type === 'delta') {
+                // 性能优化：批量合并 content_delta，每 32ms 发送一次
+                this.emitContentDelta(delta)
+                return
+              }
+
+              this.onMessageCallback?.('', true)
             },
-          }
-        )
+            toolDefinitions,
+            {
+              signal: requestController.signal,
+              toolChoice: toolChoiceRequired ? 'required' : undefined,
+              onImageEvent: (event: ImageStreamEvent) => {
+                if (this.cancelled) return
+                this.handleImageStreamEvent(event, imageSavePromises)
+              },
+            }
+          )
+        } catch (error) {
+          if (!repetitionDetector.isDetected || this.abortController.signal.aborted) throw error
+          response = { content: '', degenerate: true }
+        } finally {
+          this.abortController.signal.removeEventListener('abort', abortRequest)
+        }
         const responseBytes =
           Buffer.byteLength(response.content || '', 'utf8') +
           Buffer.byteLength(JSON.stringify(response.toolCalls || []), 'utf8')
@@ -900,6 +934,39 @@ Skill 使用契约：
         assistantContent = response.content
         totalUsage = mergeUsage(totalUsage, response.usage)
         this.emitContextUsage(totalUsage)
+
+        // 输出退化为复读：丢弃整段输出，不写入历史（写回会被模型当作上下文继续复读），
+        // 用一条中性的恢复指令重发，并强制本次以工具调用开头。
+        if (
+          response.degenerate ||
+          repetitionDetector.isDetected ||
+          (response.incomplete && isDegenerateRepetition(assistantContent))
+        ) {
+          degenerateRetryCount++
+          this.flushPendingDeltas()
+          this.onAgentEventCallback?.({ type: 'content_discard' })
+          if (degenerateRetryCount > MAX_DEGENERATE_RETRIES) {
+            throw new Error(
+              '模型输出连续陷入重复，已停止本次执行。已完成的工具结果均已保留，可发送“继续”恢复。'
+            )
+          }
+          this.onAgentEventCallback?.({
+            type: 'system_notification',
+            subtype: 'compact_complete',
+            data: { message: '检测到模型输出重复，已丢弃该段输出并重试', success: true },
+          })
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content:
+              '[内部恢复] 上一段输出出现重复已被丢弃。请基于已有的工具结果，' +
+              '直接调用下一步需要的工具；无需复述计划。',
+            timestamp: Date.now(),
+            internal: true,
+          })
+          forceToolChoiceOnce = true
+          continue
+        }
 
         // 计划审批依赖 enter/exit_plan_mode 的工具调用。部分 OpenAI 兼容模型或中转层
         // 即使收到 tool_choice=required 仍可能返回纯文本；不能把这类响应当作计划完成。
@@ -1044,8 +1111,11 @@ Skill 使用契约：
           this.flushPendingDeltas()
           this.activeThinkingBlockId = undefined
           const toolsStartedAt = performance.now()
-          const { results: toolResults, noProgress, errorSignature } =
-            await this.executeToolCalls(assistantToolCalls)
+          const {
+            results: toolResults,
+            noProgress,
+            errorSignature,
+          } = await this.executeToolCalls(assistantToolCalls)
           performanceLog('query.tools.complete', {
             iteration,
             toolCallCount: assistantToolCalls.length,
@@ -1075,9 +1145,7 @@ Skill 使用契约：
           if (
             this.config.permissionMode === 'plan' &&
             this.config.planModeManager?.getState(this.config.sessionId || '') === 'approved' &&
-            toolResults.some(
-              result => result.toolName === 'exit_plan_mode' && !result.isError
-            )
+            toolResults.some(result => result.toolName === 'exit_plan_mode' && !result.isError)
           ) {
             planExecutionRequired = true
             planToolUseRetryCount = 0
@@ -1147,6 +1215,32 @@ Skill 使用契约：
           continue
         }
 
+        // 回答末尾声明了"现在运行验证"之类的动作却没有发出工具调用：
+        // 这是"说了没做就结束"的典型形态，续跑一次并强制以工具调用开头。
+        if (
+          promiseNudgeCount < MAX_PROMISE_NUDGES &&
+          hasUnfulfilledActionPromise(assistantContent)
+        ) {
+          promiseNudgeCount++
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'assistant',
+            content: assistantContent,
+            timestamp: Date.now(),
+          })
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content:
+              '[内部续跑] 上一段回答末尾提到了要执行的动作，但没有发出工具调用。' +
+              '请直接调用对应的工具完成它。',
+            timestamp: Date.now(),
+            internal: true,
+          })
+          forceToolChoiceOnce = true
+          continue
+        }
+
         const unfinishedTasks =
           this.config.taskManager
             ?.listTasks()
@@ -1177,10 +1271,10 @@ Skill 使用契约：
             id: this.generateId(),
             role: 'user',
             content:
-              '[内部任务续跑指令] 当前任务列表仍有 ' +
+              '[内部任务续跑] 任务列表仍有 ' +
               unfinishedTasks.length +
-              ' 项未完成。不要结束回答；检查任务状态，从当前 in_progress 或下一项可执行任务继续，' +
-              '完成实现与验证并更新任务状态。只有全部任务完成或存在必须由用户处理的真实阻塞时才能停止。',
+              ' 项未完成。请调用工具继续当前 in_progress 或下一项任务，完成实现与验证后更新任务状态。' +
+              '若遇到必须由用户处理的阻塞，直接说明阻塞原因即可。',
             timestamp: Date.now(),
             internal: true,
           })
@@ -1546,7 +1640,10 @@ Skill 使用契约：
         contextWindow,
         effectiveContextWindow,
         estimatedCurrentTokens,
-        percentUsed: Math.min(Math.round((estimatedCurrentTokens / effectiveContextWindow) * 100), 100),
+        percentUsed: Math.min(
+          Math.round((estimatedCurrentTokens / effectiveContextWindow) * 100),
+          100
+        ),
       },
     })
   }
