@@ -6,15 +6,34 @@ import * as path from 'node:path'
 import { normalizeOpenAIUsage } from '../core/services/api/shared'
 import { OpenAIChatClient } from '../core/services/api/OpenAIChatClient'
 import { OpenAIResponsesClient } from '../core/services/api/OpenAIResponsesClient'
-import { prepareToolResultForContext } from '../core/tools/execution/toolResultContext'
+import {
+  prepareToolResultForContext,
+  setToolResultDevMode,
+} from '../core/tools/execution/toolResultContext'
 import { ToolOrchestrator } from '../core/tools/execution/ToolOrchestrator'
 import { microcompact } from '../services/compact/microcompact'
+import {
+  buildRollingCompactionInput,
+  replaceWithRollingSummary,
+} from '../services/compact/compact'
+import {
+  ContextBudgetManager,
+  estimateImageTokens,
+  estimateMessagesTokens,
+  estimateRequestTokens,
+} from '../services/context/ContextBudgetManager'
+import { stripVirtualizedImages } from '../services/context/VisualContextBuilder'
 import {
   composeUserPrompt,
   createRequestContext,
   shouldIncludeRequestContract,
 } from '../services/chat/UserPromptComposer'
-import { DEFAULT_MAX_ITERATIONS, isSuccessfulTermination } from '../core/engine/termination'
+import {
+  DEFAULT_MAX_EXECUTION_SEGMENTS,
+  DEFAULT_MAX_ITERATIONS,
+  isSuccessfulTermination,
+  shouldContinueExecutionSegment,
+} from '../core/engine/termination'
 import { PermissionResponseCache } from '../services/webview/PermissionResponseCache'
 import { Tool, type ToolDefinition, type ToolResult } from '../core/tools/base/Tool'
 import { ToolRegistry } from '../core/tools/registry/ToolRegistry'
@@ -80,6 +99,7 @@ function createAgentDefinition(
 
 afterEach(async () => {
   globalThis.fetch = originalFetch
+  setToolResultDevMode(false)
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -88,6 +108,125 @@ afterEach(async () => {
 })
 
 describe('Agent runtime regression invariants', () => {
+  it('budgets the serialized text once when contentBlocks mirror content', () => {
+    const text = 'const value = 1\n'.repeat(100)
+    const mirrored: Message = {
+      id: 'mirrored',
+      role: 'user',
+      content: text,
+      contentBlocks: [{ type: 'text', text }],
+      timestamp: 1,
+    }
+    const blocksOnly = { ...mirrored, content: '' }
+
+    assert.equal(estimateMessagesTokens([mirrored]), estimateMessagesTokens([blocksOnly]))
+  })
+
+  it('estimates image tokens from visual dimensions instead of base64 length', () => {
+    const png = Buffer.alloc(2_400_000)
+    png.writeUInt32BE(1920, 16)
+    png.writeUInt32BE(1080, 20)
+    const block = {
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: 'image/png',
+        data: png.toString('base64'),
+      },
+    }
+
+    const tokens = estimateImageTokens(block)
+    assert.ok(tokens >= 256)
+    assert.ok(tokens <= 8_192)
+    assert.ok(tokens < block.source.data.length / 100)
+  })
+
+  it('includes system instructions and tool schemas in the request budget', () => {
+    const messages: Message[] = [
+      { id: 'request', role: 'user', content: 'hello', timestamp: 1 },
+    ]
+    const messagesOnly = estimateRequestTokens(messages)
+    const complete = estimateRequestTokens(messages, '系统约束'.repeat(100), [
+      { name: 'read_file', input_schema: { type: 'object', description: 'x'.repeat(500) } },
+    ])
+
+    assert.ok(complete > messagesOnly)
+  })
+
+  it('uses hysteresis to prevent compression on every iteration', () => {
+    const manager = new ContextBudgetManager()
+    const high = [{ id: 'high', role: 'user' as const, content: '中'.repeat(70_000), timestamp: 1 }]
+    const low = [{ id: 'low', role: 'user' as const, content: '中'.repeat(5_000), timestamp: 1 }]
+
+    assert.equal(manager.assess({ messages: high, configuredWindow: 100_000 }).shouldCompact, true)
+    manager.markCompacted()
+    assert.equal(manager.assess({ messages: high, configuredWindow: 100_000 }).shouldCompact, false)
+    assert.equal(manager.assess({ messages: low, configuredWindow: 100_000 }).shouldCompact, false)
+    assert.equal(manager.assess({ messages: high, configuredWindow: 100_000 }).shouldCompact, true)
+  })
+
+  it('removes virtualized images only from the API request copy', () => {
+    const source: Message = {
+      id: 'screen-message',
+      role: 'user',
+      content: 'inspect',
+      timestamp: 1,
+      contentBlocks: [
+        { type: 'text', text: 'inspect' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'image-data' },
+        },
+      ],
+    }
+    const messages: Message[] = [
+      source,
+      {
+        id: 'visual-context-screen-message',
+        role: 'user',
+        content: 'visual report',
+        timestamp: 2,
+        internal: true,
+      },
+    ]
+
+    const request = stripVirtualizedImages(messages)
+    assert.equal(request[0].contentBlocks?.some(block => block.type === 'image'), false)
+    assert.equal(source.contentBlocks?.some(block => block.type === 'image'), true)
+  })
+
+  it('replaces stacked summaries with one rolling summary', () => {
+    const oldSummaries: Message[] = [
+      { id: 'deep-summary-1', role: 'user', content: 'oldest', timestamp: 1 },
+      { id: 'compact-boundary-2', role: 'user', content: 'latest', timestamp: 2 },
+    ]
+    const conversation: Message[] = Array.from({ length: 8 }, (_, index) => ({
+      id: `message-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `message ${index}`,
+      timestamp: index + 3,
+    }))
+    const nextSummary: Message = {
+      id: 'compact-boundary-3',
+      role: 'user',
+      content: 'replacement',
+      timestamp: 20,
+    }
+
+    const input = buildRollingCompactionInput([...oldSummaries, ...conversation])
+    assert.equal(input.filter(message => /summary|compact-boundary/.test(message.id)).length, 1)
+    assert.equal(input[0].id, 'compact-boundary-2')
+
+    const replaced = replaceWithRollingSummary(
+      [...oldSummaries, ...conversation],
+      nextSummary,
+      5
+    )
+    assert.equal(replaced.filter(message => /summary|compact-boundary/.test(message.id)).length, 1)
+    assert.equal(replaced[0].id, 'compact-boundary-3')
+    assert.equal(replaced.length, 6)
+  })
+
   it('keeps tool snapshots isolated from later registrations', () => {
     const registry = new ToolRegistry()
     registry.register({
@@ -726,6 +865,7 @@ describe('Agent runtime regression invariants', () => {
   })
 
   it('archives oversized tool results and keeps an exact recovery copy', async () => {
+    setToolResultDevMode(true)
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'evancod-result-'))
     temporaryDirectories.push(cwd)
     const original = `start\n${'0123456789'.repeat(9000)}\nend`
@@ -768,11 +908,38 @@ describe('Agent runtime regression invariants', () => {
 
   it('does not classify guardrail exits as successful completion', () => {
     assert.equal(DEFAULT_MAX_ITERATIONS, 100)
+    assert.equal(DEFAULT_MAX_EXECUTION_SEGMENTS, 10)
     assert.equal(isSuccessfulTermination('model_completed'), true)
     assert.equal(isSuccessfulTermination('tasks_completed'), true)
     assert.equal(isSuccessfulTermination('max_iterations'), false)
     assert.equal(isSuccessfulTermination('no_progress'), false)
     assert.equal(isSuccessfulTermination('task_incomplete'), false)
+  })
+
+  it('continues an iteration segment only for unfinished work with real progress', () => {
+    const progressing = {
+      taskWorkflowActive: true,
+      unfinishedTaskCount: 4,
+      progressSignals: 99,
+      consecutiveNoProgressTurns: 1,
+      currentSegment: 1,
+      maxSegments: 10,
+    }
+
+    assert.equal(shouldContinueExecutionSegment(progressing), true)
+    assert.equal(
+      shouldContinueExecutionSegment({ ...progressing, unfinishedTaskCount: 0 }),
+      false
+    )
+    assert.equal(shouldContinueExecutionSegment({ ...progressing, progressSignals: 0 }), false)
+    assert.equal(
+      shouldContinueExecutionSegment({ ...progressing, consecutiveNoProgressTurns: 2 }),
+      false
+    )
+    assert.equal(
+      shouldContinueExecutionSegment({ ...progressing, currentSegment: 10 }),
+      false
+    )
   })
 
   it('replays an acknowledged permission response until the retry window expires', () => {

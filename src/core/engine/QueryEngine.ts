@@ -37,16 +37,28 @@ import { PlanModeManager } from '../../services/plan/PlanModeManager'
 import { AgentCoordinator } from '../../services/agent/AgentCoordinator'
 import {
   getContextWindowForModel,
-  getEffectiveContextWindow,
 } from '../../utils/model/modelContextWindows'
 import {
   microcompact,
   shouldMicrocompact,
-  estimateMessagesTokens,
 } from '../../services/compact/microcompact'
 import { closeDanglingToolCalls as repairDanglingToolCalls } from '../services/api/toolMessageSanitizer'
-import { compactConversation } from '../../services/compact/compact'
-import { shouldAutoCompact } from '../../services/compact/autoCompact'
+import {
+  buildRollingCompactionInput,
+  compactConversation,
+  isCompactSummaryMessage,
+  replaceWithRollingSummary,
+} from '../../services/compact/compact'
+import {
+  ContextBudgetManager,
+  estimateRequestTokens,
+  getEffectiveInputWindow,
+} from '../../services/context/ContextBudgetManager'
+import {
+  insertVisualContexts,
+  stripVirtualizedImages,
+  VisualContextBuilder,
+} from '../../services/context/VisualContextBuilder'
 import { Tool, BashTool } from '../tools'
 import { VSCodeFileSystemAdapter } from '../../adapters/FileSystemAdapter'
 import { MCPConnectionManager } from '../../services/mcp/MCPConnectionManager'
@@ -57,8 +69,10 @@ import { ToolOrchestrator, type RunToolsOutcome } from '../tools/execution/ToolO
 import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
 import { setToolResultDevMode } from '../tools/execution/toolResultContext'
 import {
+  DEFAULT_MAX_EXECUTION_SEGMENTS,
   DEFAULT_MAX_ITERATIONS,
   isSuccessfulTermination,
+  shouldContinueExecutionSegment,
   type QueryTerminationReason,
 } from './termination'
 import { createBuiltinToolRegistry } from '../tools/registry/BuiltinToolRegistry'
@@ -173,17 +187,30 @@ export interface QueryEngineConfig {
   imageProvider?: Provider
 
   /**
-   * 工具调用循环的最大迭代次数（可选）
+   * 单个执行段的最大迭代次数（可选）
    * 每次 API 轮次（含工具调用）消耗一次迭代。多步任务需要较高的上限，
-   * 否则会在闭环前被截断。默认 100。
+   * 达到上限后，有未完成结构化任务且本段有进展时会自动进入下一段。默认 100。
    */
   maxIterations?: number
+
+  /**
+   * 有进展的结构化任务最多可自动续跑的执行段总数（可选）。
+   * 与 maxIterations 共同构成总调用预算；默认 10 段。
+   */
+  maxExecutionSegments?: number
 
   /**
    * 是否为开发模式（可选）
    * 控制是否创建调试文件（performance.log、.tmp/evancod-tool-results）
    */
   isDevelopment?: boolean
+
+  /**
+   * 压缩时保留的最近消息数量（可选）
+   * 默认 10 条，范围 5-50
+   * 从 evancod.compactKeepRecentMessages 配置读取
+   */
+  compactKeepRecentMessages?: number
 }
 
 /**
@@ -328,6 +355,10 @@ export class QueryEngine {
   private consecutiveCompactFailures = 0
   private lastTerminationReason: QueryTerminationReason = 'model_completed'
 
+  private readonly contextBudget = new ContextBudgetManager()
+  private readonly visualContextBuilder: VisualContextBuilder
+  private requestSystemPrompt = ''
+
   // 性能优化：content_delta / thinking 批量合并
   // 高频事件在微任务队列中累积，每 ~32ms 发送一次合并后的事件，
   // 减少 onAgentEventCallback 的调用次数（链路上接了 recordAgentEvent + postMessage）。
@@ -409,6 +440,7 @@ export class QueryEngine {
    */
   constructor(config: QueryEngineConfig) {
     this.config = config
+    this.visualContextBuilder = new VisualContextBuilder(config.provider, config.model)
     this.closeDanglingToolCalls()
     this.initializeApiClient()
     this.initializeTools()
@@ -557,10 +589,11 @@ Skill 使用契约：
     if (provider.runtimeKind === 'openai_oauth') {
       throw new Error('OpenAI 官方 OAuth provider 暂不支持 VSCode 插件直连')
     }
+    this.requestSystemPrompt = this.buildSystemPrompt()
     this.apiClient = createApiClient({
       provider,
       model: this.config.model,
-      systemPrompt: this.buildSystemPrompt(),
+      systemPrompt: this.requestSystemPrompt,
       verbose: this.config.verbose,
       effortLevel: this.config.effortLevel,
     })
@@ -707,10 +740,33 @@ Skill 使用契约：
       this.config.messages.push(userMessage)
       this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
 
-      const MAX_ITERATIONS = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS
-      let iteration = 0
-      let finalContent = ''
       let totalUsage: TokenUsage | undefined
+      try {
+        const visualResult = await this.visualContextBuilder.buildPending(
+          this.config.messages,
+          this.abortController.signal
+        )
+        this.config.messages = insertVisualContexts(this.config.messages, visualResult.contexts)
+        totalUsage = mergeUsage(totalUsage, visualResult.usage)
+      } catch (error) {
+        // 视觉预处理失败时保留原图，主请求仍可按原有多模态路径继续。
+        console.warn('[QueryEngine] Visual context extraction failed, using raw images:', error)
+      }
+
+      const ITERATIONS_PER_SEGMENT = Math.max(
+        1,
+        this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS
+      )
+      const MAX_EXECUTION_SEGMENTS = Math.max(
+        1,
+        this.config.maxExecutionSegments ?? DEFAULT_MAX_EXECUTION_SEGMENTS
+      )
+      const MAX_TOTAL_ITERATIONS = ITERATIONS_PER_SEGMENT * MAX_EXECUTION_SEGMENTS
+      let iteration = 0
+      let executionSegment = 1
+      let segmentProgressSignalCount = 0
+      let executionBudgetReached = false
+      let finalContent = ''
       // 记录最后一轮是否以工具调用结尾。若循环因触顶而退出且最后一轮是工具调用，
       // 需要补一轮无工具的收尾请求，避免留下空的 assistant 消息、闭环失败。
       let lastTurnHadToolCalls = false
@@ -741,6 +797,7 @@ Skill 使用契约：
       let promiseNudgeCount = 0
       const MAX_PROMISE_NUDGES = 2
       let taskCompletionReviewRequested = false
+      let contextRecoveryAttempted = false
       let taskWorkflowActive =
         isExplicitContinuationRequest(content) &&
         (this.config.taskManager
@@ -773,7 +830,59 @@ Skill 使用契约：
       // 新一轮用户请求：清空上一轮的工具去重缓存
       this.toolOrchestrator?.resetDedup()
 
-      while (iteration < MAX_ITERATIONS) {
+      while (iteration < MAX_TOTAL_ITERATIONS) {
+        if (iteration > 0 && iteration % ITERATIONS_PER_SEGMENT === 0) {
+          const unfinishedTasksAtCheckpoint =
+            this.config.taskManager
+              ?.listTasks()
+              .filter(
+                task =>
+                  task.status === 'pending' ||
+                  task.status === 'in_progress' ||
+                  (taskCompletionReviewRequested &&
+                    task.status === 'completed' &&
+                    task.completion?.state === 'reviewing')
+              ) || []
+          const shouldContinue = shouldContinueExecutionSegment({
+            taskWorkflowActive,
+            unfinishedTaskCount: unfinishedTasksAtCheckpoint.length,
+            progressSignals: segmentProgressSignalCount,
+            consecutiveNoProgressTurns,
+            currentSegment: executionSegment,
+            maxSegments: MAX_EXECUTION_SEGMENTS,
+          })
+
+          if (!shouldContinue) {
+            executionBudgetReached = true
+            break
+          }
+
+          executionSegment++
+          segmentProgressSignalCount = 0
+          taskContinuationCount = 0
+          this.config.messages.push({
+            id: this.generateId(),
+            role: 'user',
+            content:
+              `[内部执行段续跑] 已完成第 ${executionSegment - 1} 个执行段，` +
+              `当前仍有 ${unfinishedTasksAtCheckpoint.length} 项任务未完成。` +
+              '上一段持续取得了有效工具进展，因此自动进入下一段。' +
+              '请从当前 in_progress 任务继续，不要重复已完成步骤，也不要提前总结。',
+            timestamp: Date.now(),
+            internal: true,
+          })
+          this.onAgentEventCallback?.({
+            type: 'status',
+            state: 'running',
+            verb: 'segment_continued',
+          })
+          performanceLog('query.segment.continue', {
+            segment: executionSegment,
+            iteration,
+            unfinishedTasks: unfinishedTasksAtCheckpoint.length,
+          })
+        }
+
         this.throwIfCancelled()
         iteration++
         lastIteration = iteration
@@ -783,18 +892,14 @@ Skill 使用契约：
           messageCount: this.config.messages.length,
         })
 
-        // 检查是否需要自动压缩。首次请求没有服务端 usage 时，使用保守估算值。
-        const estimatedTokens = estimateMessagesTokens(this.config.messages)
-        const currentTokens = Math.max(totalUsage?.lastTotalTokens || 0, estimatedTokens)
-        this.emitContextUsage(totalUsage)
+        const toolDefinitions = this.tools.map(tool => tool.getDefinition())
+        let requestMessages = this.buildRequestMessages(toolDefinitions)
+        let requestBudget = this.assessRequestBudget(requestMessages, toolDefinitions)
+        this.emitContextUsage(totalUsage, requestBudget)
+
         if (
-          currentTokens > 0 &&
-          shouldAutoCompact(
-            currentTokens,
-            this.config.model,
-            this.consecutiveCompactFailures,
-            this.getConfiguredContextWindow()
-          )
+          requestBudget.shouldCompact &&
+          this.consecutiveCompactFailures < 3
         ) {
           try {
             this.onAgentEventCallback?.({
@@ -803,7 +908,11 @@ Skill 使用契约：
               data: { message: '上下文正在压缩' },
             })
             await this.performAutoCompact()
+            this.contextBudget.markCompacted()
             this.consecutiveCompactFailures = 0
+            requestMessages = this.buildRequestMessages(toolDefinitions)
+            requestBudget = this.assessRequestBudget(requestMessages, toolDefinitions)
+            this.emitContextUsage(totalUsage, requestBudget)
             this.onAgentEventCallback?.({
               type: 'system_notification',
               subtype: 'compact_complete',
@@ -812,17 +921,23 @@ Skill 使用契约：
           } catch (error) {
             this.consecutiveCompactFailures++
             console.error('Auto-compact failed:', error)
-            // 压缩失败也要通知前端复位状态，避免 UI 永久停在"正在压缩"
             this.onAgentEventCallback?.({
               type: 'system_notification',
               subtype: 'compact_complete',
               data: { message: '上下文压缩失败', success: false },
             })
-            // 继续执行，不中断工具循环
           }
         }
 
-        const toolDefinitions = this.tools.map(tool => tool.getDefinition())
+        if (this.config.verbose) {
+          console.log('[QueryEngine] Request context budget:', {
+            estimatedTokens: requestBudget.estimatedTokens,
+            effectiveWindow: requestBudget.effectiveWindow,
+            percentUsed: Math.round(requestBudget.usageRatio * 100),
+            serverPromptTokens: totalUsage?.lastPromptTokens,
+            messageCount: requestMessages.length,
+          })
+        }
         let assistantContent = ''
 
         const imageSavePromises: Promise<void>[] = []
@@ -834,7 +949,6 @@ Skill 使用契约：
         // 文件正文被清空，于是反复重读同一批文件（探查死循环），且被清空的历史
         // 会经 ChatService 写回并持久化，无法恢复。
         const requestBuildStartedAt = performance.now()
-        const requestMessages = this.buildRequestMessages()
         const serializedAt = performance.now()
         const serializedRequest = JSON.stringify(requestMessages)
         const requestStats = summarizeMessages(requestMessages)
@@ -909,6 +1023,36 @@ Skill 使用契约：
             }
           )
         } catch (error) {
+          if (
+            isContextWindowError(error) &&
+            !contextRecoveryAttempted &&
+            !this.abortController.signal.aborted
+          ) {
+            contextRecoveryAttempted = true
+            this.contextBudget.recordContextLimitFailure()
+            this.onAgentEventCallback?.({
+              type: 'system_notification',
+              subtype: 'compact_started',
+              data: { message: '上游上下文限制低于配置，正在执行一次紧急压缩' },
+            })
+            try {
+              await this.performAutoCompact()
+              this.contextBudget.markCompacted()
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_complete',
+                data: { message: '紧急压缩完成，正在重试', success: true },
+              })
+              continue
+            } catch (compactError) {
+              this.onAgentEventCallback?.({
+                type: 'system_notification',
+                subtype: 'compact_complete',
+                data: { message: '紧急压缩失败', success: false },
+              })
+              throw compactError
+            }
+          }
           if (!repetitionDetector.isDetected || this.abortController.signal.aborted) throw error
           response = { content: '', degenerate: true }
         } finally {
@@ -932,6 +1076,7 @@ Skill 使用契约：
 
         this.throwIfCancelled()
         assistantContent = response.content
+        this.contextBudget.recordServerUsage(requestBudget.estimatedTokens, response.usage)
         totalUsage = mergeUsage(totalUsage, response.usage)
         this.emitContextUsage(totalUsage)
 
@@ -1178,6 +1323,7 @@ Skill 使用契约：
           } else {
             consecutiveNoProgressTurns = 0
             progressSignalCount++
+            segmentProgressSignalCount++
           }
 
           // 相同的一组工具错误连续出现三轮，说明模型没有根据错误调整参数。
@@ -1321,20 +1467,24 @@ Skill 使用契约：
       // 循环未正常闭环（触顶或被死循环断路器打断），且最后一轮以工具调用结尾：
       // 此时 finalContent 仍为空，直接落一条空 assistant 消息会导致闭环失败、
       // 任务面板停在半途。补一轮"无工具"的收尾请求，让模型基于已有结果给出总结。
-      if (planExecutionRequired && iteration >= MAX_ITERATIONS) {
+      if (iteration >= MAX_TOTAL_ITERATIONS && !reachedNormalCompletion) {
+        executionBudgetReached = true
+      }
+
+      if (planExecutionRequired && executionBudgetReached) {
         throw new Error(
           '计划已批准，但模型未调用任何实际执行工具。请重新发送“继续”，让模型按照批准的计划执行。'
         )
       }
 
       const needsClosing =
-        (iteration >= MAX_ITERATIONS || loopBroken) && lastTurnHadToolCalls && !finalContent
+        (executionBudgetReached || loopBroken) && lastTurnHadToolCalls && !finalContent
       if (needsClosing) {
         console.warn('Tool loop ended without a final answer, requesting closing summary')
         this.throwIfCancelled()
         this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
         const closingResponse = await this.apiClient.sendMessageStream(
-          this.buildRequestMessages(),
+          this.buildRequestMessages([]),
           (delta: string, type: 'start' | 'delta' | 'end' | 'thinking') => {
             if (this.cancelled) return
             if (type === 'start') {
@@ -1358,12 +1508,14 @@ Skill 使用契约：
         this.throwIfCancelled()
         finalContent = closingResponse.content
         totalUsage = mergeUsage(totalUsage, closingResponse.usage)
-      } else if (iteration >= MAX_ITERATIONS) {
-        console.warn(`Reached maximum iterations (${MAX_ITERATIONS})`)
+      } else if (executionBudgetReached) {
+        console.warn(
+          `Reached execution budget (${executionSegment} segments, ${iteration} iterations)`
+        )
       }
 
       if (
-        iteration >= MAX_ITERATIONS &&
+        executionBudgetReached &&
         !reachedNormalCompletion &&
         terminationReason !== 'no_progress'
       ) {
@@ -1381,20 +1533,17 @@ Skill 使用契约：
         timestamp: Date.now(),
       }
       this.config.messages.push(finalMessage)
-      this.emitContextUsage(totalUsage)
+      const finalBudget = this.assessRequestBudget(this.buildRequestMessages())
+      this.emitContextUsage(totalUsage, finalBudget)
 
       // 计算上下文窗口使用百分比
       if (totalUsage) {
         const contextWindow = this.getConfiguredContextWindow()
-        const effectiveWindow = getEffectiveContextWindow(this.config.model, contextWindow)
 
         totalUsage.contextWindow = contextWindow
-        totalUsage.effectiveContextWindow = effectiveWindow
-        // 用最后一次 API 的 prompt + output，而非累计的 input/cache/output
-        const currentTokens =
-          totalUsage.lastTotalTokens || totalUsage.lastPromptTokens || totalUsage.inputTokens || 0
-        totalUsage.estimatedCurrentTokens = currentTokens
-        totalUsage.percentUsed = Math.min(Math.round((currentTokens / effectiveWindow) * 100), 100)
+        totalUsage.effectiveContextWindow = finalBudget.effectiveWindow
+        totalUsage.estimatedCurrentTokens = finalBudget.estimatedTokens
+        totalUsage.percentUsed = Math.min(Math.round(finalBudget.usageRatio * 100), 100)
       }
 
       this.lastTerminationReason = terminationReason
@@ -1413,6 +1562,7 @@ Skill 使用契约：
       performanceLog('query.termination', {
         terminationReason,
         iteration,
+        executionSegment,
         completed: isSuccessfulTermination(terminationReason),
         progressSignals: progressSignalCount,
         noProgressTurns: noProgressTurnCount,
@@ -1585,6 +1735,7 @@ Skill 使用契约：
    */
   clearMessages() {
     this.config.messages = []
+    this.contextBudget.reset()
   }
 
   /**
@@ -1610,38 +1761,51 @@ Skill 使用契约：
    * 写回 session 并持久化）。只有在估算 token 接近有效窗口时，才对副本做
    * 有损的 microcompact，避免模型丢失刚获取的工具结果而重复调用。
    */
-  private buildRequestMessages(): Message[] {
-    const contextWindow = this.getConfiguredContextWindow()
-    const effectiveWindow = getEffectiveContextWindow(this.config.model, contextWindow)
-    const estimated = estimateMessagesTokens(this.config.messages)
+  private buildRequestMessages(toolDefinitions = this.tools.map(tool => tool.getDefinition())): Message[] {
+    const messages = stripVirtualizedImages(this.config.messages)
+    const effectiveWindow = getEffectiveInputWindow(this.getConfiguredContextWindow())
+    const estimated = estimateRequestTokens(
+      messages,
+      this.requestSystemPrompt,
+      toolDefinitions
+    )
 
     if (!shouldMicrocompact(estimated, effectiveWindow)) {
-      return this.config.messages
+      return messages
     }
 
-    return microcompact(this.config.messages, 5)
+    return microcompact(messages, 5)
+  }
+
+  private assessRequestBudget(
+    messages: Message[],
+    toolDefinitions = this.tools.map(tool => tool.getDefinition())
+  ) {
+    return this.contextBudget.assess({
+      messages,
+      systemPrompt: this.requestSystemPrompt,
+      tools: toolDefinitions,
+      configuredWindow: this.getConfiguredContextWindow(),
+    })
   }
 
   /** 在每轮 API/工具结果后更新上下文估算，让长任务在结束前即可看到真实进度。 */
-  private emitContextUsage(usage: TokenUsage | undefined): void {
+  private emitContextUsage(
+    usage: TokenUsage | undefined,
+    snapshot = this.assessRequestBudget(this.buildRequestMessages())
+  ): void {
     const contextWindow = this.getConfiguredContextWindow()
-    const effectiveContextWindow = getEffectiveContextWindow(this.config.model, contextWindow)
-    const estimatedMessageTokens = estimateMessagesTokens(this.config.messages)
-    // 工具结果加入历史后，实时展示必须跟随当前消息估算值增长。
-    // 不能与上一轮请求的 lastTotalTokens 取 max，否则较小的工具结果会被
-    // 上一轮的 prompt+output 总量遮住，直到下一轮模型返回 usage 才突然跳变。
-    const estimatedCurrentTokens =
-      estimatedMessageTokens || usage?.lastPromptTokens || usage?.lastTotalTokens || 0
+    const estimatedCurrentTokens = snapshot.estimatedTokens
     this.onAgentEventCallback?.({
       type: 'context_usage',
       usage: {
         ...(usage || {}),
-        estimated: estimatedMessageTokens > 0 || typeof usage?.lastTotalTokens !== 'number',
+        estimated: true,
         contextWindow,
-        effectiveContextWindow,
+        effectiveContextWindow: snapshot.effectiveWindow,
         estimatedCurrentTokens,
         percentUsed: Math.min(
-          Math.round((estimatedCurrentTokens / effectiveContextWindow) * 100),
+          Math.round(snapshot.usageRatio * 100),
           100
         ),
       },
@@ -1885,8 +2049,12 @@ Skill 使用契约：
       provider: this.config.provider,
       model: summaryModel,
       effortLevel: 'low',
+      maxTokens: 6_000,
     })
-    const compactionMessages = [...this.config.messages]
+    const originalMessages = this.config.messages
+    const previousSummaries = originalMessages.filter(isCompactSummaryMessage)
+    const conversationMessages = originalMessages.filter(message => !isCompactSummaryMessage(message))
+    const compactionMessages = buildRollingCompactionInput(originalMessages)
     const tasks = this.config.taskManager?.listTasks() || []
     if (tasks.length) {
       compactionMessages.push({
@@ -1899,19 +2067,70 @@ Skill 使用契约：
         internal: true,
       })
     }
+    const summaryInput = microcompact(compactionMessages, 0)
     const { summaryMessage } = await compactConversation(
-      compactionMessages,
+      summaryInput,
       summaryApiClient,
       summaryModel
     )
 
-    // 保留最近 10 条消息
-    const keepRecentCount = 10
-    const recentMessages = this.config.messages.slice(-keepRecentCount)
+    // 保留最近 N 条消息（可配置，默认 10）
+    const keepRecentCount = Math.max(
+      5,
+      Math.min(50, this.config.compactKeepRecentMessages || 10)
+    )
+    const tools = this.tools.map(tool => tool.getDefinition())
+    const beforeTokens = estimateRequestTokens(
+      this.buildRequestMessages(tools),
+      this.requestSystemPrompt,
+      tools
+    )
+    const targetTokens = getEffectiveInputWindow(this.getConfiguredContextWindow()) * 0.55
+    let recentCount = keepRecentCount
+    let compactedMessages: Message[] = []
+    let afterTokens = Number.POSITIVE_INFINITY
 
-    // 替换消息数组：摘要 + 最近消息
-    this.config.messages = [summaryMessage, ...recentMessages]
+    while (recentCount >= 0) {
+      compactedMessages = replaceWithRollingSummary(
+        conversationMessages,
+        summaryMessage,
+        recentCount
+      )
+      this.config.messages = compactedMessages
+      afterTokens = estimateRequestTokens(
+        this.buildRequestMessages(tools),
+        this.requestSystemPrompt,
+        tools
+      )
+      if (afterTokens <= targetTokens || recentCount === 0) break
+      recentCount = recentCount <= 2 ? recentCount - 1 : Math.floor(recentCount / 2)
+    }
+
+    if (afterTokens >= beforeTokens * 0.9) {
+      this.config.messages = originalMessages
+      throw new Error(
+        `压缩未显著降低请求大小（${beforeTokens} -> ${afterTokens} tokens），已回滚`
+      )
+    }
+
+    if (this.config.verbose) {
+      console.log('[QueryEngine] Auto-compact completed:', {
+        originalMessageCount: compactionMessages.length,
+        previousSummaryCount: previousSummaries.length,
+        keptRecentCount: recentCount,
+        newMessageCount: this.config.messages.length,
+        beforeTokens,
+        afterTokens,
+      })
+    }
   }
+}
+
+function isContextWindowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /context window|context length|maximum context|too many tokens|input exceeds|input.*too (?:long|large)|token limit/i.test(
+    message
+  )
 }
 
 function summarizeMessages(messages: unknown[]): {

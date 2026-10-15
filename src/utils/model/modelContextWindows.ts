@@ -2,7 +2,9 @@
  * 获取模型的上下文窗口大小（单位：tokens）
  */
 export function getContextWindowForModel(_model: string, configuredWindow?: number): number {
-  return configuredWindow && configuredWindow > 0 ? configuredWindow : 1_000_000
+  // 兼容中转通常不会暴露真实上限。未配置时使用保守值，避免 UI 仍显示 60%
+  // 而请求已经超过上游窗口；用户可通过 Provider 配置显式覆盖。
+  return configuredWindow && configuredWindow > 0 ? configuredWindow : 200_000
 }
 
 /**

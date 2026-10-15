@@ -1,6 +1,40 @@
 import type { Message } from '../../types'
 import { getCompactPrompt } from './compactPrompt'
 
+export function isCompactSummaryMessage(message: Message): boolean {
+  return (
+    /^(compact-boundary|summary|deep-summary)-/.test(message.id) ||
+    message.content.startsWith('This session is being continued from a previous conversation')
+  )
+}
+
+/** 旧摘要只参与下一次摘要生成一次，不作为最近消息继续叠加。 */
+export function buildRollingCompactionInput(messages: Message[]): Message[] {
+  const summaries = messages.filter(isCompactSummaryMessage)
+  const conversation = messages.filter(message => !isCompactSummaryMessage(message))
+  const latestSummary = summaries[summaries.length - 1]
+  return latestSummary ? [latestSummary, ...conversation] : conversation
+}
+
+export function replaceWithRollingSummary(
+  messages: Message[],
+  summaryMessage: Message,
+  keepRecent: number
+): Message[] {
+  const conversation = messages.filter(message => !isCompactSummaryMessage(message))
+  let start = Math.max(0, conversation.length - keepRecent)
+  const first = conversation[start]
+  if (first?.role === 'tool' && first.toolCallId) {
+    for (let index = start - 1; index >= 0; index--) {
+      if (conversation[index].toolCalls?.some(call => call.id === first.toolCallId)) {
+        start = index
+        break
+      }
+    }
+  }
+  return [summaryMessage, ...conversation.slice(start)]
+}
+
 /**
  * 剥离消息中的图片，用 [image] 占位
  * 避免摘要请求消耗过多 tokens

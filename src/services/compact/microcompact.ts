@@ -1,4 +1,5 @@
 import type { Message } from '../../types'
+export { estimateMessagesTokens } from '../context/ContextBudgetManager'
 
 /**
  * 可压缩的工具列表
@@ -23,30 +24,6 @@ const PROTECTED_RESULT_PATTERN =
 
 const OLD_RESULT_HEAD_CHARS = 1000
 const OLD_RESULT_TAIL_CHARS = 400
-
-/**
- * 估算消息数组的 token 数（粗略：约 4 字符 = 1 token）。
- * 仅用于判断是否需要 microcompact，不追求精确。
- */
-export function estimateMessagesTokens(messages: Message[]): number {
-  let chars = 0
-
-  for (const message of messages) {
-    chars += message.content?.length || 0
-
-    for (const block of message.contentBlocks || []) {
-      chars += block.text?.length || 0
-      // base64 图片按其编码长度计入，避免大图被低估
-      chars += block.source?.data?.length || 0
-    }
-
-    for (const toolCall of message.toolCalls || []) {
-      chars += JSON.stringify(toolCall.input ?? toolCall.args ?? '').length
-    }
-  }
-
-  return Math.ceil(chars / 4)
-}
 
 /**
  * Microcompact - 便宜的预压缩
@@ -76,7 +53,9 @@ export function microcompact(messages: Message[], keepRecent = 5): Message[] {
   }
 
   // 保留最近 N 个，其余内容替换
-  const recentIndexes = new Set(toolResults.slice(-keepRecent).map(item => item.index))
+  const recentIndexes = new Set(
+    (keepRecent > 0 ? toolResults.slice(-keepRecent) : []).map(item => item.index)
+  )
   const toCompact = toolResults.filter(
     item => !recentIndexes.has(item.index) && !PROTECTED_RESULT_PATTERN.test(item.message.content || '')
   )

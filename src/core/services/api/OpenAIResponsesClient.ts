@@ -69,7 +69,7 @@ export class OpenAIResponsesClient implements ApiClient {
         effort: reasoningEffort,
         ...(reasoningSummaryEnabled ? { summary: 'auto' } : {}),
       }
-      console.log(`[OpenAIResponsesClient] Reasoning effort enabled: ${reasoningEffort}`)
+      console.log(`[OpenAIResponsesClient] Reasoning effort enabled: ${reasoningEffort}, summary: ${reasoningSummaryEnabled}`)
     } else {
       console.log(
         '[OpenAIResponsesClient] Reasoning NOT enabled - effortLevel:',
@@ -186,6 +186,20 @@ export class OpenAIResponsesClient implements ApiClient {
           const message =
             event.response?.error?.message || event.error?.message || event.message || 'Responses 流执行失败'
           throw new Error(message)
+        }
+
+        // === 推理内容：完整推理文本（工具调用前的说明） ===
+        if (type === 'response.output_item.added' && event.item?.type === 'reasoning') {
+          continue
+        }
+
+        if (type === 'response.reasoning_text.delta') {
+          const delta = typeof event.delta === 'string' ? event.delta : ''
+          if (delta) {
+            streamedContent = true
+            onStream(delta, 'thinking')
+          }
+          continue
         }
 
         if (type === 'response.reasoning_summary_text.delta') {

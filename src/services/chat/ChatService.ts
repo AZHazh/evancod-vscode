@@ -34,7 +34,10 @@ import { SkillManager } from '../skill/SkillManager'
 import { MemoryManager } from '../memory/MemoryManager'
 import { LLMMemoryExtractor } from '../memory/LLMMemoryExtractor'
 import { QueryCancelledError, QueryEngine } from '../../core/engine/QueryEngine'
-import { isSuccessfulTermination } from '../../core/engine/termination'
+import {
+  DEFAULT_MAX_EXECUTION_SEGMENTS,
+  isSuccessfulTermination,
+} from '../../core/engine/termination'
 import {
   readImageAsBase64,
   saveGeneratedImages,
@@ -45,7 +48,11 @@ import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
 import { createApiClient } from '../../core/services/api'
-import { compactConversation } from '../compact/compact'
+import {
+  buildRollingCompactionInput,
+  compactConversation,
+  replaceWithRollingSummary,
+} from '../compact/compact'
 import type { ToolProfileService } from '../tools/ToolProfileService'
 import {
   composeUserPrompt,
@@ -1329,6 +1336,13 @@ export class ChatService {
             session.id
           )
 
+          // 从配置中读取保留消息数量
+          const config = vscode.workspace.getConfiguration('evancod')
+          const keepRecentMessages = Math.max(
+            5,
+            Math.min(50, config.get<number>('compactKeepRecentMessages') || 10)
+          )
+
           const summaryModel = provider.models.haiku || this.getCurrentModel()
           const apiClient = createApiClient({
             provider,
@@ -1336,18 +1350,21 @@ export class ChatService {
             effortLevel: 'low',
           })
           const { summaryMessage } = await compactConversation(
-            this.buildRuntimeMessages(session),
+            buildRollingCompactionInput(this.buildRuntimeMessages(session)),
             apiClient,
             summaryModel
           )
 
           session.compactSummary = summaryMessage.content
-          // 真实裁剪旧历史：保留摘要和最近 10 条消息
-          session.messages = [summaryMessage, ...session.messages.slice(-10)]
+          session.messages = replaceWithRollingSummary(
+            session.messages,
+            summaryMessage,
+            keepRecentMessages
+          )
           session.updatedAt = Date.now()
           session.messageCount = session.messages.length
           this.getSessionRuntime(session.id).engine = undefined
-          result.message = '已使用模型生成会话摘要并压缩上下文'
+          result.message = `已使用模型生成会话摘要并压缩上下文（保留最近 ${keepRecentMessages} 条消息）`
 
           this.agentEventCallback?.(
             {
@@ -1662,6 +1679,17 @@ export class ChatService {
       console.warn(`[ChatService] ${warning}`)
     }
 
+    // 从配置中读取压缩后需要保留的最近消息数量
+    const config = vscode.workspace.getConfiguration('evancod')
+    const compactKeepRecentMessages = config.get<number>('compactKeepRecentMessages') || 10
+    const maxExecutionSegments = Math.max(
+      1,
+      Math.min(
+        50,
+        config.get<number>('maxExecutionSegments') || DEFAULT_MAX_EXECUTION_SEGMENTS
+      )
+    )
+
     // 创建 QueryEngine
     const engine = new QueryEngine({
       sessionId: session.id,
@@ -1685,6 +1713,8 @@ export class ChatService {
       imageProvider: this.providerService.getImageProvider() || undefined,
       toolSnapshot: toolProfile?.toolSnapshot,
       isDevelopment: this.context.extensionMode === vscode.ExtensionMode.Development,
+      compactKeepRecentMessages,
+      maxExecutionSegments,
     })
     runtime.engine = engine
 
