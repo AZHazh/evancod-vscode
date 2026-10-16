@@ -90,7 +90,6 @@ export const useProviderStore = defineStore('provider', () => {
       case 'provider.activated':
         activeProviderId.value = message.data.providerId
         loadProviders()
-        resetRuntime()
         break
       case 'runtime.state':
         activeProviderId.value = message.data.activeProviderId
@@ -108,8 +107,8 @@ export const useProviderStore = defineStore('provider', () => {
     vscode.postMessage({ type: 'provider.list.request' })
   }
 
-  function activateProvider(id: string) {
-    vscode.postMessage({ type: 'provider.activate', data: { id } })
+  function activateProvider(id: string, model?: string) {
+    vscode.postMessage({ type: 'provider.activate', data: { id, model } })
   }
 
   function setModel(model: string) {

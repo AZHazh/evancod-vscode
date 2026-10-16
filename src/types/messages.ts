@@ -411,6 +411,7 @@ export type WebviewToExtensionMessage =
       type: 'provider.activate'
       data: {
         id: string
+        model?: string
       }
     }
   | {

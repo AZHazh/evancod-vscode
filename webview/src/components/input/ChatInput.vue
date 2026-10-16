@@ -831,8 +831,11 @@ function selectEffortLevel(level: EffortLevel) {
 }
 
 function selectModel(providerId: string, model: string) {
-  if (providerStore.activeProviderId !== providerId) providerStore.activateProvider(providerId)
-  providerStore.setModel(model)
+  if (providerStore.activeProviderId !== providerId) {
+    providerStore.activateProvider(providerId, model)
+  } else {
+    providerStore.setModel(model)
+  }
   openPanel.value = null
 }
 

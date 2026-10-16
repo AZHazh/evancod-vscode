@@ -35,12 +35,12 @@ export async function handleProviderMessage(
   message: any,
   providerService: ProviderService,
   webview: vscode.Webview
-) {
+): Promise<boolean> {
   try {
     // new-api 同步消息
     if (message.type.startsWith('newapi.')) {
       await handleNewApiMessage(message, providerService, webview)
-      return
+      return true
     }
 
     // Provider 操作消息
@@ -75,6 +75,7 @@ export async function handleProviderMessage(
         await handleProviderTest(message.data.id, providerService, webview)
         break
     }
+    return true
   } catch (error) {
     // 发送错误消息到 Webview
     webview.postMessage({
@@ -84,6 +85,7 @@ export async function handleProviderMessage(
         code: 'PROVIDER_ERROR',
       },
     })
+    return false
   }
 }
 

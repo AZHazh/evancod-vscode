@@ -227,7 +227,17 @@ export class WebviewManager implements vscode.WebviewViewProvider {
         async message => {
           // Provider 相关消息
           if (message.type.startsWith('provider.') || message.type.startsWith('newapi.')) {
-            await handleProviderMessage(message, this.providerService, webview)
+            const handled = await handleProviderMessage(message, this.providerService, webview)
+            if (!handled) return
+            if (message.type === 'provider.activate') {
+              const requestedModel = message.data?.model
+              if (typeof requestedModel === 'string' && requestedModel.trim()) {
+                this.chatService.setRuntimeOptions({ model: requestedModel })
+              } else {
+                this.chatService.resetRuntime()
+              }
+              this.postRuntimeState()
+            }
             // 修改配置 / 切换激活项 / 同步导入后，激活 Provider 的快照可能已变，
             // 使 ChatService 缓存的 QueryEngine 失效，下次发消息按新协议重建。
             if (PROVIDER_MUTATION_TYPES.has(message.type)) {
