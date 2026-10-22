@@ -1,6 +1,7 @@
 import type { AgentServerEvent } from '../../../types/messages'
 import type { ToolCall } from '../../../types'
-import { Tool, type ToolDefinition, type ToolResult } from '../base/Tool'
+import { Tool, classifyToolOutcome, type ToolDefinition, type ToolResult } from '../base/Tool'
+import type { ToolOutcome } from '../../../types'
 import { BashTool, type BashExecutionContext } from './BashTool'
 import { performanceLog, performanceSnapshot } from '../../../utils/performanceLogger'
 import { prepareToolResultForContext } from './toolResultContext'
@@ -23,6 +24,7 @@ export interface ToolExecutionResult {
   toolName: string
   content: string
   isError: boolean
+  outcome?: ToolOutcome
   /**
    * 结构化内容块（可选）。当工具结果含图片时，携带 Anthropic 风格的
    * tool_result blocks（text + image），供 QueryEngine 存入 tool 消息，
@@ -88,6 +90,10 @@ export class ToolExecutor {
         )
       })
       const toolResult = await Promise.race([execution, cancelled])
+      const outcome: ToolOutcome = toolResult.success
+        ? 'success'
+        : toolResult.outcome || classifyToolOutcome(name, toolResult.error || toolResult.content, toolResult.metadata)
+      toolResult.outcome = outcome
       // 发送给前端的内容保留完整 metadata（含仅供 Webview 的预览数据，如图片 base64）
       const webviewContent = this.formatToolResultContent(toolResult, { forWebview: true })
       // 回灌给 LLM 的内容剔除 _webviewOnly 与 image（大体积 base64），避免灌入模型上下文
@@ -101,7 +107,7 @@ export class ToolExecutor {
       const llmContent = prepared.content
       // 若结果含图片，构造 vision block：文本占位 + image block，让模型真正"看见"图片
       const contentBlocks = this.buildVisionBlocks(toolResult, llmContent)
-      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success })
+      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content: webviewContent, isError: !toolResult.success, outcome })
       this.callbacks.notifyTaskListChange(name)
       performanceLog('tool.complete', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), resultBytes: llmContent.length, ...performanceSnapshot() })
       return {
@@ -110,13 +116,15 @@ export class ToolExecutor {
         content: llmContent,
         contentBlocks,
         isError: !toolResult.success,
+        outcome,
       }
     } catch (error) {
       const content = `Error: ${error instanceof Error ? error.message : '未知错误'}`
       performanceLog('tool.error', { toolName: name, toolUseId: id, durationMs: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error), ...performanceSnapshot() })
-      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true })
+      const outcome = classifyToolOutcome(name, content)
+      this.callbacks.emitEvent({ type: 'tool_result', toolUseId: id, content, isError: true, outcome })
       this.callbacks.notifyTaskListChange(name)
-      return { toolCallId: id, toolName: name, content, isError: true }
+      return { toolCallId: id, toolName: name, content, isError: true, outcome }
     } finally {
       this.activeToolUseIds.delete(id)
       this.cancellationWaiters.delete(id)
@@ -185,8 +193,9 @@ export class ToolExecutor {
 
   private emitErrorResult(toolUseId: string, toolName: string, error: string): ToolExecutionResult {
     const content = JSON.stringify({ success: false, error })
-    this.callbacks.emitEvent({ type: 'tool_result', toolUseId, content, isError: true })
-    return { toolCallId: toolUseId, toolName, content, isError: true }
+    const outcome = classifyToolOutcome(toolName, error)
+    this.callbacks.emitEvent({ type: 'tool_result', toolUseId, content, isError: true, outcome })
+    return { toolCallId: toolUseId, toolName, content, isError: true, outcome }
   }
 
   private resolveExecutionInput(toolName: string, input: unknown, updatedInput: unknown): unknown {
@@ -250,6 +259,7 @@ export class ToolExecutor {
         success: toolResult.success,
         content: toolResult.content,
         error: toolResult.error,
+        outcome: toolResult.outcome,
         metadata,
       })
     }

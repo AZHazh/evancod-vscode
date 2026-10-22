@@ -1899,6 +1899,7 @@ export class ChatService {
           // 避免同一份工具输出同时存在于 runtime messages 和会话展示状态中。
           content: summarizeToolResult(event.content),
           isError: event.isError,
+          outcome: event.outcome,
           timestamp: now,
           parentToolUseId: event.parentToolUseId,
         })

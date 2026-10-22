@@ -22,6 +22,7 @@ import type {
   TaskItem,
   AgentTaskNotification,
   GeneratedImageRef,
+  ToolOutcome,
 } from './index'
 
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
@@ -48,6 +49,7 @@ export type AgentServerEvent =
       toolUseId: string
       content: unknown
       isError: boolean
+      outcome?: ToolOutcome
       parentToolUseId?: string
     }
   | {

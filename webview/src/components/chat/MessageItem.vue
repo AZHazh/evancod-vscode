@@ -243,6 +243,11 @@ async function copyMessage() {
       :notification="message.notification"
       :result="'result' in message ? message.result : undefined"
       :result-error="'resultError' in message ? (message.resultError as boolean) : undefined"
+      :result-outcome="
+        'resultOutcome' in message
+          ? (message.resultOutcome as import('@/types').ToolOutcome)
+          : undefined
+      "
       @cancel-bash="chatStore.cancelBash"
     />
 
@@ -251,6 +256,7 @@ async function copyMessage() {
       :message-id="message.id"
       :content="message.content"
       :is-error="message.isError"
+      :outcome="message.outcome"
     />
 
     <PermissionRequestBlock

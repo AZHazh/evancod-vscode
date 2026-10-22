@@ -161,6 +161,9 @@ export const useChatStore = defineStore('chat', () => {
   let pendingThinkingDelta = ''
   const pendingBashUpdates = new Map<string, { stdout: string; stderr: string; taskId?: string }>()
 
+  // 会话隔离：每个会话独立的思考记录 ID，避免并发会话共用 activeThinkingMessageId
+  const thinkingMessageIdBySession = new Map<string, string | null>()
+
   // 性能优化：缓存 streaming-assistant / streaming-thinking / tool_use 消息的索引，
   // 避免 upsert 时每次都 O(n) findIndex。当 uiMessages 被全量重建时需重置为 -1 / clear。
   let streamingAssistantIndex = -1
@@ -354,7 +357,13 @@ export const useChatStore = defineStore('chat', () => {
       agentTaskNotifications.value = {}
       expandedStateById.value = {}
       openAgentResultToolUseId.value = null
-      activeThinkingMessageId.value = null
+      // 清理旧会话的思考记录 ID，但保留新会话自己的
+      const sessionId = currentSession.value?.id
+      if (sessionId) {
+        activeThinkingMessageId.value = thinkingMessageIdBySession.get(sessionId) || null
+      } else {
+        activeThinkingMessageId.value = null
+      }
       const model = currentSession.value.runtimeConfig?.model || providerStore.currentModel
       const contextWindow =
         providerStore.activeProvider?.modelContextWindows?.[model] ||
@@ -572,6 +581,7 @@ export const useChatStore = defineStore('chat', () => {
           toolUseId,
           content: message.content,
           isError: false,
+          outcome: (message as any).outcome,
           timestamp: message.timestamp,
         })
       }
@@ -875,8 +885,14 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'thinking':
         chatState.value = 'thinking'
+        // 会话隔离：使用独立的思考记录 ID 避免并发会话互相覆盖
+        const sessionId = currentSession.value?.id
+        if (sessionId) {
+          const messageId = event.blockId || 'streaming-thinking'
+          thinkingMessageIdBySession.set(sessionId, messageId)
+          activeThinkingMessageId.value = messageId // 同步更新全局引用（仅供当前会话使用）
+        }
         // 性能优化：thinking 增量高频，rAF 合并，每帧最多 upsert 一次
-        activeThinkingMessageId.value = event.blockId || 'streaming-thinking'
         scheduleThinkingBlockUpdate(event.text)
         break
 
@@ -918,6 +934,12 @@ export const useChatStore = defineStore('chat', () => {
         activeToolUseId.value = null
         activeToolName.value = null
         pendingPermission.value = null
+        // 清理当前会话的思考记录 ID
+        const sessionIdComplete = currentSession.value?.id
+        if (sessionIdComplete) {
+          thinkingMessageIdBySession.delete(sessionIdComplete)
+        }
+        activeThinkingMessageId.value = null
         tokenUsage.value = (event.usage || null) as TokenUsage | null
         // 兜底：若压缩因失败未收到 compact_complete，避免 UI 永久卡在"正在压缩"
         if (compactionStatus.value === 'compacting') {
@@ -1159,6 +1181,7 @@ export const useChatStore = defineStore('chat', () => {
       toolUseId: event.toolUseId,
       content: event.content,
       isError: event.isError,
+      outcome: event.outcome,
       timestamp: Date.now(),
       parentToolUseId: event.parentToolUseId,
     }
@@ -1428,6 +1451,11 @@ export const useChatStore = defineStore('chat', () => {
     // 在下一轮被 upsert 命中，导致新回答追加到旧位置产生顺序错乱
     finalizeCurrentThinkingSegment()
     finalizeCurrentAssistantSegment()
+    // 清理当前会话的思考记录 ID
+    const sessionIdStop = currentSession.value?.id
+    if (sessionIdStop) {
+      thinkingMessageIdBySession.delete(sessionIdStop)
+    }
     chatState.value = 'idle'
     pendingPermission.value = null
     for (const message of uiMessages.value) {

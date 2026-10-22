@@ -1,3 +1,5 @@
+import type { ToolOutcome } from '../../../types'
+
 /**
  * Tool 基类 - 所有工具的抽象基类
  *
@@ -118,6 +120,9 @@ export interface ToolResult {
    */
   error?: string
 
+  /** 工具失败时的语义分类，供 UI 区分无结果、拒绝、可重试和真正失败。 */
+  outcome?: ToolOutcome
+
   /**
    * 元数据（可选）
    * 例如：文件大小、修改时间等
@@ -210,4 +215,73 @@ export abstract class Tool {
       error: this.formatError(error),
     }
   }
+}
+
+/**
+ * 将工具失败文本归类为用户可理解的结果。具体工具可以显式提供 outcome；
+ * 这里只处理跨工具稳定的控制流和常见探查结果，未知错误保留为 error。
+ */
+export function classifyToolOutcome(
+  toolName: string,
+  error: unknown,
+  metadata?: Record<string, any>
+): ToolOutcome {
+  const text = String(error || '').toLowerCase()
+  if (
+    toolName === 'bash' &&
+    metadata?.exitCode === 1 &&
+    typeof metadata.command === 'string' &&
+    /(?:^|\s)(rg|grep|git\s+grep)\b/.test(metadata.command)
+  ) {
+    return 'no_match'
+  }
+  if (
+    metadata?.cancelled === true ||
+    text.includes('cancel') ||
+    text.includes('取消') ||
+    text.includes('query cancelled')
+  ) {
+    return 'cancelled'
+  }
+  if (
+    text.includes('permission denied') ||
+    text.includes('access denied') ||
+    text.includes('用户拒绝')
+  ) {
+    return 'rejected'
+  }
+  if (
+    text.includes('替换后内容与原内容相同') ||
+    text.includes('没有任何修改') ||
+    text.includes('no changes') ||
+    text.includes('nothing to do')
+  ) {
+    return 'no_change'
+  }
+  if (
+    text.includes('找不到指定的内容') ||
+    text.includes('未找到匹配') ||
+    text.includes('未找到符合条件') ||
+    (toolName.startsWith('git_') && text.includes('不是 git 仓库'))
+  ) {
+    return 'no_match'
+  }
+  if (
+    toolName.startsWith('task_') ||
+    text.includes('超时') ||
+    text.includes('timeout') ||
+    text.includes('不存在') ||
+    text.includes('不能为空') ||
+    text.includes('invalid') ||
+    text.includes('无效') ||
+    text.includes('需要提供') ||
+    text.includes('not found') ||
+    text.includes('未配置') ||
+    text.includes('未连接') ||
+    text.includes('请求失败') ||
+    text.includes('网络错误')
+  ) {
+    return 'retryable_error'
+  }
+  return 'error'
 }

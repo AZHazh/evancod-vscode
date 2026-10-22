@@ -6,6 +6,7 @@ import ImageGalleryModal from '@/components/common/ImageGalleryModal.vue'
 import { base64ToDataUrl } from '@/utils/imageAttachments'
 import { summarizeError } from '@/utils/errorSummary'
 import type { BashRuntimeState, AgentTaskNotification } from '@/types'
+import type { ToolOutcome } from '@/types'
 import { useChatStore } from '@/stores/chat'
 
 const props = defineProps<{
@@ -19,6 +20,7 @@ const props = defineProps<{
   notification?: AgentTaskNotification
   result?: unknown
   resultError?: boolean
+  resultOutcome?: ToolOutcome
 }>()
 
 const emit = defineEmits<{
@@ -65,7 +67,7 @@ const notificationText = computed(
 )
 const status = computed(() => {
   if (props.isPending) return 'pending'
-  if (props.resultError) return 'error'
+  if (props.resultError) return props.resultOutcome || 'error'
   if (
     notificationStatus.value === 'failed' ||
     bashStatus.value === 'error' ||
@@ -176,8 +178,12 @@ const summary = computed(() => {
 
 const resultSummary = computed(() => {
   if (status.value === 'pending') return ''
+  if (status.value === 'no_match') return '未找到匹配'
+  if (status.value === 'no_change') return '无变更'
+  if (status.value === 'rejected') return '已拒绝'
+  if (status.value === 'cancelled') return '已取消'
+  if (status.value === 'retryable_error') return '可重试'
   if (status.value === 'error') return 'Failed'
-  if (status.value === 'cancelled') return 'Cancelled'
   if (notificationStatus.value === 'completed') return 'Completed'
   if (bashStatus.value === 'completed') return 'Completed'
   return 'Submitted'
@@ -815,7 +821,10 @@ function downloadImage(image: GeneratedImage) {
       <div
         v-else-if="hasResult"
         class="tool-result-container"
-        :class="{ 'tool-result-container--error': resultError }"
+        :class="[
+          resultError ? 'tool-result-container--error' : '',
+          resultOutcome ? `tool-result-container--${resultOutcome}` : '',
+        ]"
       >
         <!-- 错误且能提炼主旨：默认只显示一句话，原始日志折叠 -->
         <template v-if="resultErrorSummary">
@@ -845,7 +854,7 @@ function downloadImage(image: GeneratedImage) {
         <!-- 无主旨（成功结果或无法提炼）：沿用截断预览 -->
         <template v-else>
           <div class="tool-result-header">
-            <span>{{ resultError ? '执行错误' : '执行结果' }}</span>
+            <span>{{ resultError ? (resultSummary || '执行结果') : '执行结果' }}</span>
             <button
               v-if="resultTruncated"
               class="tool-result-toggle"
@@ -1019,6 +1028,17 @@ function downloadImage(image: GeneratedImage) {
   border-color: color-mix(in srgb, var(--chat-color-error) 45%, var(--chat-color-border));
 }
 
+.tool-call--retryable_error {
+  border-color: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 45%, var(--chat-color-border));
+}
+
+.tool-call--no_match,
+.tool-call--no_change,
+.tool-call--rejected,
+.tool-call--cancelled {
+  border-color: color-mix(in srgb, var(--chat-color-outline) 45%, var(--chat-color-border));
+}
+
 .tool-call__header {
   display: flex;
   width: 100%;
@@ -1087,6 +1107,10 @@ function downloadImage(image: GeneratedImage) {
 .tool-call--error .tool-call__result-summary,
 .tool-call__error-icon {
   color: var(--chat-color-error);
+}
+
+.tool-call--retryable_error .tool-call__result-summary {
+  color: var(--vscode-charts-yellow, #cca700);
 }
 
 .tool-call__spinner {

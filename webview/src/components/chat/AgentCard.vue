@@ -107,10 +107,10 @@ const childToolCalls = computed(() => {
 
 // 创建一个 Map 来关联 tool_result 到 tool_use（跟 MessageList 逻辑一样）
 const toolResultMap = computed(() => {
-  const map = new Map<string, { content: unknown; isError: boolean }>()
+  const map = new Map<string, { content: unknown; isError: boolean; outcome?: import('@/types').ToolOutcome }>()
   chatStore.uiMessages.forEach(msg => {
     if (msg.type === 'tool_result') {
-      map.set(msg.toolUseId, { content: msg.content, isError: msg.isError })
+      map.set(msg.toolUseId, { content: msg.content, isError: msg.isError, outcome: msg.outcome })
     }
   })
   return map
@@ -119,13 +119,14 @@ const toolResultMap = computed(() => {
 // 增强的子工具调用列表，将 tool_result 数据注入到 tool_use 中
 const enhancedChildToolCalls = computed(() => {
   return childToolCalls.value.map(
-    (msg): ToolUseMessage & { result?: unknown; resultError?: boolean } => {
+    (msg): ToolUseMessage & { result?: unknown; resultError?: boolean; resultOutcome?: import('@/types').ToolOutcome } => {
       const result = toolResultMap.value.get(msg.toolUseId)
       if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
         return {
           ...msg,
           result: result.content,
           resultError: result.isError,
+          resultOutcome: result.outcome,
         }
       }
       return msg
@@ -193,6 +194,9 @@ const enhancedChildToolCalls = computed(() => {
             :result="'result' in toolCall ? toolCall.result : undefined"
             :result-error="
               'resultError' in toolCall ? (toolCall.resultError as boolean) : undefined
+            "
+            :result-outcome="
+              'resultOutcome' in toolCall ? toolCall.resultOutcome : undefined
             "
             @cancel-bash="chatStore.cancelBash"
           />

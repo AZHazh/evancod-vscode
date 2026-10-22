@@ -13,7 +13,8 @@ const chatStore = useChatStore()
 const scrollerRef = ref<{ $el: HTMLElement; scrollToBottom: () => void }>()
 // 指向内部滚动元素，scrollTop/scrollHeight/clientHeight 从这里读取
 const listRef = ref<HTMLElement>()
-const thinkingStartedAt = ref(Date.now())
+// 会话隔离：每个会话独立的思考开始时间，避免并发会话共用计时器
+const thinkingStartedAtBySession = new Map<string, number>()
 const now = ref(Date.now())
 const isPinnedToBottom = ref(true)
 const showBackToLatest = ref(false)
@@ -36,10 +37,13 @@ const agentToolUseIds = computed(() => {
 
 // 创建一个 Map 来关联 tool_result 到 tool_use
 const toolResultMap = computed(() => {
-  const map = new Map<string, { content: unknown; isError: boolean }>()
+  const map = new Map<
+    string,
+    { content: unknown; isError: boolean; outcome?: import('@/types').ToolOutcome }
+  >()
   messages.value.forEach(msg => {
     if (msg.type === 'tool_result') {
-      map.set(msg.toolUseId, { content: msg.content, isError: msg.isError })
+      map.set(msg.toolUseId, { content: msg.content, isError: msg.isError, outcome: msg.outcome })
     }
   })
   return map
@@ -108,12 +112,17 @@ const enhancedMessages = computed(() => {
       Object.assign(cached, msg)
       const result = toolResultMap.value.get(msg.toolUseId)
       if (result && (RESULT_INJECTABLE_TOOLS.has(msg.toolName) || isTaskTool(msg.toolName))) {
-        Object.assign(cached, msg, { result: result.content, resultError: result.isError })
+        Object.assign(cached, msg, {
+          result: result.content,
+          resultError: result.isError,
+          resultOutcome: result.outcome,
+        })
         nextItems.push(cached)
         return
       }
       if ('result' in cached) delete (cached as any).result
       if ('resultError' in cached) delete (cached as any).resultError
+      if ('resultOutcome' in cached) delete (cached as any).resultOutcome
       nextItems.push(cached)
       return
     }
@@ -152,9 +161,13 @@ const streamingVerb = computed(() => {
   if (chatStore.chatState === 'waiting_interaction') return '等待回答'
   return '思考中...'
 })
-const thinkingElapsedSeconds = computed(() =>
-  Math.max(0, Math.floor((now.value - thinkingStartedAt.value) / 1000))
-)
+const thinkingElapsedSeconds = computed(() => {
+  const sessionId = chatStore.currentSession?.id
+  if (!sessionId) return 0
+  const startedAt = thinkingStartedAtBySession.get(sessionId)
+  if (!startedAt) return 0
+  return Math.max(0, Math.floor((now.value - startedAt) / 1000))
+})
 const formattedThinkingElapsed = computed(() => formatElapsed(thinkingElapsedSeconds.value))
 const thinkingTokenCount = computed(() => {
   const activeThinking = enhancedMessages.value.find(
@@ -181,8 +194,11 @@ watch(
   () => chatStore.chatState,
   (state, previousState) => {
     if (state !== 'idle' && previousState === 'idle') {
-      thinkingStartedAt.value = Date.now()
-      now.value = Date.now()
+      const sessionId = chatStore.currentSession?.id
+      if (sessionId) {
+        thinkingStartedAtBySession.set(sessionId, Date.now())
+        now.value = Date.now()
+      }
     }
   }
 )

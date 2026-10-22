@@ -1,5 +1,14 @@
 import type { Plan } from '@/stores/plan'
 
+export type ToolOutcome =
+  | 'success'
+  | 'no_match'
+  | 'no_change'
+  | 'rejected'
+  | 'cancelled'
+  | 'retryable_error'
+  | 'error'
+
 export interface SlashCommand {
   name: string
   description?: string
@@ -265,6 +274,7 @@ export type UIMessage =
       toolUseId: string
       content: unknown
       isError: boolean
+      outcome?: ToolOutcome
       timestamp: number
       parentToolUseId?: string
     }
@@ -400,6 +410,7 @@ export type AgentServerEvent =
       toolUseId: string
       content: unknown
       isError: boolean
+      outcome?: ToolOutcome
       parentToolUseId?: string
     }
   | {

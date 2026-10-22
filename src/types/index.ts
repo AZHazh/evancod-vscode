@@ -8,6 +8,16 @@ export interface ContentBlock {
   }
 }
 
+/** 工具结果的用户可见语义。isError 仅表示工具没有成功，不再承担展示等级。 */
+export type ToolOutcome =
+  | 'success'
+  | 'no_match'
+  | 'no_change'
+  | 'rejected'
+  | 'cancelled'
+  | 'retryable_error'
+  | 'error'
+
 export interface AttachmentContext {
   path: string
   name: string
@@ -190,6 +200,7 @@ export type AgentTranscriptBlock =
       toolUseId: string
       content: unknown
       isError: boolean
+      outcome?: ToolOutcome
       timestamp: number
       parentToolUseId?: string
     }

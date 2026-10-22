@@ -2,12 +2,26 @@
 import { computed } from 'vue'
 import { summarizeError, extractErrorText } from '@/utils/errorSummary'
 import { useChatStore } from '@/stores/chat'
+import type { ToolOutcome } from '@/types'
 
 const props = defineProps<{
   messageId: string
   content: unknown
   isError: boolean
+  outcome?: ToolOutcome
 }>()
+
+const isSevere = computed(() => props.outcome === undefined || props.outcome === 'error')
+const outcomeLabel = computed(() => {
+  switch (props.outcome) {
+    case 'no_match': return '未找到匹配'
+    case 'no_change': return '无变更'
+    case 'rejected': return '已拒绝'
+    case 'cancelled': return '已取消'
+    case 'retryable_error': return '可重试'
+    default: return 'Tool error'
+  }
+})
 
 // 预览上限：超过则截断，避免把整段日志/报错全量塞进 DOM 做布局
 const MAX_CHARS = 4000
@@ -39,9 +53,9 @@ const displayText = computed(() =>
 </script>
 
 <template>
-  <div class="tool-result" :class="{ 'tool-result--error': isError }">
+  <div class="tool-result" :class="{ 'tool-result--error': isSevere, 'tool-result--soft': !isSevere }">
     <div class="tool-result__header">
-      <span>{{ isError ? 'Tool error' : 'Tool result' }}</span>
+      <span>{{ isError ? outcomeLabel : 'Tool result' }}</span>
       <button
         v-if="hasSummary"
         class="tool-result__toggle"
@@ -81,6 +95,11 @@ const displayText = computed(() =>
 .tool-result--error {
   border-color: color-mix(in srgb, var(--chat-color-error) 50%, transparent);
   background: color-mix(in srgb, var(--chat-color-error-container) 35%, var(--chat-color-surface-container-low));
+}
+
+.tool-result--soft {
+  border-color: color-mix(in srgb, var(--chat-color-outline) 40%, var(--chat-color-border));
+  background: var(--chat-color-surface-container-low);
 }
 
 .tool-result__header {
