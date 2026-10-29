@@ -802,7 +802,12 @@ Skill 使用契约：
         isExplicitContinuationRequest(content) &&
         (this.config.taskManager
           ?.listTasks()
-          .some(task => task.status === 'pending' || task.status === 'in_progress') ??
+          .some(
+            task =>
+              task.status === 'pending' ||
+              task.status === 'in_progress' ||
+              task.completion?.state === 'reviewing'
+          ) ??
           false)
       const enqueueTaskCompletionReview = () => {
         taskCompletionReviewRequested = true
@@ -819,7 +824,8 @@ Skill 使用契约：
             '仅在构建发布链路、跨模块公共契约受影响或用户明确要求时运行全量构建/打包。\n' +
             '接下来的回复以工具调用开始，二选一：\n' +
             'A. 发现未满足的要求：调用 task_update 将对应任务设为 in_progress，然后直接修复并验证。\n' +
-            'B. 全部满足：对 completion.state=reviewing 的任务调用 task_update completed（沿用原证据），' +
+            'B. 全部满足：对 completion.state=reviewing 的任务调用 task_update completed（省略 completionEvidence 自动沿用已存证据），' +
+            '该工具调用即完成复核，无需等待额外系统复核器；已 passed 的任务不再提交。' +
             '再调用 task_list，然后给出最终总结。\n\n' +
             this.buildTaskReviewContext(),
           timestamp: Date.now(),
@@ -839,9 +845,7 @@ Skill 使用契约：
                 task =>
                   task.status === 'pending' ||
                   task.status === 'in_progress' ||
-                  (taskCompletionReviewRequested &&
-                    task.status === 'completed' &&
-                    task.completion?.state === 'reviewing')
+                  (task.status === 'completed' && task.completion?.state === 'reviewing')
               ) || []
           const shouldContinue = shouldContinueExecutionSegment({
             taskWorkflowActive,
@@ -1097,7 +1101,7 @@ Skill 使用契约：
           }
           this.onAgentEventCallback?.({
             type: 'system_notification',
-            subtype: 'compact_complete',
+            subtype: 'runtime_notice',
             data: { message: '检测到模型输出重复，已丢弃该段输出并重试', success: true },
           })
           this.config.messages.push({
@@ -1313,7 +1317,7 @@ Skill 使用契约：
               console.warn('Detected tool-call loop with no progress, forcing final answer')
               this.onAgentEventCallback?.({
                 type: 'system_notification',
-                subtype: 'compact_complete',
+                subtype: 'runtime_notice',
                 data: { message: '检测到重复探查，已中断循环并要求模型给出结论', success: true },
               })
               loopBroken = true
@@ -1394,9 +1398,7 @@ Skill 使用契约：
               task =>
                 task.status === 'pending' ||
                 task.status === 'in_progress' ||
-                (taskCompletionReviewRequested &&
-                  task.status === 'completed' &&
-                  task.completion?.state === 'reviewing')
+                (task.status === 'completed' && task.completion?.state === 'reviewing')
             ) || []
         if (
           taskWorkflowActive &&
@@ -1417,10 +1419,14 @@ Skill 使用契约：
             id: this.generateId(),
             role: 'user',
             content:
-              '[内部任务续跑] 任务列表仍有 ' +
-              unfinishedTasks.length +
-              ' 项未完成。请调用工具继续当前 in_progress 或下一项任务，完成实现与验证后更新任务状态。' +
-              '若遇到必须由用户处理的阻塞，直接说明阻塞原因即可。',
+              '[内部任务续跑] 当前待实现任务 ' +
+              unfinishedTasks.filter(task => task.status !== 'completed').length +
+              ' 项，待复核任务 ' +
+              unfinishedTasks.filter(task => task.completion?.state === 'reviewing').length +
+              ' 项。请调用工具继续实现或核查；对于 reviewing 任务，检查工作区和验证结果后再次提交 task_update completed 即可通过复核，' +
+              '可省略 completionEvidence 自动沿用已存证据，无需等待额外系统复核器。' +
+              '若遇到必须由用户处理的阻塞，直接说明阻塞原因即可。\n\n' +
+              this.buildTaskReviewContext(),
             timestamp: Date.now(),
             internal: true,
           })
@@ -2015,16 +2021,14 @@ Skill 使用契约：
         const requirements = (this.config.taskManager?.getRequirementsForTask(task) || [])
           .map(item => `  - [${item.id}] ${item.sourceText}`)
           .join('\n')
-        const evidence = (task.completion?.evidence || [])
-          .map(item => `  - [${item.requirementId}] ${item.summary}`)
-          .join('\n')
         return [
           `任务 ${task.id}: ${task.subject}`,
+          `任务状态: ${task.status}`,
           `完成状态: ${task.completion?.state || 'none'}`,
           '继承的原始要求:',
           requirements || '  - 无',
           '已提交证据（仅作线索，必须自行核查）:',
-          evidence || '  - 无',
+          JSON.stringify(task.completion?.evidence || [], null, 2),
         ].join('\n')
       })
       .join('\n\n')
@@ -2096,6 +2100,19 @@ Skill 使用契约：
         summaryMessage,
         recentCount
       )
+      if (tasks.length) {
+        compactedMessages.push({
+          id: `compact-task-recovery-${Date.now()}`,
+          role: 'user',
+          content:
+            '[压缩后的实时任务状态，以此为准，不要从摘要推测状态。]\n' +
+            this.buildTaskReviewContext() +
+            '\nreviewing 需要你检查工作区和验证结果，再调用 task_update completed 即可通过复核；' +
+            '省略 completionEvidence 会沿用已存证据。无需等待额外系统复核器，已 passed 的任务无需重做。',
+          timestamp: Date.now(),
+          internal: true,
+        })
+      }
       this.config.messages = compactedMessages
       afterTokens = estimateRequestTokens(
         this.buildRequestMessages(tools),
@@ -2112,6 +2129,9 @@ Skill 使用契约：
         `压缩未显著降低请求大小（${beforeTokens} -> ${afterTokens} tokens），已回滚`
       )
     }
+
+    // 压缩后模型可能需要重新读取证据，不能回放已被摘要替换的旧探查结果。
+    this.toolOrchestrator?.resetDedup()
 
     if (this.config.verbose) {
       console.log('[QueryEngine] Auto-compact completed:', {

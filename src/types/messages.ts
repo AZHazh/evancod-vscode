@@ -110,6 +110,7 @@ export type AgentServerEvent =
         | 'task_notification'
         | 'compact_started'
         | 'compact_complete'
+        | 'runtime_notice'
       message?: string
       data?: AgentTaskNotification | Record<string, unknown>
     }

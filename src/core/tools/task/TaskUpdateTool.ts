@@ -38,7 +38,8 @@ export class TaskUpdateTool extends Tool {
 - 开始执行任务前，必须将对应任务标记为 in_progress。
 - 只有工作完全完成时才能标记 completed；测试失败、实现不完整、文件缺失或仍有阻塞时不能标记 completed。
 - 任务继承了用户要求时，标记 completed 必须用 completionEvidence 逐项说明满足方式和证据位置；不得只写“已完成”或“测试通过”。
-- 首次 completed 只提交证据并进入 reviewing；完成复核确认实际满足后，使用相同证据再次提交 completed，才会通过复核。
+- 首次 completed 只提交证据并进入 reviewing；由你检查实际工作区和验证结果，确认满足后再次提交 completed，即通过复核。省略 completionEvidence 会沿用已存证据，无需等待额外系统复核器。
+- 已通过复核的任务重复提交 completed 会保持 passed。
 - 标记 completed 后，必须调用 task_list 查找下一项可执行任务或新解锁任务。`
 
   /**
@@ -107,7 +108,7 @@ export class TaskUpdateTool extends Tool {
           completionEvidence: {
             type: 'array',
             description:
-              '完成任务时逐项提交的证据。requirementId 必须覆盖任务继承的每个用户要求；summary 说明如何满足，refs 可列出文件路径、工具调用 ID 或测试命令。',
+              '首次完成任务时逐项提交的证据。复核时可省略并沿用已存证据。requirementId 必须覆盖任务继承的每个用户要求；summary 说明如何满足，refs 可列出文件路径、工具调用 ID 或测试命令。',
             items: {
               type: 'object',
               description: '单条用户要求的完成证据',
@@ -153,10 +154,11 @@ export class TaskUpdateTool extends Tool {
       }
 
       // 检查任务是否存在
-      const existingTask = this.taskManager.getTask(args.taskId)
-      if (!existingTask) {
+      const task = this.taskManager.getTask(args.taskId)
+      if (!task) {
         return this.createErrorResult(`任务不存在: ${args.taskId}`)
       }
+      const existingTask = { ...task }
 
       // 验证状态转换
       if (args.status) {
@@ -261,6 +263,7 @@ export class TaskUpdateTool extends Tool {
 任务 ID: ${updatedTask.id}
 标题: ${updatedTask.subject}
 当前状态: ${this.formatStatus(updatedTask.status)}
+完成复核: ${updatedTask.completion?.state || 'none'}
 更新时间: ${updatedTask.updatedAt}${blockedByInfo}${blocksInfo}
 
 变更内容:
@@ -270,7 +273,9 @@ export class TaskUpdateTool extends Tool {
 
       if (args.status === 'completed' && updatedTask.completion?.state === 'reviewing') {
         content +=
-          '\n\n完成证据已提交，任务正在等待最终复核。复核必须检查实际工作区、引用文件、差异和验证结果。'
+          '\n\n完成证据已提交，尚待你复核。请检查实际工作区、引用文件、差异和验证结果；确认满足后，再调用 task_update({ taskId: "' +
+          updatedTask.id +
+          '", status: "completed" })，即可转为 passed。省略 completionEvidence 会自动沿用已存证据，无需等待额外系统复核器。'
       } else if (args.status === 'completed') {
         content +=
           '\n\nTask completed. Call task_list now to find your next available task or see if your work unblocked others.'

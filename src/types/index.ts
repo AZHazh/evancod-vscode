@@ -173,6 +173,14 @@ export type AgentTranscriptBlock =
   | { id: string; type: 'thinking'; content: string; timestamp: number }
   | {
       id: string
+      type: 'context_compaction'
+      status: 'compacting' | 'completed' | 'failed'
+      message: string
+      timestamp: number
+      automatic?: boolean
+    }
+  | {
+      id: string
       type: 'image_generation'
       imageId: string
       timestamp: number

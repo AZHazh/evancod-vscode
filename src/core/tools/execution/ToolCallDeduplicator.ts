@@ -16,8 +16,8 @@ const READ_ONLY_TOOLS = new Set([
 ])
 
 /**
- * 会让文件系统状态变化的工具。执行后必须清空缓存，
- * 否则改完文件再读会拿到过期内容。
+ * 会改变文件或任务状态的工具。执行后必须清空缓存，
+ * 否则再次查询会拿到过期内容。
  */
 const MUTATING_TOOLS = new Set([
   'edit_file',
@@ -27,6 +27,8 @@ const MUTATING_TOOLS = new Set([
   'copy_file',
   'bash',
   'notebook_edit',
+  'task_create',
+  'task_update',
 ])
 
 /**

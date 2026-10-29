@@ -323,13 +323,18 @@ export class TaskManager {
     if (updates.status !== undefined) {
       // 状态验证
       const previousStatus = task.status
+      const previousCompletion = task.completion
+      // 复核与重试沿用持久化证据，不依赖模型在长会话中逐字重建。
+      const completionEvidence =
+        updates.completionEvidence ??
+        (previousStatus === 'completed' ? previousCompletion?.evidence : undefined)
       this.validateStatusTransition(task.status, updates.status)
       if (updates.status === 'completed') {
-        const missing = this.findMissingCompletionEvidence(task, updates.completionEvidence)
+        const missing = this.findMissingCompletionEvidence(task, completionEvidence)
         if (missing.length) {
           task.completion = {
             state: 'failed',
-            evidence: updates.completionEvidence,
+            evidence: completionEvidence,
             issues: [`以下用户要求缺少完成证据: ${missing.join(', ')}`],
             requestedAt: now,
           }
@@ -343,17 +348,14 @@ export class TaskManager {
       }
       task.status = updates.status
       if (updates.status === 'completed') {
+        const passed =
+          previousStatus === 'completed' &&
+          (previousCompletion?.state === 'reviewing' || previousCompletion?.state === 'passed')
         task.completion = {
-          state:
-            previousStatus === 'completed' && task.completion?.state === 'reviewing'
-              ? 'passed'
-              : 'reviewing',
-          evidence: updates.completionEvidence,
-          requestedAt: now,
-          reviewedAt:
-            previousStatus === 'completed' && task.completion?.state === 'reviewing'
-              ? now
-              : undefined,
+          state: passed ? 'passed' : 'reviewing',
+          evidence: completionEvidence,
+          requestedAt: previousStatus === 'completed' ? previousCompletion?.requestedAt || now : now,
+          reviewedAt: passed ? previousCompletion?.reviewedAt || now : undefined,
         }
       } else if (updates.status === 'in_progress' && previousStatus === 'completed') {
         task.completion = {

@@ -5,6 +5,7 @@ import type { UIMessage, MessageSkill, InlineMessageSegment } from '@/types'
 import { useChatStore } from '@/stores/chat'
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
+import CompactionStatus from './CompactionStatus.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ToolResultBlock from './ToolResultBlock.vue'
 import PermissionRequestBlock from './PermissionRequestBlock.vue'
@@ -209,6 +210,12 @@ async function copyMessage() {
         </div>
       </div>
     </div>
+
+    <CompactionStatus
+      v-else-if="message.type === 'context_compaction'"
+      :status="message.status"
+      :message="message.message"
+    />
 
     <ThinkingBlock
       v-else-if="message.type === 'thinking'"

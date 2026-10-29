@@ -152,9 +152,10 @@ ${taskLines.join('\n\n')}
 - ⏳ 待开始: ${stats.pending} 个 (其中 ${stats.available} 个可立即执行)
 - 🔄 进行中: ${stats.inProgress} 个
 - ✅ 已完成: ${stats.completed} 个
+- 待复核: ${stats.reviewing} 个（completed 中尚未通过复核的任务）
 - 总计: ${stats.total} 个
 
-提示: 使用 task_get 查看任务详情，使用 task_update 更新任务状态。`
+提示: 使用 task_get 查看任务详情，使用 task_update 更新任务状态。${stats.reviewing ? '待复核任务需要你检查实际工作区与验证结果，确认后再次提交 task_update completed；可省略 completionEvidence 沿用已存证据。' : ''}`
 
       return this.createSuccessResult(content, {
         totalCount: tasks.length,
@@ -184,6 +185,7 @@ ${taskLines.join('\n\n')}
     pending: number
     inProgress: number
     completed: number
+    reviewing: number
     available: number
   } {
     const activeTasks = tasks.filter(task => task.status !== 'deleted')
@@ -193,6 +195,7 @@ ${taskLines.join('\n\n')}
       pending: activeTasks.filter(task => task.status === 'pending').length,
       inProgress: activeTasks.filter(task => task.status === 'in_progress').length,
       completed: activeTasks.filter(task => task.status === 'completed').length,
+      reviewing: activeTasks.filter(task => task.completion?.state === 'reviewing').length,
       available: activeTasks.filter(
         task => task.status === 'pending' && task.blockedBy.length === 0
       ).length,

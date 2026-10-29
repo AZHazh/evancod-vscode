@@ -2,7 +2,7 @@
   "name": "vscode-evancod",
   "displayName": "Evancod",
   "description": "AI-powered coding agent for VSCode",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "publisher": "evancod",
   "icon": "resources/extension-icon.png",
   "engines": {
@@ -141,7 +141,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test:unit": "tsc -p tsconfig.tests.json && node --test .tmp/out-tests/regression-tests/agent-runtime.test.js .tmp/out-tests/regression-tests/memory.test.js .tmp/out-tests/regression-tests/repetition.test.js",
+    "test:unit": "tsc -p tsconfig.tests.json && node --test .tmp/out-tests/regression-tests/agent-runtime.test.js .tmp/out-tests/regression-tests/memory.test.js .tmp/out-tests/regression-tests/repetition.test.js .tmp/out-tests/regression-tests/task-workflow.test.js",
     "test": "node ./out/test/runTest.js",
     "install:webview": "cd webview && npm install",
     "build:webview": "npm run install:webview && cd webview && npm run build",

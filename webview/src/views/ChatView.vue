@@ -4,7 +4,6 @@ import { useChatStore } from '@/stores/chat'
 import { useTaskStore } from '@/stores/task'
 import TopBar from '@/components/header/TopBar.vue'
 import MessageList from '@/components/chat/MessageList.vue'
-import CompactionStatus from '@/components/chat/CompactionStatus.vue'
 import ChatInput from '@/components/input/ChatInput.vue'
 import TaskPanel from '@/components/task/TaskPanel.vue'
 import Modal from '@/components/common/Modal.vue'
@@ -81,7 +80,6 @@ onUnmounted(() => {
     <!-- Task 面板（对话区内，输入框上方，可关闭） -->
     <TaskPanel v-if="showTaskPanel" class="task-panel-inline" @close="taskPanelDismissed = true" />
 
-    <CompactionStatus />
     <ChatInput />
 
     <Modal v-model="showSettings" title="设置" size="large" :show-footer="false">

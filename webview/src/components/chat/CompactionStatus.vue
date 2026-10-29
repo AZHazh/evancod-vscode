@@ -1,23 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Copy, LoaderCircle } from 'lucide-vue-next'
-import { useChatStore } from '@/stores/chat'
+import { Copy, LoaderCircle, CircleAlert } from 'lucide-vue-next'
 
-const chatStore = useChatStore()
-
-const status = computed(() => chatStore.compactionStatus)
-const isVisible = computed(() => status.value !== 'idle')
-const isCompacting = computed(() => status.value === 'compacting')
-const label = computed(() => (isCompacting.value ? '上下文正在压缩' : '上下文已自动压缩'))
+const props = defineProps<{
+  status: 'compacting' | 'completed' | 'failed'
+  message: string
+}>()
+const isCompacting = computed(() => props.status === 'compacting')
 </script>
 
 <template>
-  <div v-if="isVisible" class="compaction-status" :class="{ 'is-completed': !isCompacting }">
+  <div class="compaction-status" :class="{ 'is-failed': status === 'failed' }" role="status">
     <span class="line" />
     <div class="content">
       <LoaderCircle v-if="isCompacting" class="icon spinning" :size="14" />
+      <CircleAlert v-else-if="status === 'failed'" class="icon" :size="14" />
       <Copy v-else class="icon" :size="14" />
-      <span>{{ label }}</span>
+      <span>{{ message }}</span>
     </div>
     <span class="line" />
   </div>
@@ -33,7 +32,7 @@ const label = computed(() => (isCompacting.value ? '上下文正在压缩' : '�
   padding: 0 12px;
   color: var(--vscode-descriptionForeground, #9ca3af);
   font-size: 12px;
-  line-height: 1;
+  line-height: 1.5;
   flex: 0 0 auto;
 }
 
@@ -47,7 +46,11 @@ const label = computed(() => (isCompacting.value ? '上下文正在压缩' : '�
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  white-space: nowrap;
+  min-width: 0;
+}
+
+.is-failed {
+  color: var(--vscode-errorForeground, #f48771);
 }
 
 .icon {

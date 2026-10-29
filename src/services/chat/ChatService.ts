@@ -53,6 +53,7 @@ import {
   compactConversation,
   replaceWithRollingSummary,
 } from '../compact/compact'
+import { recordCompactionEvent } from '../compact/compactionEvents'
 import type { ToolProfileService } from '../tools/ToolProfileService'
 import {
   composeUserPrompt,
@@ -1327,14 +1328,12 @@ export class ChatService {
         result.message = '压缩失败：未配置可用 Provider'
       } else {
         try {
-          this.agentEventCallback?.(
-            {
-              type: 'system_notification',
-              subtype: 'compact_started',
-              data: { message: '上下文正在压缩' },
-            },
-            session.id
-          )
+          const startedEvent = this.recordAgentEvent(session, {
+            type: 'system_notification',
+            subtype: 'compact_started',
+            data: { message: '上下文正在压缩', automatic: false },
+          })
+          this.agentEventCallback?.(startedEvent, session.id)
 
           // 从配置中读取保留消息数量
           const config = vscode.workspace.getConfiguration('evancod')
@@ -1366,25 +1365,20 @@ export class ChatService {
           this.getSessionRuntime(session.id).engine = undefined
           result.message = `已使用模型生成会话摘要并压缩上下文（保留最近 ${keepRecentMessages} 条消息）`
 
-          this.agentEventCallback?.(
-            {
-              type: 'system_notification',
-              subtype: 'compact_complete',
-              data: { message: '上下文已自动压缩' },
-            },
-            session.id
-          )
+          const completedEvent = this.recordAgentEvent(session, {
+            type: 'system_notification',
+            subtype: 'compact_complete',
+            data: { message: '上下文已压缩', automatic: false, success: true },
+          })
+          this.agentEventCallback?.(completedEvent, session.id)
         } catch (error) {
           result.message = `压缩失败：${error instanceof Error ? error.message : '未知错误'}`
-          // 通知前端复位压缩状态，避免 UI 永久卡在"正在压缩"
-          this.agentEventCallback?.(
-            {
-              type: 'system_notification',
-              subtype: 'compact_complete',
-              data: { message: result.message, success: false },
-            },
-            session.id
-          )
+          const failedEvent = this.recordAgentEvent(session, {
+            type: 'system_notification',
+            subtype: 'compact_complete',
+            data: { message: result.message, automatic: false, success: false },
+          })
+          this.agentEventCallback?.(failedEvent, session.id)
         }
       }
     }
@@ -2033,6 +2027,11 @@ export class ChatService {
       case 'system_notification':
         if (event.subtype === 'task_notification') {
           this.taskNotificationQueue.enqueue(session, event.data, () => this.generateId())
+        } else if (event.subtype === 'compact_started' || event.subtype === 'compact_complete') {
+          this.finalizeCurrentThinkingSegment(session)
+          this.finalizeCurrentStreamingAssistant(session)
+          session.transcript ||= []
+          emittedEvent = recordCompactionEvent(session.transcript, event, () => this.generateId(), now)
         }
         break
 
@@ -2211,6 +2210,12 @@ export class ChatService {
 
     // Finalize 最后一段 thinking（如果还在 streaming 状态）
     this.finalizeCurrentThinkingSegment(session)
+    for (const block of session.transcript || []) {
+      if (block.type === 'context_compaction' && block.status === 'compacting') {
+        block.status = 'failed'
+        block.message = '上下文压缩已中断'
+      }
+    }
   }
 
   private expirePendingTranscript(session: Session): void {

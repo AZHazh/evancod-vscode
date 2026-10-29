@@ -147,7 +147,6 @@ export const useChatStore = defineStore('chat', () => {
   const expandedStateById = ref<Record<string, boolean>>({})
   const openAgentResultToolUseId = ref<string | null>(null)
   const activeThinkingMessageId = ref<string | null>(null)
-  const compactionStatus = ref<'idle' | 'compacting' | 'completed'>('idle')
 
   // ===== 性能优化：流式更新 rAF 批量合并 =====
   // 高频事件（content_delta / thinking / bash_output）不再每个 token 都触发
@@ -904,22 +903,17 @@ export const useChatStore = defineStore('chat', () => {
       case 'system_notification':
         if (event.subtype === 'task_notification') {
           applyTaskNotification(event.data)
-        } else if (event.subtype === 'compact_started') {
-          compactionStatus.value = 'compacting'
-        } else if (event.subtype === 'compact_complete') {
-          // 压缩失败时（success===false）直接复位，不展示"已压缩"
-          const succeeded = (event.data as Record<string, unknown>)?.success !== false
-          if (!succeeded) {
-            compactionStatus.value = 'idle'
-          } else {
-            compactionStatus.value = 'completed'
-            // 3秒后自动隐藏
-            setTimeout(() => {
-              if (compactionStatus.value === 'completed') {
-                compactionStatus.value = 'idle'
-              }
-            }, 3000)
-          }
+        } else if (event.subtype === 'compact_started' || event.subtype === 'compact_complete') {
+          flushStreamingRafs()
+          finalizeCurrentThinkingSegment()
+          finalizeCurrentAssistantSegment()
+          const block = (event.data as Record<string, unknown>)?.compaction as
+            | Extract<UIMessage, { type: 'context_compaction' }>
+            | undefined
+          if (!block || block.type !== 'context_compaction') break
+          const index = uiMessages.value.findIndex(message => message.id === block.id)
+          if (index === -1) uiMessages.value.push({ ...block })
+          else uiMessages.value.splice(index, 1, { ...block })
         }
         break
 
@@ -941,10 +935,7 @@ export const useChatStore = defineStore('chat', () => {
         }
         activeThinkingMessageId.value = null
         tokenUsage.value = (event.usage || null) as TokenUsage | null
-        // 兜底：若压缩因失败未收到 compact_complete，避免 UI 永久卡在"正在压缩"
-        if (compactionStatus.value === 'compacting') {
-          compactionStatus.value = 'idle'
-        }
+        finalizePendingCompactions()
         break
 
       case 'context_usage':
@@ -958,11 +949,17 @@ export const useChatStore = defineStore('chat', () => {
           finalizeCurrentAssistantSegment()
         }
         chatState.value = event.state as any
-        // 出错等导致回到 idle 时，同样兜底复位压缩状态
-        if (event.state === 'idle' && compactionStatus.value === 'compacting') {
-          compactionStatus.value = 'idle'
-        }
+        if (event.state === 'idle' || event.state === 'stopped') finalizePendingCompactions()
         break
+    }
+  }
+
+  function finalizePendingCompactions() {
+    for (const message of uiMessages.value) {
+      if (message.type === 'context_compaction' && message.status === 'compacting') {
+        message.status = 'failed'
+        message.message = '上下文压缩已中断'
+      }
     }
   }
 
@@ -1451,6 +1448,7 @@ export const useChatStore = defineStore('chat', () => {
     // 在下一轮被 upsert 命中，导致新回答追加到旧位置产生顺序错乱
     finalizeCurrentThinkingSegment()
     finalizeCurrentAssistantSegment()
+    finalizePendingCompactions()
     // 清理当前会话的思考记录 ID
     const sessionIdStop = currentSession.value?.id
     if (sessionIdStop) {
@@ -1634,7 +1632,6 @@ export const useChatStore = defineStore('chat', () => {
     activeToolName,
     pendingPermission,
     tokenUsage,
-    compactionStatus,
     initialize,
     createNewSession,
     sendMessage,
