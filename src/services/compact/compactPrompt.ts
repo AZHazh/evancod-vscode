@@ -3,7 +3,9 @@
  * 基于文档 §2.4 的 9 段结构
  */
 export function getCompactPrompt(): string {
-  return `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+  return `Summarize the conversation above into a checkpoint for another coding assistant. Do not continue the task or call tools. Output only the checkpoint.
+
+Preserve exact user constraints and corrections, file paths, tool names and arguments, errors, identifiers, and evidence for conclusions. Distinguish confirmed facts from hypotheses. Keep completed work completed. Merge a previous checkpoint with newer facts, discard stale facts, and do not copy previous checkpoints verbatim. Image placeholders describe omitted images; do not invent their contents.
 
 Summary:
 1. Primary Request and Intent:
@@ -33,6 +35,5 @@ Summary:
 9. Optional Next Step:
 [建议的下一步操作]
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: [transcript path]
-Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`
+Do not invent transcript paths or claim verification that did not occur. Keep the checkpoint concise and retain all nine sections.`
 }

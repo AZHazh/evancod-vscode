@@ -27,6 +27,7 @@ import * as vscode from 'vscode'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import type { Session } from '../../types'
+import { restoreCompactedMessages } from '../compact/budgetCompaction'
 import { performanceLog, performanceSnapshot } from '../../utils/performanceLogger'
 import {
   prepareSessionForPersistence,
@@ -210,6 +211,15 @@ export class SessionPersistenceService {
     } else {
       // 延迟保存
       this.scheduleSave(data)
+    }
+  }
+
+  /** A compaction may advance live history only after its session snapshot was saved. */
+  async checkpoint(data: SessionData, sessionId: string): Promise<void> {
+    const expected = this.createSessionSnapshot(data.sessions[sessionId])
+    await this.save(data, true)
+    if (this.lastSavedSnapshot?.get(sessionId) !== expected) {
+      throw new Error('Compaction checkpoint could not be persisted; original history retained')
     }
   }
 
@@ -459,7 +469,12 @@ export class SessionPersistenceService {
       sessions: Object.fromEntries(
         Object.entries(data.sessions).map(([id, session]) => [
           id,
-          restoreSessionImageReferences(session),
+          (() => {
+            const restored = restoreSessionImageReferences(session)
+            restored.messages = restoreCompactedMessages(restored.messages, restored.compactions)
+            restored.messageCount = restored.messages.length
+            return restored
+          })(),
         ])
       ),
       currentSessionId: data.currentSessionId,
@@ -490,6 +505,13 @@ export class SessionPersistenceService {
       transcriptLength: session.transcript?.length ?? 0,
       lastBlockId,
       lastBlockContentLen,
+      // 正文 ID 定型后保持不变，生命周期变化也必须触发保存。
+      lastBlockState: lastBlock?.type === 'assistant_text'
+        ? [lastBlock.phase, lastBlock.status, lastBlock.endedAt]
+        : undefined,
+      runStatus: session.activeRun?.status,
+      compactionId: session.compactions?.at(-1)?.id,
+      compactionDigest: session.compactions?.at(-1)?.replacementDigest,
       name: session.name,
     })
   }

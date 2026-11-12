@@ -4,12 +4,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node tests/run-tests.cjs",
+    "test:browser": "node tests/run-browser-tests.cjs",
     "build": "vue-tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "lucide-vue-next": "^0.400.0",
     "marked": "^17.0.0",
+    "mermaid": "^11.17.2",
     "pinia": "^2.1.0",
     "shiki": "^4.0.0",
     "vue": "^3.4.0",

@@ -36,8 +36,7 @@ export class ContextBudgetManager {
   assess(input: ContextBudgetInput): ContextBudgetSnapshot {
     const contextWindow = normalizeContextWindow(input.configuredWindow)
     const effectiveWindow = getEffectiveInputWindow(contextWindow)
-    const rawEstimate = estimateRequestTokens(input.messages, input.systemPrompt, input.tools)
-    const estimatedTokens = Math.ceil(rawEstimate * this.calibrationFactor)
+    const estimatedTokens = this.estimateTokens(input)
     const usageRatio = estimatedTokens / effectiveWindow
 
     if (!this.compressionArmed && usageRatio <= this.rearmRatio) {
@@ -50,6 +49,13 @@ export class ContextBudgetManager {
       usageRatio,
       shouldCompact: this.compressionArmed && usageRatio >= this.triggerRatio,
     }
+  }
+
+  /** Price a candidate using the same calibration without changing trigger state. */
+  estimateTokens(input: ContextBudgetInput): number {
+    return Math.ceil(
+      estimateRequestTokens(input.messages, input.systemPrompt, input.tools) * this.calibrationFactor
+    )
   }
 
   recordServerUsage(estimatedTokens: number, usage: TokenUsage | undefined): void {

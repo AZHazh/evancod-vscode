@@ -5,7 +5,7 @@ defineProps<{
   stdout?: string
   stderr?: string
   exitCode?: number | null
-  status?: 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
+  status?: 'pending' | 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
   taskId?: string
 }>()
 
@@ -23,7 +23,9 @@ defineEmits<{
         <span class="terminal-chrome__light terminal-chrome__light--success" />
       </div>
       <span class="terminal-chrome__title">{{ description || taskId || 'terminal' }}</span>
-      <span class="terminal-chrome__status" :class="`status-${status || 'completed'}`">{{ status || 'completed' }}</span>
+      <span class="terminal-chrome__status" :class="`status-${status || 'completed'}`">
+        {{ status === 'pending' ? '等待授权' : status || 'completed' }}
+      </span>
       <button v-if="status === 'running'" class="terminal-chrome__cancel" type="button" @click="$emit('cancel')">
         取消
       </button>

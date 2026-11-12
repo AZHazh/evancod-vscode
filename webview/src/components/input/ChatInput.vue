@@ -55,6 +55,7 @@ import {
   workspaceReferenceToPayload,
 } from '@/lib/composerAttachments'
 import { galleryImagesFromComposer } from '@/utils/imageAttachments'
+import { collapseLongText, isLongText, pastedTextTitle } from '@/utils/pastedText'
 
 const chatStore = useChatStore()
 const providerStore = useProviderStore()
@@ -71,6 +72,7 @@ const selectedSkills = ref<MessageSkill[]>([])
 const attachmentRegistry = new Map<string, ComposerAttachment>()
 const referenceRegistry = new Map<string, WorkspaceReference>()
 const skillRegistry = new Map<string, MessageSkill>()
+const pastedTexts = ref<{ id: string; text: string }[]>([])
 const slashCommands = ref<SlashCommand[]>(mergeSlashCommands([]))
 const slashFilter = ref('')
 const slashSelectedIndex = ref(0)
@@ -168,12 +170,12 @@ const isRunning = computed(() =>
 )
 const canSend = computed(
   () =>
-    isRunning.value ||
     Boolean(
       input.value.trim() ||
       attachments.value.length ||
       workspaceReferences.value.length ||
-      selectedSkills.value.length
+      selectedSkills.value.length ||
+      pastedTexts.value.length
     )
 )
 const filteredSlashCommands = computed(() =>
@@ -368,9 +370,10 @@ function insertToken(
   token.contentEditable = 'false'
   const iconHost = document.createElement('span')
   iconHost.className = 'inline-token__icon'
-  render(h(kind === 'file' ? FileIcon : Box, { size: 16, strokeWidth: 2 }), iconHost)
+  render(h(kind === 'skill' ? Box : FileIcon, { size: 16, strokeWidth: 2 }), iconHost)
   token.append(iconHost)
   const labelNode = document.createElement('span')
+  labelNode.className = 'inline-token__label'
   labelNode.textContent = label
   token.append(labelNode)
   range.deleteContents()
@@ -379,6 +382,27 @@ function insertToken(
   range.collapse(true)
   selection?.removeAllRanges()
   selection?.addRange(range)
+  syncEditorInput()
+}
+
+function insertPastedText(text: string) {
+  pastedTexts.value.push({ id: createId(), text })
+  textarea.value?.focus()
+}
+
+function removePastedText(id: string) {
+  pastedTexts.value = pastedTexts.value.filter(item => item.id !== id)
+}
+
+function expandPastedText(id: string) {
+  const item = pastedTexts.value.find(item => item.id === id)
+  if (!item || !textarea.value) return
+  const range = document.createRange()
+  range.selectNodeContents(textarea.value)
+  range.collapse(false)
+  textarea.value.focus()
+  insertTextAtCaret(`${editorText() ? '\n\n' : ''}${item.text}`, range)
+  removePastedText(id)
   syncEditorInput()
 }
 
@@ -466,12 +490,14 @@ function insertTextAtCaret(text: string, replaceRange?: Range | null) {
     replaceRange &&
     editor.contains(replaceRange.startContainer) &&
     editor.contains(replaceRange.endContainer)
+  const currentRange = selection?.rangeCount ? selection.getRangeAt(0) : null
+  const currentRangeIsValid = currentRange && editor.contains(currentRange.commonAncestorContainer)
   const range = savedRangeIsValid
     ? replaceRange
-    : selection?.rangeCount
-      ? selection.getRangeAt(0)
+    : currentRangeIsValid
+      ? currentRange
       : document.createRange()
-  if (!savedRangeIsValid && !selection?.rangeCount) {
+  if (!savedRangeIsValid && !currentRangeIsValid) {
     range.selectNodeContents(editor)
     range.collapse(false)
   }
@@ -484,8 +510,8 @@ function insertTextAtCaret(text: string, replaceRange?: Range | null) {
   selection?.addRange(range)
 }
 
-function serializeEditor() {
-  const editor = textarea.value
+function serializeEditor(root: HTMLElement | DocumentFragment | undefined = textarea.value) {
+  const editor = root
   if (!editor) {
     const segments: InlineMessageSegment[] = [{ type: 'text', text: input.value }]
     return { content: input.value, skills: selectedSkills.value, segments }
@@ -526,14 +552,42 @@ function serializeEditor() {
       }
       return ''
     }
-    if (element.tagName === 'BR') return '\n'
+    if (element.tagName === 'BR') {
+      segments.push({ type: 'text', text: '\n' })
+      return '\n'
+    }
+    if (element.tagName === 'DIV' || element.tagName === 'P') {
+      const prefix = element.previousSibling ? '\n' : ''
+      if (prefix) segments.push({ type: 'text', text: prefix })
+      // contenteditable 用空白块内的 BR 占位，不应把它当作第二次换行。
+      const isPlaceholder = element.childNodes.length === 1 && element.firstChild?.nodeName === 'BR'
+      return prefix + (isPlaceholder ? '' : Array.from(node.childNodes).map(walk).join(''))
+    }
     return Array.from(node.childNodes).map(walk).join('')
   }
   return {
-    content: Array.from(editor.childNodes).map(walk).join('').trim(),
+    content: Array.from(editor.childNodes).map(walk).join(''),
     skills: skillsInOrder,
-    segments,
+    segments: collapseLongText(segments),
   }
+}
+
+function handleCopy(event: ClipboardEvent) {
+  const selection = window.getSelection()
+  if (!selection?.rangeCount || selection.isCollapsed) return
+  const range = selection.getRangeAt(0)
+  if (!textarea.value?.contains(range.commonAncestorContainer)) return
+  const { content, segments } = serializeEditor(range.cloneContents())
+  event.preventDefault()
+  event.clipboardData?.setData('text/plain', content)
+  event.clipboardData?.setData('application/x-evancod-inline-segments', JSON.stringify(segments))
+}
+
+function handleCut(event: ClipboardEvent) {
+  handleCopy(event)
+  if (!event.defaultPrevented) return
+  window.getSelection()?.getRangeAt(0).deleteContents()
+  syncEditorInput()
 }
 
 function handleInput() {
@@ -585,12 +639,19 @@ function handleInput() {
 }
 
 function handleSend() {
-  if (isRunning.value) {
-    chatStore.stopGeneration()
-    return
-  }
-
   const serialized = serializeEditor()
+  if (pastedTexts.value.length) {
+    const segments: InlineMessageSegment[] = []
+    for (const item of pastedTexts.value) {
+      if (segments.length) segments.push({ type: 'text', text: '\n\n' })
+      segments.push({ type: 'pasted_text', text: item.text, name: pastedTextTitle(item.text) })
+    }
+    if (serialized.segments.length) segments.push({ type: 'text', text: '\n\n' })
+    serialized.segments = [...segments, ...serialized.segments]
+    serialized.content = [
+      ...pastedTexts.value.map(item => item.text), serialized.content,
+    ].filter(Boolean).join('\n\n')
+  }
   const text = serialized.content.trim()
   if (
     !text &&
@@ -639,11 +700,13 @@ function handleSend() {
   attachmentRegistry.clear()
   referenceRegistry.clear()
   skillRegistry.clear()
+  pastedTexts.value = []
   openPanel.value = null
   nextTick(adjustHeight)
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if ((event.target as HTMLElement).closest('button')) return
   if (event.key === 'Backspace' || event.key === 'Delete') {
     const direction = event.key === 'Backspace' ? 'backward' : 'forward'
     const token = tokenAdjacentToCaret(direction)
@@ -881,6 +944,7 @@ async function handlePaste(event: ClipboardEvent) {
       event.preventDefault()
       for (const segment of segments) {
         if (segment.type === 'text') insertTextAtCaret(segment.text || '')
+        else if (segment.type === 'pasted_text') insertPastedText(segment.text || '')
         else if (segment.type === 'skill') {
           selectedSkills.value.push({ name: segment.name || '', description: segment.description })
           skillRegistry.set(
@@ -929,7 +993,9 @@ async function handlePaste(event: ClipboardEvent) {
   const text = event.clipboardData?.getData('text/plain')
   if (text == null) return
   event.preventDefault()
-  insertTextAtCaret(text.replace(/\r\n?/g, '\n'))
+  const normalized = text.replace(/\r\n?/g, '\n')
+  if (isLongText(normalized)) insertPastedText(normalized)
+  else insertTextAtCaret(normalized)
   syncEditorInput()
 }
 
@@ -1037,6 +1103,9 @@ onUnmounted(() => {
       <AttachmentGallery
         :attachments="attachments.filter(item => item.type === 'image')"
         :references="[]"
+        :pasted-texts="pastedTexts"
+        @remove-pasted-text="removePastedText"
+        @expand-pasted-text="expandPastedText"
         @remove-attachment="attachments = attachments.filter(item => item.id !== $event)"
         @remove-reference="
           workspaceReferences = workspaceReferences.filter(item => item.id !== $event)
@@ -1050,11 +1119,15 @@ onUnmounted(() => {
         contenteditable="true"
         role="textbox"
         aria-multiline="true"
-        placeholder="让 Evancod 编辑、调试或解释代码..."
+        :placeholder="isRunning ? '可继续发送补充要求，当前任务会接着处理...' : pastedTexts.length ? '提出后续变更要求...' : '让 Evancod 编辑、调试或解释代码...'"
         @input="syncEditorInput"
         @keydown="handleKeydown"
         @paste="handlePaste"
+        @copy="handleCopy"
+        @cut="handleCut"
       ></div>
+
+      <p v-if="chatStore.sendError" class="chat-input__send-error" role="alert">{{ chatStore.sendError }}</p>
 
       <div class="chat-input__controls">
         <div class="controls-left">
@@ -1097,9 +1170,13 @@ onUnmounted(() => {
             <ChevronDown />
           </button>
 
+          <Button v-if="isRunning" variant="secondary" size="medium" @click="chatStore.stopGeneration()">
+            <template #icon><Square /></template>
+            停止
+          </Button>
           <Button variant="primary" size="medium" :disabled="!canSend" @click="handleSend">
-            <template #icon><Square v-if="isRunning" /><ArrowRight v-else /></template>
-            {{ isRunning ? '停止' : '运行' }}
+            <template #icon><ArrowRight /></template>
+            {{ isRunning ? '追加' : '运行' }}
           </Button>
         </div>
       </div>
@@ -1308,6 +1385,11 @@ onUnmounted(() => {
 </template>
 
 <style scoped lang="scss">
+.chat-input__send-error {
+  margin: 0 12px 8px;
+  color: var(--vscode-errorForeground, #f88);
+  font-size: 12px;
+}
 .composer-wrap {
   position: relative;
   margin: 0 20px 16px;

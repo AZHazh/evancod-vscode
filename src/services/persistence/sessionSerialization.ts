@@ -13,6 +13,13 @@ function cloneContentBlock(block: ContentBlock): ContentBlock {
   return block.source ? { ...block, source: { ...block.source } } : { ...block }
 }
 
+/** Keep archived model histories on the host when sending the current session to the UI. */
+export function prepareSessionForWebview(session: Session): Session {
+  const view = { ...session }
+  delete view.compactions
+  return view
+}
+
 /**
  * 会话文件只保留一份用户图片数据：message.attachments 是规范副本，
  * contentBlocks、transcript 和 session.attachments 中的重复 base64 可在读盘时重建。

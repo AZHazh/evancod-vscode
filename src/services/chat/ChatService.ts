@@ -46,13 +46,9 @@ import {
 import { buildOpenAIImageUrl, downloadAsBase64 } from '../../core/tools/image/imageUtils'
 import { commandManager } from '../command/CommandManager'
 import { SessionPersistenceService } from '../persistence/SessionPersistenceService'
+import { prepareSessionForWebview } from '../persistence/sessionSerialization'
 import { TaskNotificationQueue } from '../agent/TaskNotificationQueue'
-import { createApiClient } from '../../core/services/api'
-import {
-  buildRollingCompactionInput,
-  compactConversation,
-  replaceWithRollingSummary,
-} from '../compact/compact'
+import type { CompactionRecord } from '../../types'
 import { recordCompactionEvent } from '../compact/compactionEvents'
 import type { ToolProfileService } from '../tools/ToolProfileService'
 import {
@@ -77,10 +73,16 @@ export type AgentEventCallback = (event: AgentServerEvent, sessionId: string) =>
  * 复用或误停。运行时仅存在于扩展进程内，会话内容仍由 Session 持久化。
  */
 interface SessionRuntime {
+  pendingInputs?: Array<{
+    prepare: () => Promise<Message>
+    resolve: () => void
+    reject: (error: unknown) => void
+  }>
   engine?: QueryEngine
   activeRequest?: Promise<void>
   requestQueue: Promise<void>
   requestController?: AbortController
+  requestControllers?: Set<AbortController>
   directGenerationController?: AbortController
   isStreaming: boolean
   memoryQuery: string
@@ -96,6 +98,7 @@ export class ChatService {
   private transcriptDeltaBuffers = new Map<string, string>()
   private transcriptDeltaFlushAt = new Map<string, number>()
   private activeThinkingBlockIds = new Map<string, string>()
+  private activeAssistantBlockIds = new Map<string, string>()
   /**
    * 会话列表（存储在内存中）
    * 优势：
@@ -465,13 +468,15 @@ export class ChatService {
    * 发送给 Webview 前调用。
    */
   async hydrateSessionImages(session: Session | null): Promise<Session | null> {
-    if (!session?.transcript?.length) return session
+    if (!session) return null
+    const view = prepareSessionForWebview(session)
+    if (!session.transcript?.length) return view
 
     const imageBlocks = session.transcript.filter(
       (block): block is Extract<AgentTranscriptBlock, { type: 'image_generation' }> =>
         block.type === 'image_generation' && !!block.image?.path && !block.image?.base64
     )
-    if (imageBlocks.length === 0) return session
+    if (imageBlocks.length === 0) return view
 
     const base64ByPath = new Map<string, string | undefined>()
     await Promise.all(
@@ -490,7 +495,7 @@ export class ChatService {
       return { ...block, image: { ...block.image, base64 } }
     })
 
-    return { ...session, transcript }
+    return { ...view, transcript }
   }
 
   async deleteSession(sessionId: string): Promise<void> {
@@ -646,6 +651,10 @@ export class ChatService {
     cancelledEngine?.cancel('用户停止生成')
     if (session) void this.planModeManager.completePlan(session.id)
     runtime?.requestController?.abort('用户停止生成')
+    for (const controller of runtime?.requestControllers || []) controller.abort('用户停止生成')
+    for (const input of runtime?.pendingInputs?.splice(0) || []) {
+      input.reject(new QueryCancelledError('用户停止生成'))
+    }
     runtime?.directGenerationController?.abort('用户停止生成')
     void this.agentCoordinator.cancelAgentsForSession(sessionId, '用户停止生成').catch(error => {
       console.error('Failed to finish cancelling sub agents:', error)
@@ -730,20 +739,42 @@ export class ChatService {
     content: string,
     attachments: (string | AttachmentContext)[] = [],
     inlineSegments: InlineMessageSegment[] = [],
-    messageId?: string
+    messageId?: string,
+    targetSessionId?: string
   ): Promise<void> {
-    const sessionId = this.currentSessionId
+    const sessionId = targetSessionId || this.currentSessionId
     if (!sessionId) throw new Error('No active session')
+    if (!this.getSession(sessionId)) throw new Error('Session not found')
     const runtime = this.getSessionRuntime(sessionId)
+    const canSteer = !content.trimStart().startsWith('/') &&
+      this.providerService.getActiveProvider()?.apiFormat !== 'openai_image'
+    if (runtime.activeRequest && canSteer && !runtime.requestController?.signal.aborted) {
+      const prepare = () => this.prepareSteeringMessage(
+        sessionId, content, attachments, inlineSegments, messageId
+      )
+      const accepted = runtime.isStreaming ? runtime.engine?.enqueueUserInput(prepare) : undefined
+      if (accepted) return accepted
+      // 首次请求还在加载记忆、附件或工具时，先登记，启动 query 后立即交给引擎。
+      if (runtime.pendingInputs) {
+        return new Promise<void>((resolve, reject) => {
+          runtime.pendingInputs!.push({ prepare, resolve, reject })
+        })
+      }
+    }
     const previousRequest = runtime.activeRequest
+    const pendingInputs: SessionRuntime['pendingInputs'] = canSteer ? [] : undefined
+    if (!previousRequest) runtime.pendingInputs = pendingInputs
     const requestController = new AbortController()
+    runtime.requestControllers ||= new Set()
+    runtime.requestControllers.add(requestController)
     const request = runtime.requestQueue
       .catch(() => undefined)
       .then(async () => {
         if (previousRequest) {
           await previousRequest.catch(() => undefined)
         }
-        if (requestController.signal.aborted) return
+        if (requestController.signal.aborted) throw new QueryCancelledError('用户停止生成')
+        runtime.pendingInputs = pendingInputs
         await this.taskManager.runInSession(sessionId, () =>
           this.runMessage(
             sessionId,
@@ -761,12 +792,53 @@ export class ChatService {
     try {
       await request
     } finally {
+      runtime.requestControllers.delete(requestController)
+      for (const input of pendingInputs || []) {
+        input.reject(new Error('原请求未能启动，追加消息未执行，请重新发送。'))
+      }
+      if (runtime.pendingInputs === pendingInputs) runtime.pendingInputs = undefined
       if (runtime.activeRequest === request) {
         runtime.activeRequest = undefined
       }
       if (runtime.requestController === requestController) {
         runtime.requestController = undefined
       }
+    }
+  }
+
+  private async prepareSteeringMessage(
+    sessionId: string,
+    content: string,
+    attachments: (string | AttachmentContext)[],
+    inlineSegments: InlineMessageSegment[],
+    messageId = this.generateId()
+  ): Promise<Message> {
+    const session = this.getSession(sessionId)
+    if (!session) throw new Error('Session not found')
+    const attachmentContexts = await this.resolveAttachments(attachments)
+    const runtime = this.getSessionRuntime(sessionId)
+    if (runtime.requestController?.signal.aborted) throw new QueryCancelledError('用户停止生成')
+    const composed = composeUserPrompt(content, inlineSegments, attachmentContexts, `${messageId}-`)
+    const context = session.requestContexts?.find(item => item.id === session.activeRun?.requestId)
+    if (context) {
+      const extra = createRequestContext(`request-${messageId}`, messageId, content, composed)
+      context.rawContent += `\n\n[追加要求]\n${content}`
+      context.requirements.push(...extra.requirements)
+      context.references.push(...extra.references)
+      context.updatedAt = new Date().toISOString()
+      this.taskManager.setActiveRequestContext(context)
+    }
+    runtime.memoryQuery += `\n${content}`
+    void this.memoryManager.captureUserMessage(content, session.workDir, messageId)
+      .catch(error => console.warn('Memory extraction failed:', error))
+    const prompt = [
+      '用户在当前任务执行期间追加了以下消息。请结合已有进展继续处理；如与先前要求冲突，以最新要求为准。',
+      composed.modelContent,
+    ].join('\n\n')
+    return {
+      id: messageId, role: 'user', content, timestamp: Date.now(),
+      contentBlocks: this.buildUserContentBlocks(prompt, attachmentContexts, true),
+      attachments: attachmentContexts, inlineSegments,
     }
   }
 
@@ -788,7 +860,7 @@ export class ChatService {
     // Memory 虽在扩展启动后后台加载，但首个 Query 必须等待它就绪，
     // 避免用户刚启动就提问时漏掉项目记忆。
     await this.memoryManager.initialize()
-    if (requestSignal?.aborted) return
+    if (requestSignal?.aborted) throw new QueryCancelledError('用户停止生成')
 
     const commandResult = await this.resolveSlashCommand(content, session, messageId)
     if (commandResult.handled) {
@@ -801,7 +873,7 @@ export class ChatService {
     }
 
     const attachmentContexts = await this.resolveAttachments(attachments)
-    if (requestSignal?.aborted) return
+    if (requestSignal?.aborted) throw new QueryCancelledError('用户停止生成')
     const interruptedContext = isContinuationMessage(commandResult.content)
       ? this.findInterruptedRequestContext(session)
       : undefined
@@ -867,7 +939,7 @@ export class ChatService {
     if (!isDirectImageGen) {
       await this.initializeQueryEngine(session, runtime)
     }
-    if (requestSignal?.aborted) return
+    if (requestSignal?.aborted) throw new QueryCancelledError('用户停止生成')
 
     // 记录是否为本会话第一条用户消息（用于用首条消息内容作为会话标题）
     const isFirstUserMessage = session.messages.length === 0
@@ -908,6 +980,7 @@ export class ChatService {
     if (this.messageCallback) {
       this.messageCallback(userMessage)
     }
+    this.agentEventCallback?.({ type: 'user_input', message: userMessage }, session.id)
 
     // 标记为流式接收中
     runtime.isStreaming = true
@@ -947,7 +1020,15 @@ export class ChatService {
       }
       requestSignal?.addEventListener('abort', cancelEngine, { once: true })
       try {
-        await engine.query(messageContent, userContentBlocks, sourceMessageId)
+        const query = engine.query(messageContent, userContentBlocks, sourceMessageId)
+        const pendingInputs = runtime.pendingInputs?.splice(0) || []
+        runtime.pendingInputs = undefined
+        for (const input of pendingInputs) {
+          const accepted = engine.enqueueUserInput(input.prepare)
+          if (accepted) void accepted.then(input.resolve, input.reject)
+          else input.reject(new Error('任务已结束，请重新发送追加消息。'))
+        }
+        await query
       } finally {
         requestSignal?.removeEventListener('abort', cancelEngine)
       }
@@ -1034,6 +1115,7 @@ export class ChatService {
         }
       }
 
+      this.expirePendingTranscript(session)
       if (error instanceof QueryCancelledError) {
         await this.planModeManager.completePlan(session.id)
         requestContext.status = 'cancelled'
@@ -1044,7 +1126,6 @@ export class ChatService {
           session.activeRun.retryable = false
           session.activeRun.updatedAt = Date.now()
         }
-        this.expirePendingTranscript(session)
         session.updatedAt = Date.now()
         session.messageCount = session.messages.length
         this.saveSessions(true)
@@ -1312,6 +1393,7 @@ export class ChatService {
       session.transcript = []
       session.tokenUsage = undefined
       session.compactSummary = undefined
+      session.compactions = undefined
       this.getSessionRuntime(session.id).engine = undefined
       session.updatedAt = Date.now()
       session.messageCount = 0
@@ -1335,35 +1417,10 @@ export class ChatService {
           })
           this.agentEventCallback?.(startedEvent, session.id)
 
-          // 从配置中读取保留消息数量
-          const config = vscode.workspace.getConfiguration('evancod')
-          const keepRecentMessages = Math.max(
-            5,
-            Math.min(50, config.get<number>('compactKeepRecentMessages') || 10)
-          )
-
-          const summaryModel = provider.models.haiku || this.getCurrentModel()
-          const apiClient = createApiClient({
-            provider,
-            model: summaryModel,
-            effortLevel: 'low',
-          })
-          const { summaryMessage } = await compactConversation(
-            buildRollingCompactionInput(this.buildRuntimeMessages(session)),
-            apiClient,
-            summaryModel
-          )
-
-          session.compactSummary = summaryMessage.content
-          session.messages = replaceWithRollingSummary(
-            session.messages,
-            summaryMessage,
-            keepRecentMessages
-          )
-          session.updatedAt = Date.now()
-          session.messageCount = session.messages.length
-          this.getSessionRuntime(session.id).engine = undefined
-          result.message = `已使用模型生成会话摘要并压缩上下文（保留最近 ${keepRecentMessages} 条消息）`
+          const runtime = this.getSessionRuntime(session.id)
+          await this.initializeQueryEngine(session, runtime)
+          const record = await runtime.engine!.compactContext('manual', runtime.requestController?.signal)
+          result.message = `上下文已压缩（${record.beforeTokens} -> ${record.afterTokens} tokens），已保留用户原文及近期完整工具调用。`
 
           const completedEvent = this.recordAgentEvent(session, {
             type: 'system_notification',
@@ -1673,9 +1730,7 @@ export class ChatService {
       console.warn(`[ChatService] ${warning}`)
     }
 
-    // 从配置中读取压缩后需要保留的最近消息数量
     const config = vscode.workspace.getConfiguration('evancod')
-    const compactKeepRecentMessages = config.get<number>('compactKeepRecentMessages') || 10
     const maxExecutionSegments = Math.max(
       1,
       Math.min(
@@ -1707,7 +1762,10 @@ export class ChatService {
       imageProvider: this.providerService.getImageProvider() || undefined,
       toolSnapshot: toolProfile?.toolSnapshot,
       isDevelopment: this.context.extensionMode === vscode.ExtensionMode.Development,
-      compactKeepRecentMessages,
+      compactRetainTokens: config.get<number>('compactRetainTokens') || undefined,
+      compactUserMessageTokens: config.get<number>('compactUserMessageTokens') || undefined,
+      buildRuntimeContext: () => this.buildRuntimeMessages(session).filter(message => message.id === 'runtime-context'),
+      onCompaction: record => this.persistCompaction(session, record),
       maxExecutionSegments,
     })
     runtime.engine = engine
@@ -1738,6 +1796,27 @@ export class ChatService {
       if (runtime.engine !== engine) return
       console.error('QueryEngine error:', error)
     })
+  }
+
+  private async persistCompaction(session: Session, record: CompactionRecord): Promise<void> {
+    const previous = {
+      messages: session.messages, compactions: session.compactions, compactSummary: session.compactSummary,
+      updatedAt: session.updatedAt, messageCount: session.messageCount,
+    }
+    session.messages = structuredClone(record.replacementMessages)
+    session.compactions = [...(session.compactions || []), structuredClone(record)]
+    session.compactSummary = record.replacementMessages.find(message => message.id === record.summaryMessageId)?.content
+    session.updatedAt = Date.now()
+    session.messageCount = session.messages.length
+    try {
+      await this.persistence.checkpoint({
+        sessions: Object.fromEntries(this.sessions.map(item => [item.id, item])),
+        currentSessionId: this.currentSessionId,
+      }, session.id)
+    } catch (error) {
+      Object.assign(session, previous)
+      throw error
+    }
   }
 
   private persistRuntimeConfig(): void {
@@ -1833,19 +1912,41 @@ export class ChatService {
     const now = Date.now()
 
     switch (event.type) {
+      case 'user_input':
+        this.finalizeCurrentThinkingSegment(session)
+        this.finalizeCurrentStreamingAssistant(session)
+        if (!session.messages.some(message => message.id === event.message.id)) {
+          session.messages.push(event.message)
+        }
+        this.appendOrUpdateTranscript(session, {
+          id: event.message.id, type: 'user_text', content: event.message.content,
+          timestamp: event.message.timestamp, attachments: event.message.attachments,
+          inlineSegments: event.message.inlineSegments,
+        })
+        session.updatedAt = now
+        session.messageCount = session.messages.length
+        this.saveSessions()
+        break
+      case 'content_start':
+        if (event.blockType === 'text') this.finalizeCurrentStreamingAssistant(session)
+        break
+
       case 'content_delta':
         if (typeof event.text === 'string') {
           // 正文和思考交错时，每次正文开始都结束当前 thinking 段。
           if (this.activeThinkingBlockIds.has(session.id)) {
             this.finalizeCurrentThinkingSegment(session)
           }
+          const itemId = this.activeAssistantBlockIds.get(session.id) || event.itemId || this.generateId()
+          this.activeAssistantBlockIds.set(session.id, itemId)
+          emittedEvent = { ...event, itemId }
           const existing = session.transcript?.find(
             (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
-              block.type === 'assistant_text' && block.id === 'streaming-assistant'
+              block.type === 'assistant_text' && block.id === itemId
           )
           this.bufferTranscriptDelta(
             session,
-            'streaming-assistant',
+            itemId,
             event.text,
             now,
             existing,
@@ -1854,17 +1955,21 @@ export class ChatService {
         }
         break
 
-      case 'content_discard':
+      case 'content_discard': {
+        const itemId = this.activeAssistantBlockIds.get(session.id) || 'streaming-assistant'
+        emittedEvent = { ...event, itemId }
         this.transcriptDeltaBuffers.delete(
-          this.transcriptBufferKey(session.id, 'streaming-assistant')
+          this.transcriptBufferKey(session.id, itemId)
         )
         this.transcriptDeltaFlushAt.delete(
-          this.transcriptBufferKey(session.id, 'streaming-assistant')
+          this.transcriptBufferKey(session.id, itemId)
         )
         session.transcript = (session.transcript || []).filter(
-          block => block.id !== 'streaming-assistant'
+          block => block.id !== itemId
         )
+        this.activeAssistantBlockIds.delete(session.id)
         break
+      }
 
       case 'tool_use_complete':
         // 工具调用完成时，finalize 当前 thinking 段与文字段，
@@ -1967,6 +2072,9 @@ export class ChatService {
 
       case 'thinking': {
         const blockId = event.blockId || 'streaming-thinking'
+        if (this.activeThinkingBlockIds.get(session.id) !== blockId) {
+          this.finalizeCurrentThinkingSegment(session)
+        }
         this.activeThinkingBlockIds.set(session.id, blockId)
         const existing = session.transcript?.find(
           (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
@@ -2041,9 +2149,20 @@ export class ChatService {
           session.tokenUsage = this.mergeSessionUsage(session.tokenUsage, usage)
           emittedEvent = { ...event, usage: session.tokenUsage }
         }
+        this.finalizeCurrentStreamingAssistant(
+          session,
+          event.completed === true ? 'final' : 'commentary',
+          event.completed === true ? 'complete' : 'interrupted'
+        )
         this.finalizeStreamingTranscript(session)
         break
       }
+
+      case 'status':
+        if (event.state === 'idle' || event.state === 'stopped') {
+          this.finalizeStreamingTranscript(session)
+        }
+        break
 
       case 'context_usage': {
         // 这是当前运行的快照，不写入累计消耗；最终 message_complete
@@ -2120,7 +2239,11 @@ export class ChatService {
       content: `${existing?.content || ''}${pending}`,
       timestamp: existing?.timestamp || timestamp,
       ...(blockType === 'assistant_text'
-        ? { model: session.runtimeConfig?.model || this.getCurrentModel() }
+        ? {
+            model: session.runtimeConfig?.model || this.getCurrentModel(),
+            phase: 'commentary',
+            status: 'streaming',
+          }
         : {}),
     } as AgentTranscriptBlock)
   }
@@ -2143,6 +2266,7 @@ export class ChatService {
     )
     if (!block) return
     block.isPending = false
+    block.executionStatus = isError ? 'failed' : 'completed'
     if (block.toolName === 'bash') {
       block.bash = {
         stdout: block.bash?.stdout || '',
@@ -2178,35 +2302,39 @@ export class ChatService {
       (block): block is Extract<AgentTranscriptBlock, { type: 'thinking' }> =>
         block.type === 'thinking' && block.id === blockId
     )
+    if (streamingThinking) streamingThinking.endedAt ||= Date.now()
     // 旧协议没有 blockId，仍需把固定临时 ID 定型；新协议的 ID 从首个 delta 起就稳定。
     if (blockId === 'streaming-thinking' && streamingThinking && streamingThinking.content.trim()) {
       streamingThinking.id = this.generateId()
     }
   }
 
-  private finalizeCurrentStreamingAssistant(session: Session): void {
-    this.flushTranscriptDelta(session, 'streaming-assistant')
+  private finalizeCurrentStreamingAssistant(
+    session: Session,
+    phase: 'commentary' | 'final' = 'commentary',
+    status: 'complete' | 'interrupted' = 'complete'
+  ): void {
+    const itemId = this.activeAssistantBlockIds.get(session.id) || 'streaming-assistant'
+    this.activeAssistantBlockIds.delete(session.id)
+    this.flushTranscriptDelta(session, itemId)
+    this.transcriptDeltaFlushAt.delete(this.transcriptBufferKey(session.id, itemId))
     const streaming = session.transcript?.find(
       (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
-        block.type === 'assistant_text' && block.id === 'streaming-assistant'
+        block.type === 'assistant_text' && block.id === itemId
     )
-    // 给当前文字段分配永久 id，下一段文字将开启新块并追加在工具之后，
-    // 使后端 transcript 保持「文字↔工具」的原始交错顺序（否则文字会全部
-    // 并进最早那个 streaming-assistant 块、重建后跑到所有工具之前）
+    // 新协议从首个增量起保留 ID；旧协议的固定临时 ID 仅在此处迁移。
     if (streaming && streaming.content.trim()) {
-      streaming.id = this.generateId()
+      if (itemId === 'streaming-assistant') streaming.id = this.generateId()
+      streaming.phase = phase
+      streaming.status = status
+      streaming.endedAt = Date.now()
+    } else if (streaming) {
+      session.transcript = session.transcript?.filter(block => block.id !== itemId)
     }
   }
 
   private finalizeStreamingTranscript(session: Session): void {
-    this.flushTranscriptDelta(session, 'streaming-assistant')
-    const streaming = session.transcript?.find(
-      (block): block is Extract<AgentTranscriptBlock, { type: 'assistant_text' }> =>
-        block.type === 'assistant_text' && block.id === 'streaming-assistant'
-    )
-    if (streaming) {
-      streaming.id = this.generateId()
-    }
+    this.finalizeCurrentStreamingAssistant(session, 'commentary', 'interrupted')
 
     // Finalize 最后一段 thinking（如果还在 streaming 状态）
     this.finalizeCurrentThinkingSegment(session)
@@ -2226,7 +2354,16 @@ export class ChatService {
     this.finalizeStreamingTranscript(session)
 
     for (const block of session.transcript || []) {
+      if (block.type === 'assistant_text' && block.status === 'streaming') {
+        block.status = 'interrupted'
+        block.phase = 'commentary'
+        block.endedAt ||= Math.max(block.timestamp, session.updatedAt)
+      }
+      if (block.type === 'thinking') {
+        block.endedAt ||= Math.max(block.timestamp, session.updatedAt)
+      }
       if (block.type === 'tool_use') {
+        if (block.isPending) block.executionStatus = 'cancelled'
         block.isPending = false
         if (block.bash?.status === 'running') {
           block.bash.status = 'cancelled'
@@ -2288,11 +2425,16 @@ export class ChatService {
     if (memoryContext) {
       contextParts.push(memoryContext)
     }
+    const activeContracts = session.requestContexts
+      ?.filter(context => context.status === 'active' || context.status === 'interrupted')
+      .map(context => formatRequestContract(context))
+    if (activeContracts?.length) contextParts.push(...activeContracts)
 
     if (contextParts.length > 0) {
       messages.unshift({
         id: 'runtime-context',
         role: 'user', // 改为 user，确保不会被 API 客户端过滤
+        internal: true,
         content: `以下是会话的上下文信息，请参考：\n\n${contextParts.join('\n\n')}`,
         timestamp: Date.now(),
       })

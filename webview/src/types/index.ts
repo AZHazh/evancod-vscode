@@ -192,7 +192,7 @@ export interface MessageSkill {
 }
 
 export interface InlineMessageSegment {
-  type: 'text' | 'file' | 'skill'
+  type: 'text' | 'file' | 'skill' | 'pasted_text'
   text?: string
   path?: string
   name?: string
@@ -253,8 +253,11 @@ export type UIMessage =
       content: string
       timestamp: number
       model?: string
+      phase?: 'commentary' | 'final'
+      status?: 'streaming' | 'complete' | 'interrupted'
+      endedAt?: number
     }
-  | { id: string; type: 'thinking'; content: string; timestamp: number }
+  | { id: string; type: 'thinking'; content: string; timestamp: number; endedAt?: number }
   | {
       id: string
       type: 'context_compaction'
@@ -272,6 +275,7 @@ export type UIMessage =
       timestamp: number
       isPending?: boolean
       partialInput?: string
+      executionStatus?: 'completed' | 'failed' | 'cancelled'
       parentToolUseId?: string
       bash?: BashRuntimeState
       notification?: AgentTaskNotification
@@ -397,6 +401,7 @@ export interface PermissionResponse {
 }
 
 export type AgentServerEvent =
+  | { type: 'user_input'; message: Message }
   | {
       type: 'content_start'
       blockType: 'text' | 'tool_use'
@@ -404,8 +409,8 @@ export type AgentServerEvent =
       toolUseId?: string
       parentToolUseId?: string
     }
-  | { type: 'content_delta'; text?: string; toolInput?: string }
-  | { type: 'content_discard' }
+  | { type: 'content_delta'; text?: string; toolInput?: string; itemId?: string }
+  | { type: 'content_discard'; itemId?: string }
   | {
       type: 'tool_use_complete'
       toolName: string

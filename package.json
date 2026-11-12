@@ -2,7 +2,7 @@
   "name": "vscode-evancod",
   "displayName": "Evancod",
   "description": "AI-powered coding agent for VSCode",
-  "version": "1.1.5",
+  "version": "1.1.7",
   "publisher": "evancod",
   "icon": "resources/extension-icon.png",
   "engines": {
@@ -123,7 +123,20 @@
           "default": 10,
           "minimum": 5,
           "maximum": 50,
-          "description": "上下文压缩时保留的最近消息数量（默认 10 条）"
+          "description": "旧版上下文压缩保留消息数量",
+          "deprecationMessage": "已改为按 token 预算保留，请使用 compactRetainTokens。"
+        },
+        "evancod.compactRetainTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "压缩后近期原文的 token 预算；0 表示有效输入窗口的 16%。工具调用与结果成组保留。"
+        },
+        "evancod.compactUserMessageTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "用户原文的独立保护预算；0 表示有效输入窗口的 10%，最多 20000 tokens。最新用户请求始终保留。"
         },
         "evancod.maxExecutionSegments": {
           "type": "number",
@@ -141,7 +154,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test:unit": "tsc -p tsconfig.tests.json && node --test .tmp/out-tests/regression-tests/agent-runtime.test.js .tmp/out-tests/regression-tests/memory.test.js .tmp/out-tests/regression-tests/repetition.test.js .tmp/out-tests/regression-tests/task-workflow.test.js",
+    "test:unit": "tsc -p tsconfig.tests.json && node --test .tmp/out-tests/regression-tests/agent-runtime.test.js .tmp/out-tests/regression-tests/memory.test.js .tmp/out-tests/regression-tests/repetition.test.js .tmp/out-tests/regression-tests/task-workflow.test.js .tmp/out-tests/regression-tests/compaction.test.js .tmp/out-tests/regression-tests/conversation-runtime.test.js .tmp/out-tests/regression-tests/file-preview.test.js .tmp/out-tests/regression-tests/steering.test.js",
     "test": "node ./out/test/runTest.js",
     "install:webview": "cd webview && npm install",
     "build:webview": "npm run install:webview && cd webview && npm run build",

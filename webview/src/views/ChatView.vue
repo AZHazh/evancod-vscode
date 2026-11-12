@@ -4,6 +4,7 @@ import { useChatStore } from '@/stores/chat'
 import { useTaskStore } from '@/stores/task'
 import TopBar from '@/components/header/TopBar.vue'
 import MessageList from '@/components/chat/MessageList.vue'
+import PermissionDock from '@/components/chat/PermissionDock.vue'
 import ChatInput from '@/components/input/ChatInput.vue'
 import TaskPanel from '@/components/task/TaskPanel.vue'
 import Modal from '@/components/common/Modal.vue'
@@ -77,9 +78,11 @@ onUnmounted(() => {
     <TopBar @sync-new-api="handleSyncNewApi" @open-settings="handleOpenSettings" />
     <MessageList />
 
-    <!-- Task 面板（对话区内，输入框上方，可关闭） -->
-    <TaskPanel v-if="showTaskPanel" class="task-panel-inline" @close="taskPanelDismissed = true" />
-
+    <!-- 输入框上方共享同一层，授权卡片覆盖任务面板而不叠加占用高度。 -->
+    <div class="chat-view__panels">
+      <TaskPanel v-if="showTaskPanel" class="task-panel-inline" @close="taskPanelDismissed = true" />
+      <PermissionDock />
+    </div>
     <ChatInput />
 
     <Modal v-model="showSettings" title="设置" size="large" :show-footer="false">
@@ -104,11 +107,20 @@ onUnmounted(() => {
   position: relative;
 }
 
-// Task 面板内联样式
-.task-panel-inline {
-  width: min(70%, 980px);
+.chat-view__panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   flex: 0 0 auto;
-  align-self: center;
+  min-width: 0;
+  isolation: isolate;
+}
+
+.task-panel-inline {
+  grid-area: 1 / 1;
+  width: min(70%, 980px);
+  min-width: 0;
+  align-self: end;
+  justify-self: center;
   margin: 0 0 8px;
   overflow: hidden;
 }

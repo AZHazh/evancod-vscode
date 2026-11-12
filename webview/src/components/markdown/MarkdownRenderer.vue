@@ -4,9 +4,12 @@ highlight.js: 代码语法高亮 * * 设计理念： * - 安全渲染（防止 X
 使用场景： * - AI 回复消息 * - 工具执行结果 * - 帮助文档 */
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, shallowRef, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { marked } from 'marked'
 import { copyText } from '@/utils/clipboard'
+import { isLocalFileReference } from '@/utils/fileReferences'
+import { isClosedMermaidFence } from '@/utils/mermaid'
+import MermaidDiagram from './MermaidDiagram.vue'
 
 /**
  * 组件 Props
@@ -50,6 +53,10 @@ const emit = defineEmits<{
  * 渲染后的 HTML
  */
 const renderedHtml = ref('')
+const markdownContent = ref<HTMLElement>()
+const diagrams = shallowRef<Array<{ id: string; source: string; pending: boolean; target: HTMLElement }>>([])
+let pendingDiagrams: Array<{ id: string; source: string; pending: boolean }> = []
+let renderGeneration = 0
 
 /**
  * 性能优化：在组件生命周期内复用 Renderer 实例
@@ -59,8 +66,13 @@ const renderedHtml = ref('')
  */
 const sharedRenderer = new marked.Renderer()
 
-sharedRenderer.code = ({ text, lang }) => {
+sharedRenderer.code = ({ text, lang, raw }) => {
   const language = lang || 'plaintext'
+  if (language.trim().split(/\s/)[0].toLowerCase() === 'mermaid') {
+    const id = `diagram-${pendingDiagrams.length}`
+    pendingDiagrams.push({ id, source: text, pending: props.streaming && !isClosedMermaidFence(raw) })
+    return `<div data-mermaid-slot="${id}"></div>`
+  }
   const highlighted = escapeHtml(text)
 
   const copyButton =
@@ -79,10 +91,13 @@ sharedRenderer.code = ({ text, lang }) => {
   `
 }
 
-sharedRenderer.link = ({ href, title, tokens }) => {
-  const text = tokens.map(token => ('raw' in token ? token.raw : '')).join('')
-  if (isFileReferenceValue(href)) {
-    return `<a href="#" data-file-path="${escapeHtml(href)}" class="markdown-file-reference">${text}</a>`
+// 原始 HTML 作为文字显示，避免消息注入脚本或伪造流程图挂载点。
+sharedRenderer.html = ({ text }) => escapeHtml(text)
+
+sharedRenderer.link = function ({ href, title, tokens }) {
+  const text = this.parser.parseInline(tokens)
+  if (isLocalFileReference(href, true)) {
+    return `<a href="#" data-file-path="${escapeHtml(href)}" title="${escapeHtml(href)}" class="markdown-file-reference">${text}</a>`
   }
 
   if (!href.startsWith('http://') && !href.startsWith('https://')) {
@@ -95,20 +110,12 @@ sharedRenderer.link = ({ href, title, tokens }) => {
 
 sharedRenderer.codespan = ({ text }) => {
   const value = text.trim()
-  const isFileReference = isFileReferenceValue(value)
+  const isFileReference = isLocalFileReference(value)
   const className = isFileReference
     ? 'markdown-reference markdown-file-reference'
     : 'markdown-reference'
   const attribute = isFileReference ? ` data-file-path="${escapeHtml(value)}"` : ''
   return `<code class="${className}"${attribute}>${escapeHtml(text)}</code>`
-}
-
-function isFileReferenceValue(value: string): boolean {
-  const normalized = value.trim()
-  if (/^file:\/\//i.test(normalized)) return true
-  return /\.(?:ts|tsx|js|jsx|mjs|cjs|vue|svelte|json|md|mdx|css|scss|less|html?|xml|ya?ml|toml|py|java|go|rs|c|h|cpp|hpp|cs|php|rb|swift|kt|kts|sql|sh|ps1|bat|txt|png|jpe?g|gif|webp|svg)(?:(?::|#L)\d+(?::\d+)?)?$/i.test(
-    normalized
-  )
 }
 
 /**
@@ -165,6 +172,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  renderGeneration++
   cancelScheduledRender()
 })
 
@@ -172,13 +180,24 @@ onBeforeUnmount(() => {
  * 渲染 Markdown
  */
 function renderMarkdown() {
+  const generation = ++renderGeneration
+  pendingDiagrams = []
   try {
     renderedHtml.value = marked.parse(props.content, {
       gfm: true,
       breaks: true,
       renderer: sharedRenderer,
     }) as string
+    const nextDiagrams = pendingDiagrams
+    void nextTick(() => {
+      if (generation !== renderGeneration) return
+      diagrams.value = nextDiagrams.flatMap(diagram => {
+        const target = markdownContent.value?.querySelector<HTMLElement>(`[data-mermaid-slot="${diagram.id}"]`)
+        return target ? [{ ...diagram, target }] : []
+      })
+    })
   } catch (error) {
+    diagrams.value = []
     console.error('Markdown 渲染失败:', error)
     // 流式内容可能暂时处于不完整语法状态；异常时仍显示原文，避免消息消失。
     renderedHtml.value = `<pre class="markdown-render-error">${escapeHtml(props.content)}</pre>`
@@ -201,9 +220,12 @@ function escapeHtml(text: string): string {
 
 async function handleRenderedClick(event: MouseEvent) {
   const target = event.target as HTMLElement
-  const fileToken = target.closest<HTMLElement>('[data-file-path]')
+  // 链接标题里的代码路径只是显示文字，点击始终使用外层链接的完整目标。
+  const fileToken = target.closest<HTMLAnchorElement>('a') ||
+    target.closest<HTMLElement>('[data-file-path]')
   if (fileToken?.dataset.filePath) {
     event.preventDefault()
+    event.stopPropagation()
     emit('file-open', fileToken.dataset.filePath)
     return
   }
@@ -228,11 +250,15 @@ async function handleRenderedClick(event: MouseEvent) {
 <template>
   <div class="markdown-renderer" :class="`markdown-renderer--${variant}`">
     <div
+      ref="markdownContent"
       class="markdown-content"
       :class="{ 'markdown-content--streaming': streaming }"
       v-html="renderedHtml"
       @click="handleRenderedClick"
     ></div>
+    <Teleport v-for="diagram in diagrams" :key="diagram.id" :to="diagram.target">
+      <MermaidDiagram :source="diagram.source" :pending="diagram.pending" />
+    </Teleport>
   </div>
 </template>
 
@@ -393,6 +419,10 @@ async function handleRenderedClick(event: MouseEvent) {
       color: #8acbff;
       text-decoration: underline;
     }
+  }
+
+  :deep(.markdown-file-reference code) {
+    color: inherit;
   }
 
 

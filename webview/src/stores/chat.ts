@@ -7,7 +7,6 @@ import type {
   Session,
   UIMessage,
   AgentServerEvent,
-  PermissionRequest,
   TokenUsage,
   AttachmentContext,
   SessionListItem,
@@ -117,7 +116,6 @@ export const useChatStore = defineStore('chat', () => {
   const streamingToolInput = ref('')
   const activeToolUseId = ref<string | null>(null)
   const activeToolName = ref<string | null>(null)
-  const pendingPermission = ref<PermissionRequest | null>(null)
   const permissionResponseTimers = new Map<string, number>()
   const pendingPermissionResponses = new Map<
     string,
@@ -130,7 +128,6 @@ export const useChatStore = defineStore('chat', () => {
         updatedInput?: unknown
         rule?: 'once' | 'always'
       }
-      request?: PermissionRequest
       retryIndex: number
     }
   >()
@@ -138,7 +135,19 @@ export const useChatStore = defineStore('chat', () => {
   let stopRequested = false
   const tokenUsage = ref<TokenUsage | null>(null)
   const uiMessages = ref<UIMessage[]>([])
+  const activeAssistantMessageId = ref<string | null>(null)
+  // 授权记录仍随会话持久化；底部卡片按请求顺序逐个展示。
+  const pendingPermissions = computed(() =>
+    uiMessages.value
+      .filter(
+        (message): message is Extract<UIMessage, { type: 'permission_request' }> =>
+          message.type === 'permission_request' && message.responseState === 'pending'
+      )
+      .sort((left, right) => left.timestamp - right.timestamp)
+  )
+  const pendingPermission = computed(() => pendingPermissions.value[0] || null)
   const pendingOptimisticUserMessageIds = ref(new Set<string>())
+  const sendError = ref('')
   const agentTaskNotifications = ref<
     Record<string, NonNullable<Extract<UIMessage, { type: 'tool_use' }>['notification']>>
   >({})
@@ -267,6 +276,7 @@ export const useChatStore = defineStore('chat', () => {
 
     switch (message.type) {
       case 'session.restored':
+        flushStreamingRafs()
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         agentStore.setActiveSession(message.data.session?.id || null)
@@ -274,6 +284,7 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'session.created':
+        flushStreamingRafs()
         clearAllPermissionResponseRetries()
         currentSession.value = message.data.session
         agentStore.setActiveSession(message.data.session.id)
@@ -290,6 +301,9 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'chat.messages.update':
+        if (message.data.session && currentSession.value &&
+          message.data.session.id !== currentSession.value.id) break
+        flushStreamingRafs()
         if (message.data.session) {
           currentSession.value = message.data.session
         } else if (currentSession.value) {
@@ -301,6 +315,22 @@ export const useChatStore = defineStore('chat', () => {
       case 'chat.message.stream':
         handleStreamMessage(message.data)
         break
+
+      case 'chat.send.rejected': {
+        if (message.data.sessionId && message.data.sessionId !== currentSession.value?.id) break
+        const id = `optimistic-${message.data.messageId}`
+        pendingOptimisticUserMessageIds.value.delete(id)
+        uiMessages.value = uiMessages.value.filter(item => item.id !== id)
+        toolUseIndexCache.clear()
+        streamingAssistantIndex = -1
+        streamingThinkingIndex = -1
+        if (!stopRequested) {
+          sendError.value = `消息未发送：${message.data.message}`
+          if (!message.data.running && !pendingOptimisticUserMessageIds.value.size) chatState.value = 'idle'
+          restorePendingRequestState()
+        }
+        break
+      }
 
       case 'agent.event':
         // 后台会话仍会持续产生事件；只渲染当前会话，完整状态由扩展写入对应 Session。
@@ -343,16 +373,22 @@ export const useChatStore = defineStore('chat', () => {
       openAgentResultToolUseId.value = null
       activeThinkingMessageId.value = null
       tokenUsage.value = null
-      pendingPermission.value = null
+      activeAssistantMessageId.value = null
       chatState.value = 'idle'
       return
     }
 
     // 会话切换/新建时不能沿用上一个会话的运行态；同会话增量更新才保留它们。
     if (!preserveRuntime) {
+      sendError.value = ''
+      pendingOptimisticUserMessageIds.value.clear()
       ignorePermissionRequests = false
       stopRequested = false
-      pendingPermission.value = null
+      activeAssistantMessageId.value = null
+      streamingText.value = ''
+      streamingToolInput.value = ''
+      activeToolUseId.value = null
+      activeToolName.value = null
       agentTaskNotifications.value = {}
       expandedStateById.value = {}
       openAgentResultToolUseId.value = null
@@ -431,6 +467,19 @@ export const useChatStore = defineStore('chat', () => {
 
       const reordered = reorderTranscript(currentSession.value.transcript) as UIMessage[]
       let rebuiltMessages = reordered.map(message => {
+        const localResponse = message.type === 'permission_request'
+          ? pendingPermissionResponses.get(message.requestId)
+          : undefined
+        if (
+          message.type === 'permission_request' &&
+          message.responseState === 'pending' &&
+          localResponse
+        ) {
+          return {
+            ...message,
+            responseState: localResponse.response.approved ? 'approved' as const : 'denied' as const,
+          }
+        }
         if (
           !preserveRuntime &&
           (message.type === 'permission_request' || message.type === 'interaction_request') &&
@@ -460,12 +509,15 @@ export const useChatStore = defineStore('chat', () => {
           m =>
             (m.type === 'thinking' && m.id === activeThinkingMessageId.value) ||
             m.id === 'streaming-thinking' ||
+            (m.type === 'assistant_text' && m.status === 'streaming') ||
             m.id === 'streaming-assistant' ||
             (m.type === 'tool_use' && m.isPending && m.partialInput)
         )
         // 移除 transcript 中可能存在的同类型旧消息，用流式临时消息替换
+        const streamingIds = new Set(streamingMessages.map(message => message.id))
         rebuiltMessages = rebuiltMessages.filter(
           m =>
+            !streamingIds.has(m.id) &&
             m.id !== activeThinkingMessageId.value &&
             m.id !== 'streaming-thinking' &&
             m.id !== 'streaming-assistant'
@@ -476,6 +528,10 @@ export const useChatStore = defineStore('chat', () => {
       // 复用相同 id/type 的消息对象，避免虚拟列表把已有项识别为全新项，
       // 从而丢失动态高度缓存并触发可见区域闪烁。
       const previousById = new Map(uiMessages.value.map(message => [message.id, message]))
+      rebuiltMessages = removeReconciledOptimisticMessages([
+        ...rebuiltMessages,
+        ...uiMessages.value.filter(message => pendingOptimisticUserMessageIds.value.has(message.id)),
+      ])
       uiMessages.value = rebuiltMessages.map(message => {
         const previous = previousById.get(message.id)
         if (previous && previous.type === message.type) {
@@ -493,6 +549,17 @@ export const useChatStore = defineStore('chat', () => {
       streamingAssistantIndex = -1
       streamingThinkingIndex = -1
       toolUseIndexCache.clear()
+      const activeAssistant = uiMessages.value.find(
+        message => message.type === 'assistant_text' && message.status === 'streaming'
+      )
+      activeAssistantMessageId.value = activeAssistant?.id || null
+      streamingText.value = activeAssistant?.type === 'assistant_text' ? activeAssistant.content : ''
+      if (!preserveRuntime) {
+        const activeThinking = uiMessages.value.find(message =>
+          message.type === 'thinking' && !message.endedAt && currentSession.value?.isRunning
+        )
+        activeThinkingMessageId.value = activeThinking?.id || null
+      }
       if (!preserveRuntime) restorePendingRequestState()
       return
     }
@@ -586,7 +653,10 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
 
-    uiMessages.value = removeReconciledOptimisticMessages(nextMessages)
+    uiMessages.value = removeReconciledOptimisticMessages([
+      ...nextMessages,
+      ...uiMessages.value.filter(message => pendingOptimisticUserMessageIds.value.has(message.id)),
+    ])
     // 缓存索引失效：uiMessages 被全量重建
     streamingAssistantIndex = -1
     streamingThinkingIndex = -1
@@ -605,22 +675,11 @@ export const useChatStore = defineStore('chat', () => {
       .sort((left, right) => left.timestamp - right.timestamp)
     const latest = pendingRequests[pendingRequests.length - 1]
 
-    const latestPermission = [...pendingRequests]
-      .reverse()
-      .find(message => message.type === 'permission_request')
-    pendingPermission.value =
-      latestPermission?.type === 'permission_request'
-        ? {
-            requestId: latestPermission.requestId,
-            toolName: latestPermission.toolName,
-            toolUseId: latestPermission.toolUseId,
-            input: latestPermission.input,
-            description: latestPermission.description,
-          }
-        : null
-
-    if (latest?.type === 'permission_request') chatState.value = 'waiting_permission'
+    if (pendingPermissions.value.length) chatState.value = 'waiting_permission'
     else if (latest?.type === 'interaction_request') chatState.value = 'waiting_interaction'
+    else if (chatState.value === 'waiting_permission' || chatState.value === 'waiting_interaction') {
+      chatState.value = currentSession.value?.isRunning ? 'thinking' : 'idle'
+    }
   }
 
   /** 应用指定会话的运行快照；非当前会话只更新 Agent 分桶。 */
@@ -638,19 +697,15 @@ export const useChatStore = defineStore('chat', () => {
           (message): message is Extract<UIMessage, { type: 'user_text' }> =>
             message.type === 'user_text' && !message.id.startsWith('optimistic-user-')
         )
-        .map(message => normalizeUserContent(message.content))
+        .map(message => `optimistic-${message.id}`)
     )
 
     return nextMessages.filter(message => {
       if (message.type !== 'user_text' || !message.id.startsWith('optimistic-user-')) return true
-      const matched = serverUserMessages.has(normalizeUserContent(message.content))
+      const matched = serverUserMessages.has(message.id)
       if (matched) pendingOptimisticUserMessageIds.value.delete(message.id)
       return !matched
     })
-  }
-
-  function normalizeUserContent(content: string) {
-    return content.trim().replace(/\s+/g, ' ')
   }
 
   function upsertPlanApprovalMessage(plan: import('./plan').Plan) {
@@ -710,9 +765,33 @@ export const useChatStore = defineStore('chat', () => {
     if (stopRequested) return
 
     switch (event.type) {
+      case 'user_input': {
+        flushStreamingRafs()
+        finalizeCurrentThinkingSegment()
+        finalizeCurrentAssistantSegment()
+        const optimisticId = `optimistic-${event.message.id}`
+        const optimistic = uiMessages.value.find(message => message.id === optimisticId)
+        uiMessages.value = uiMessages.value.filter(message => message.id !== optimisticId)
+        toolUseIndexCache.clear()
+        pendingOptimisticUserMessageIds.value.delete(optimisticId)
+        if (!uiMessages.value.some(message => message.id === event.message.id)) {
+          uiMessages.value.push({
+            ...optimistic, id: event.message.id, type: 'user_text',
+            content: event.message.content, timestamp: event.message.timestamp,
+            attachments: event.message.attachments, inlineSegments: event.message.inlineSegments,
+          })
+        }
+        if (currentSession.value &&
+          !currentSession.value.messages.some(message => message.id === event.message.id)) {
+          currentSession.value.messages.push(event.message)
+        }
+        restorePendingRequestState()
+        break
+      }
       case 'content_start':
         if (event.blockType === 'text') {
-          streamingText.value = ''
+          flushStreamingRafs()
+          finalizeCurrentAssistantSegment()
         } else {
           activeToolUseId.value = event.toolUseId ?? null
           activeToolName.value = event.toolName ?? null
@@ -723,6 +802,13 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'content_delta':
         if (typeof event.text === 'string') {
+          if (event.itemId && event.itemId !== activeAssistantMessageId.value) {
+            flushStreamingRafs()
+            finalizeCurrentAssistantSegment()
+            activeAssistantMessageId.value = event.itemId
+            const existing = uiMessages.value.find(message => message.id === event.itemId)
+            streamingText.value = existing?.type === 'assistant_text' ? existing.content : ''
+          }
           // 正文到达即结束当前 thinking 段。先落地同一帧内尚未渲染的思考增量，
           // 保证稳定 blockId 对应的内容和展开状态都完整保留。
           if (activeThinkingMessageId.value) {
@@ -750,11 +836,14 @@ export const useChatStore = defineStore('chat', () => {
       case 'content_discard': {
         flushStreamingRafs()
         const index = uiMessages.value.findIndex(
-          message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+          message =>
+            message.type === 'assistant_text' &&
+            message.id === (event.itemId || activeAssistantMessageId.value || 'streaming-assistant')
         )
         if (index !== -1) uiMessages.value.splice(index, 1)
         streamingText.value = ''
         streamingAssistantIndex = -1
+        activeAssistantMessageId.value = null
         break
       }
 
@@ -811,15 +900,9 @@ export const useChatStore = defineStore('chat', () => {
           })
           break
         }
-        if (!event.responseState || event.responseState === 'pending') {
-          pendingPermission.value = {
-            requestId: event.requestId,
-            toolName: event.toolName,
-            toolUseId: event.toolUseId,
-            input: event.input,
-            description: event.description,
-          }
-          chatState.value = 'waiting_permission'
+        const localPermissionResponse = pendingPermissionResponses.get(event.requestId)
+        if (event.responseState && event.responseState !== 'pending') {
+          clearPermissionResponseRetry(event.requestId)
         }
         const permissionMessage: UIMessage = {
           id: event.requestId,
@@ -832,13 +915,17 @@ export const useChatStore = defineStore('chat', () => {
           deferred: event.deferred,
           requestedAt: event.requestedAt,
           timestamp: event.requestedAt || Date.now(),
-          responseState: event.responseState || 'pending',
+          responseState:
+            (!event.responseState || event.responseState === 'pending') && localPermissionResponse
+              ? localPermissionResponse.response.approved ? 'approved' : 'denied'
+              : event.responseState || 'pending',
         }
         const permissionIndex = uiMessages.value.findIndex(
           message => message.type === 'permission_request' && message.requestId === event.requestId
         )
         if (permissionIndex === -1) uiMessages.value.push(permissionMessage)
         else uiMessages.value.splice(permissionIndex, 1, permissionMessage)
+        restorePendingRequestState()
         break
 
       case 'permission_response': {
@@ -851,10 +938,8 @@ export const useChatStore = defineStore('chat', () => {
           event.requestId,
           event.approved ? 'approved' : expired ? 'expired' : cancelled ? 'cancelled' : 'denied'
         )
-        if (pendingPermission.value?.requestId === event.requestId) {
-          pendingPermission.value = null
-        }
         if (!ignorePermissionRequests) chatState.value = 'thinking'
+        restorePendingRequestState()
         break
       }
 
@@ -884,6 +969,14 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'thinking':
         chatState.value = 'thinking'
+        if (
+          event.blockId &&
+          activeThinkingMessageId.value &&
+          event.blockId !== activeThinkingMessageId.value
+        ) {
+          flushStreamingRafs()
+          finalizeCurrentThinkingSegment()
+        }
         // 会话隔离：使用独立的思考记录 ID 避免并发会话互相覆盖
         const sessionId = currentSession.value?.id
         if (sessionId) {
@@ -920,14 +1013,17 @@ export const useChatStore = defineStore('chat', () => {
       case 'message_complete':
         flushStreamingRafs()
         finalizeCurrentThinkingSegment()
-        finalizeCurrentAssistantSegment()
-        chatState.value = 'idle'
+        finalizeCurrentAssistantSegment(
+          event.completed === true ? 'final' : 'commentary',
+          event.completed === true ? 'complete' : 'interrupted'
+        )
+        chatState.value = pendingOptimisticUserMessageIds.value.size ? 'thinking' : 'idle'
         isStreaming.value = false
         streamingText.value = ''
         streamingToolInput.value = ''
         activeToolUseId.value = null
         activeToolName.value = null
-        pendingPermission.value = null
+        expirePendingMessages()
         // 清理当前会话的思考记录 ID
         const sessionIdComplete = currentSession.value?.id
         if (sessionIdComplete) {
@@ -946,9 +1042,13 @@ export const useChatStore = defineStore('chat', () => {
         if (event.state === 'idle' || event.state === 'stopped') {
           flushStreamingRafs()
           finalizeCurrentThinkingSegment()
-          finalizeCurrentAssistantSegment()
+          finalizeCurrentAssistantSegment('commentary', 'interrupted')
+          expirePendingMessages()
         }
-        chatState.value = event.state as any
+        chatState.value = event.state === 'running'
+          ? 'thinking'
+          : event.state as typeof chatState.value
+        if (event.state !== 'idle' && event.state !== 'stopped') restorePendingRequestState()
         if (event.state === 'idle' || event.state === 'stopped') finalizePendingCompactions()
         break
     }
@@ -963,7 +1063,23 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function expirePendingMessages() {
+    clearAllPermissionResponseRetries()
+    for (const message of uiMessages.value) {
+      if (
+        (message.type === 'permission_request' || message.type === 'interaction_request') &&
+        message.responseState === 'pending'
+      ) message.responseState = 'cancelled'
+      if (message.type === 'tool_use' && message.isPending) {
+        message.isPending = false
+        message.executionStatus = 'cancelled'
+        if (message.bash?.status === 'running') message.bash.status = 'cancelled'
+      }
+    }
+  }
+
   function upsertAssistantText() {
+    const messageId = activeAssistantMessageId.value || 'streaming-assistant'
     // 如果缓存的索引已失效（消息被 finalize 改名或数组被重建），重新查找
     const len = uiMessages.value.length
     let idx = streamingAssistantIndex
@@ -971,21 +1087,23 @@ export const useChatStore = defineStore('chat', () => {
       idx < 0 ||
       idx >= len ||
       uiMessages.value[idx]?.type !== 'assistant_text' ||
-      (uiMessages.value[idx] as any)?.id !== 'streaming-assistant'
+      uiMessages.value[idx]?.id !== messageId
     ) {
       // 回退到 O(n) 查找，但只查一次，后续命中缓存
       idx = uiMessages.value.findIndex(
-        message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+        message => message.type === 'assistant_text' && message.id === messageId
       )
     }
     streamingAssistantIndex = idx
 
     if (idx === -1) {
       uiMessages.value.push({
-        id: 'streaming-assistant',
+        id: messageId,
         type: 'assistant_text',
         content: streamingText.value,
         timestamp: Date.now(),
+        phase: 'commentary',
+        status: 'streaming',
       })
       streamingAssistantIndex = uiMessages.value.length - 1
       return
@@ -1032,6 +1150,12 @@ export const useChatStore = defineStore('chat', () => {
 
   function finalizeCurrentThinkingSegment() {
     const activeId = activeThinkingMessageId.value
+    const active = uiMessages.value.find(
+      message => message.type === 'thinking' && message.id === activeId
+    )
+    if (active?.type === 'thinking') active.endedAt ||= Date.now()
+    const sessionId = currentSession.value?.id
+    if (sessionId) thinkingMessageIdBySession.delete(sessionId)
     activeThinkingMessageId.value = null
     streamingThinkingIndex = -1
     if (!activeId || activeId !== 'streaming-thinking') return
@@ -1057,10 +1181,15 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  function finalizeCurrentAssistantSegment() {
+  function finalizeCurrentAssistantSegment(
+    phase: 'commentary' | 'final' = 'commentary',
+    status: 'complete' | 'interrupted' = 'complete'
+  ) {
+    const messageId = activeAssistantMessageId.value || 'streaming-assistant'
     const existingIndex = uiMessages.value.findIndex(
-      message => message.type === 'assistant_text' && message.id === 'streaming-assistant'
+      message => message.type === 'assistant_text' && message.id === messageId
     )
+    activeAssistantMessageId.value = null
     // 重置流式文本缓冲，使工具之后的新文字从空开始，另起新块排在工具下方
     streamingText.value = ''
     streamingAssistantIndex = -1
@@ -1076,7 +1205,12 @@ export const useChatStore = defineStore('chat', () => {
     // 给当前文字段分配永久 ID，下次文字将创建新块
     uiMessages.value.splice(existingIndex, 1, {
       ...existing,
-      id: `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: messageId === 'streaming-assistant'
+        ? `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+        : messageId,
+      phase,
+      status,
+      endedAt: Date.now(),
     })
   }
 
@@ -1168,6 +1302,7 @@ export const useChatStore = defineStore('chat', () => {
       uiMessages.value.splice(toolUseIndex, 1, {
         ...uiMessages.value[toolUseIndex],
         isPending: false,
+        executionStatus: event.isError ? 'failed' : 'completed',
       })
       toolUseIndexCache.set(event.toolUseId, toolUseIndex)
     }
@@ -1399,6 +1534,7 @@ export const useChatStore = defineStore('chat', () => {
   ) {
     ignorePermissionRequests = false
     stopRequested = false
+    sendError.value = ''
     // 检查是否为内置命令（不需要 AI 处理的命令）
     const trimmed = content.trim()
     const isBuiltinCommand = /^\/(clear|clean|new|compact|help|memory|remember)(\s|$)/i.test(
@@ -1424,13 +1560,13 @@ export const useChatStore = defineStore('chat', () => {
     uiMessages.value.push(optimisticMessage)
 
     // 只有非内置命令才设置为 thinking 状态
-    if (!isBuiltinCommand) {
+    if (!isBuiltinCommand && !['waiting_permission', 'waiting_interaction'].includes(chatState.value)) {
       chatState.value = 'thinking'
     }
 
     vscode.postMessage({
       type: 'chat.send',
-      data: { messageId: clientMessageId, content, files, inlineSegments },
+      data: { sessionId: currentSession.value?.id, messageId: clientMessageId, content, files, inlineSegments },
     })
   }
 
@@ -1447,20 +1583,18 @@ export const useChatStore = defineStore('chat', () => {
     // 停止时把流式的 thinking/assistant 段定型改名，避免残留的固定 id 旧块
     // 在下一轮被 upsert 命中，导致新回答追加到旧位置产生顺序错乱
     finalizeCurrentThinkingSegment()
-    finalizeCurrentAssistantSegment()
+    finalizeCurrentAssistantSegment('commentary', 'interrupted')
     finalizePendingCompactions()
+    uiMessages.value = uiMessages.value.filter(message => !pendingOptimisticUserMessageIds.value.has(message.id))
+    pendingOptimisticUserMessageIds.value.clear()
+    toolUseIndexCache.clear()
+    expirePendingMessages()
     // 清理当前会话的思考记录 ID
     const sessionIdStop = currentSession.value?.id
     if (sessionIdStop) {
       thinkingMessageIdBySession.delete(sessionIdStop)
     }
     chatState.value = 'idle'
-    pendingPermission.value = null
-    for (const message of uiMessages.value) {
-      if (message.type === 'permission_request' && message.responseState === 'pending') {
-        message.responseState = 'cancelled'
-      }
-    }
     streamingText.value = ''
     streamingToolInput.value = ''
     activeToolUseId.value = null
@@ -1525,20 +1659,13 @@ export const useChatStore = defineStore('chat', () => {
       sessionId: currentSession.value?.id,
     }
     clearPermissionResponseRetry(response.requestId)
-    const request =
-      pendingPermission.value?.requestId === response.requestId
-        ? { ...pendingPermission.value }
-        : undefined
     pendingPermissionResponses.set(response.requestId, {
       response: sessionResponse,
-      request,
       retryIndex: 0,
     })
     updatePermissionResponseState(response.requestId, response.approved ? 'approved' : 'denied')
-    if (pendingPermission.value?.requestId === response.requestId) {
-      pendingPermission.value = null
-    }
-    chatState.value = response.approved ? 'thinking' : 'idle'
+    chatState.value = 'thinking'
+    restorePendingRequestState()
     postPermissionResponse(sessionResponse)
     schedulePermissionResponseRetry(response.requestId)
   }
@@ -1565,9 +1692,11 @@ export const useChatStore = defineStore('chat', () => {
     const retryDelays = [750, 1500, 3000]
     if (pending.retryIndex >= retryDelays.length) {
       pendingPermissionResponses.delete(requestId)
-      updatePermissionResponseState(requestId, 'pending')
-      if (pending.request) pendingPermission.value = pending.request
-      chatState.value = 'waiting_permission'
+      // 旧会话的重试不能重新激活当前会话的授权卡。
+      if (pending.response.sessionId === currentSession.value?.id && !stopRequested) {
+        updatePermissionResponseState(requestId, 'pending')
+        restorePendingRequestState()
+      }
       return
     }
 
@@ -1625,13 +1754,16 @@ export const useChatStore = defineStore('chat', () => {
     expandedStateById,
     openAgentResultToolUseId,
     activeThinkingMessageId,
+    activeAssistantMessageId,
     chatState,
     streamingText,
     streamingToolInput,
     activeToolUseId,
     activeToolName,
     pendingPermission,
+    pendingPermissions,
     tokenUsage,
+    sendError,
     initialize,
     createNewSession,
     sendMessage,

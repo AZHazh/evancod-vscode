@@ -20,6 +20,7 @@
 
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as os from 'os'
 import { execFile } from 'child_process'
 import { ChatService } from '../chat/ChatService'
 import { ProviderService } from '../provider/ProviderService'
@@ -36,6 +37,8 @@ import type {
   AgentDefinitionStore,
 } from '../agent/AgentDefinitionStore'
 import { createApiClient } from '../../core/services/api'
+import { parseFileReference } from './fileReferences'
+import { TextPreviewProvider } from './TextPreviewProvider'
 
 /**
  * 会改变"当前激活 Provider 快照"的消息类型。
@@ -96,6 +99,7 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     }) => void
   >()
   private permissionResponseCache = new PermissionResponseCache()
+  private readonly textPreviewProvider = new TextPreviewProvider()
 
   /**
    * 构造函数 - 依赖注入
@@ -116,7 +120,14 @@ export class WebviewManager implements vscode.WebviewViewProvider {
     private agentCoordinator?: AgentCoordinator,
     private toolProfileService?: ToolProfileService,
     private agentDefinitionStore?: AgentDefinitionStore
-  ) {}
+  ) {
+    this.context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider(
+        TextPreviewProvider.scheme,
+        this.textPreviewProvider
+      )
+    )
+  }
 
   /**
    * 显示右侧 Webview 视图。
@@ -308,21 +319,26 @@ export class WebviewManager implements vscode.WebviewViewProvider {
                 break
               }
               // 处理用户发送消息
-              const requestSessionId = this.chatService.getCurrentSession()?.id
+              const requestSessionId = message.data.sessionId || this.chatService.getCurrentSession()?.id
               try {
                 await this.chatService.sendMessage(
                   message.data.content,
                   message.data.files || message.data.images || [],
                   message.data.inlineSegments || [],
-                  message.data.messageId
+                  message.data.messageId,
+                  requestSessionId
                 )
                 // 切换会话期间，旧请求完成后不能把旧消息推回新会话。
                 const currentSession = this.chatService.getCurrentSession()
-                if (currentSession && currentSession.id === requestSessionId) {
+                if (currentSession && currentSession.id === requestSessionId &&
+                  !this.chatService.isSessionRunning(currentSession.id)) {
                   const sessionMessages = currentSession.messages
+                  const updatedAt = currentSession.updatedAt
                   const hydratedSession =
                     await this.chatService.hydrateSessionImages(currentSession)
-                  this.postMessage({
+                  if (this.chatService.getCurrentSession()?.id === requestSessionId &&
+                    currentSession.updatedAt === updatedAt &&
+                    !this.chatService.isSessionRunning(currentSession.id)) this.postMessage({
                     type: 'chat.messages.update',
                     data: {
                       session: hydratedSession,
@@ -333,9 +349,12 @@ export class WebviewManager implements vscode.WebviewViewProvider {
                 this.sendSessionList()
               } catch (error) {
                 this.postMessage({
-                  type: 'error',
+                  type: 'chat.send.rejected',
                   data: {
+                    sessionId: requestSessionId,
+                    messageId: message.data.messageId,
                     message: error instanceof Error ? error.message : 'Unknown error',
+                    running: Boolean(requestSessionId && this.chatService.isSessionRunning(requestSessionId)),
                   },
                 })
               }
@@ -432,6 +451,9 @@ export class WebviewManager implements vscode.WebviewViewProvider {
 
             case 'file.open':
               await this.handleFileOpen(message.data?.path, message.data?.line)
+              break
+            case 'text.preview':
+              await this.handleTextPreview(message.data?.text)
               break
 
             case 'workspace.pick':
@@ -606,7 +628,12 @@ export class WebviewManager implements vscode.WebviewViewProvider {
       const last = lastItem?.sessionId === sessionId ? lastItem.event : undefined
 
       if (event.type === 'content_delta' && typeof event.text === 'string') {
-        if (last?.type === 'content_delta' && typeof last.text === 'string' && !last.toolInput) {
+        if (
+          last?.type === 'content_delta' &&
+          last.itemId === event.itemId &&
+          typeof last.text === 'string' &&
+          !last.toolInput
+        ) {
           last.text += event.text
         } else {
           pendingEvents.push({ event: { ...event }, sessionId })
@@ -1373,126 +1400,96 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
     if (!filePath) return
     const workDir = this.chatService.getCurrentSession()?.workDir
     const baseDir = workDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
-    const reference = this.parseFileReference(filePath)
     try {
-      const resolvedPath = path.isAbsolute(reference.path)
-        ? reference.path
-        : path.resolve(baseDir, reference.path)
-      const uri = await this.resolveFileUri(resolvedPath, baseDir)
-      const document = await vscode.workspace.openTextDocument(uri)
-      // 如果传入了行号参数,优先使用它;否则使用 reference 中的行号
-      const targetLine = lineNumber !== undefined ? lineNumber : reference.line
-      const position = targetLine
-        ? new vscode.Position(targetLine - 1, Math.max((reference.column || 1) - 1, 0))
-        : undefined
-      await vscode.window.showTextDocument(document, {
-        preview: false,
-        selection: position ? new vscode.Range(position, position) : undefined,
-      })
-      await vscode.commands.executeCommand('revealInExplorer', uri)
-      if (position) {
-        const editor = vscode.window.activeTextEditor
-        if (editor) editor.revealRange(new vscode.Range(position, position))
+      const reference = parseFileReference(filePath)
+      const expandedPath = reference.path.replace(/^~(?=[/\\]|$)/, os.homedir())
+      const uri = await this.resolveFileUri(expandedPath, baseDir)
+      const stat = await vscode.workspace.fs.stat(uri)
+      if (stat.type & vscode.FileType.Directory) {
+        await vscode.commands.executeCommand('revealInExplorer', uri)
+        return
       }
+      const document = await vscode.workspace.openTextDocument(uri)
+      const targetLine = lineNumber ?? reference.line
+      const position = targetLine && Number.isFinite(targetLine)
+        ? document.validatePosition(new vscode.Position(
+            Math.max(targetLine - 1, 0), Math.max((reference.column || 1) - 1, 0)
+          ))
+        : undefined
+      const end = position && reference.endLine
+        ? document.validatePosition(new vscode.Position(
+            Math.max(reference.endLine - 1, 0), Math.max((reference.endColumn || 1) - 1, 0)
+          ))
+        : position
+      const selection = position && end ? new vscode.Range(position, end) : undefined
+      const editor = await vscode.window.showTextDocument(document, {
+        preview: false,
+        viewColumn: vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One,
+        selection,
+      })
+      if (selection) editor.revealRange(selection)
+      // Explorer 中无法显示的文件仍可以正常在编辑器打开。
+      await vscode.commands.executeCommand('revealInExplorer', uri).then(undefined, () => undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : '无法打开文件'
       vscode.window.showWarningMessage(`打开文件失败: ${message}`)
     }
   }
 
+  private async handleTextPreview(text?: string): Promise<void> {
+    if (typeof text !== 'string' || !text) return
+    const uri = this.textPreviewProvider.createUri(text)
+    const document = await vscode.workspace.openTextDocument(uri)
+    await vscode.window.showTextDocument(document, {
+      preview: false,
+      viewColumn: vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One,
+    })
+  }
+
   private async resolveFileUri(filePath: string, baseDir: string): Promise<vscode.Uri> {
-    const directUri = vscode.Uri.file(filePath)
-    try {
-      await vscode.workspace.fs.stat(directUri)
-      return directUri
-    } catch {
-      // 模型可能带回了已失效的绝对根目录，下面按当前工作区的路径后缀恢复。
+    // 与 Codex 扩展一致：绝对路径保持原意，不能截掉目录后打开另一个同名文件。
+    if (path.isAbsolute(filePath)) {
+      const uri = vscode.Uri.file(filePath)
+      await vscode.workspace.fs.stat(uri)
+      return uri
     }
 
-    const normalized = filePath.replace(/\\/g, '/').replace(/^\/+/, '')
-    const withoutDrive = normalized.replace(/^[A-Za-z]:\//, '')
-    const segments = withoutDrive.split('/').filter(Boolean)
-    // 从最长的路径后缀开始搜索。这样既能修复模型返回旧绝对根目录的问题，
-    // 也不会退化成仅按 basename 随机打开同名文件。
-    const suffixes: string[] = []
-    for (let count = segments.length; count >= 2; count -= 1) {
-      suffixes.push(segments.slice(-count).join('/'))
-    }
-
-    const roots: string[] = []
-    const addRoot = (root: string | undefined) => {
-      if (!root) return
-      const resolved = path.resolve(root)
-      if (
-        !roots.some(
-          item => path.normalize(item).toLowerCase() === path.normalize(resolved).toLowerCase()
-        )
-      ) {
-        roots.push(resolved)
-      }
-    }
-    try {
-      const baseUri = vscode.Uri.file(baseDir)
-      const baseStat = await vscode.workspace.fs.stat(baseUri)
-      if (baseStat.type === vscode.FileType.Directory) addRoot(baseDir)
-    } catch {
-      // 会话工作目录可能已经被移动，继续使用当前打开的工作区根目录。
-    }
-    for (const folder of vscode.workspace.workspaceFolders || []) addRoot(folder.uri.fsPath)
-
-    for (const suffix of suffixes) {
-      const pattern = `**/${suffix}`
+    const roots = [
+      { uri: vscode.Uri.file(baseDir), name: path.basename(baseDir) },
+      ...(vscode.workspace.workspaceFolders || []),
+    ]
+    const relativePaths = [filePath]
+    // 兼容 Git Diff 中的 a/、b/ 前缀，优先尝试原始相对路径。
+    if (/^[ab][/\\]/.test(filePath)) relativePaths.push(filePath.slice(2))
+    const attempted = new Set<string>()
+    for (const relativePath of relativePaths) {
+      const segments = relativePath.split(/[/\\]+/).filter(Boolean)
       for (const root of roots) {
-        const matches = await vscode.workspace.findFiles(
-          new vscode.RelativePattern(root, pattern),
-          undefined,
-          20
-        )
-        if (matches.length === 1) return matches[0]
-        if (matches.length > 1) {
-          const exact = matches.find(match =>
-            vscode.workspace.asRelativePath(match, false).replace(/\\/g, '/').endsWith(suffix)
-          )
-          if (exact) return exact
+        const candidates = [vscode.Uri.joinPath(root.uri, ...segments)]
+        const projectIndex = segments.indexOf(root.name)
+        if (projectIndex !== -1) {
+          candidates.push(vscode.Uri.joinPath(root.uri, ...segments.slice(projectIndex + 1)))
+        }
+        for (const uri of candidates) {
+          if (attempted.has(uri.toString())) continue
+          attempted.add(uri.toString())
+          try {
+            await vscode.workspace.fs.stat(uri)
+            return uri
+          } catch {
+            // 继续按原始完整相对路径解析其他工作区，不逐级截短路径。
+          }
         }
       }
     }
 
-    throw new Error(`无法解析文件路径: ${filePath}`)
-  }
-
-  private parseFileReference(value: string): { path: string; line?: number; column?: number } {
-    let reference = value.trim().replace(/^<|>$/g, '')
-    let line: number | undefined
-    let column: number | undefined
-    const locationSuffix = reference.match(/^(.*)(?:#L|:)(\d+)(?::(\d+))?$/)
-    if (locationSuffix) {
-      reference = locationSuffix[1]
-      line = Number(locationSuffix[2])
-      column = locationSuffix[3] ? Number(locationSuffix[3]) : undefined
-    }
-    if (/^file:\/\//i.test(reference)) {
-      try {
-        reference = vscode.Uri.parse(reference).fsPath
-      } catch {
-        reference = decodeURIComponent(reference.replace(/^file:\/\//i, ''))
-      }
-    } else {
-      try {
-        reference = decodeURIComponent(reference)
-      } catch {
-        // 保留无法解码的原始引用，后续仍可按普通路径或符号处理。
-      }
-    }
-    // 某些 URI 解码实现会保留盘符前的斜杠（/d:/...），在 Windows
-    // 上需要还原成 d:\\... 才能被 path.isAbsolute 正确识别。
-    reference = reference.replace(/^\/([A-Za-z]):[\\/]/, '$1:\\')
-    reference = reference.replace(/^\\([A-Za-z]):[\\/]/, '$1:\\')
-    return {
-      path: reference,
-      line,
-      column,
-    }
+    const normalized = filePath.replace(/\\/g, '/').replace(/^\.\//, '')
+    const pattern = `**/${normalized.replace(/[?*[\]{}]/g, character => `[${character}]`)}`
+    const matches = await vscode.workspace.findFiles(pattern, undefined, 2)
+    if (matches.length === 1) return matches[0]
+    throw new Error(matches.length > 1
+      ? `文件引用缺少完整目录，无法唯一定位: ${filePath}`
+      : `无法解析文件路径: ${filePath}`)
   }
 
   private handleInteractionResponse(data: {
@@ -1756,7 +1753,7 @@ systemPrompt 必须明确角色、输入、输出、工作步骤、验证要求�
 </head>
 <body>
   <div id="app"></div>
-  <script src="${scriptUri}"></script>
+  <script type="module" src="${scriptUri}"></script>
 </body>
 </html>`
   }

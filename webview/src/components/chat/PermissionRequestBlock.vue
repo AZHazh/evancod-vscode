@@ -1,21 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import {
-  Check,
-  Clock3,
-  CircleCheck,
-  CircleX,
-  FilePenLine,
-  FilePlus2,
-  FileX2,
-  Folder,
-  ShieldCheck,
-  X,
-  Terminal,
-} from 'lucide-vue-next'
+import { Bot, ChevronDown, FilePenLine, FilePlus2, FileX2, ShieldCheck, Terminal } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 import DiffViewer from '@/components/diff/DiffViewer.vue'
-import TerminalChrome from '@/components/terminal/TerminalChrome.vue'
 
 const props = defineProps<{
   requestId: string
@@ -24,11 +11,13 @@ const props = defineProps<{
   description?: string
   deferred?: boolean
   requestedAt?: number
+  remainingCount?: number
   responseState?: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
 }>()
 
 const chatStore = useChatStore()
 const sendPermissionResponse = chatStore.sendPermissionResponse
+const detailsExpanded = ref(false)
 const inputText = computed(() => JSON.stringify(props.input, null, 2))
 const inputRecord = computed(() =>
   typeof props.input === 'object' && props.input !== null && !Array.isArray(props.input)
@@ -50,33 +39,33 @@ const newString = computed(() =>
 const content = computed(() =>
   typeof inputRecord.value?.content === 'string' ? inputRecord.value.content : undefined
 )
-const isEditLike = computed(() =>
-  ['edit_file', 'write_file', 'Edit', 'Write'].includes(props.toolName)
-)
-const isDeleteLike = computed(() => ['delete_file', 'Delete'].includes(props.toolName))
 const normalizedToolName = computed(() => props.toolName.toLowerCase())
-const isWriteLike = computed(
-  () => normalizedToolName.value === 'write_file' || normalizedToolName.value === 'write'
+const isEditLike = computed(() =>
+  ['edit_file', 'write_file', 'edit', 'write'].includes(normalizedToolName.value)
 )
-const fileActionLabel = computed(() => {
-  if (isWriteLike.value) return 'Write'
-  if (isDeleteLike.value) return 'Delete'
-  return 'Edit'
-})
-const toolNameDisplay = computed(() => {
-  const labels: Record<string, string> = {
-    edit_file: 'Edit',
-    write_file: 'Write',
-    delete_file: 'Delete',
-    bash: 'Bash',
-  }
-  return labels[props.toolName] || props.toolName
-})
-const systemIdentity = computed(() =>
-  isEditLike.value || isDeleteLike.value
-    ? `Evancod ${fileActionLabel.value}`
-    : toolNameDisplay.value
+const isDeleteLike = computed(() => ['delete_file', 'delete'].includes(normalizedToolName.value))
+const isWriteLike = computed(() => ['write_file', 'write'].includes(normalizedToolName.value))
+const hasDiff = computed(
+  () =>
+    isEditLike.value &&
+    [oldString.value, newString.value, content.value].some(value => value !== undefined)
 )
+const actionLabel = computed(() => {
+  if (isWriteLike.value) return '准备写入文件'
+  if (isEditLike.value) return '准备更新文件'
+  if (isDeleteLike.value) return '准备删除文件'
+  if (command.value) return '准备运行命令'
+  return `允许 ${props.toolName} 继续`
+})
+const actionIcon = computed(() => {
+  if (normalizedToolName.value === 'agent') return Bot
+  if (isWriteLike.value) return FilePlus2
+  if (isEditLike.value) return FilePenLine
+  if (isDeleteLike.value) return FileX2
+  if (command.value) return Terminal
+  return ShieldCheck
+})
+const summaryText = computed(() => command.value || filePath.value || props.description || '')
 const responseState = ref<'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'>(
   props.responseState || 'pending'
 )
@@ -93,33 +82,31 @@ const statusText = computed(() => {
   if (responseState.value === 'denied') return '已拒绝'
   if (responseState.value === 'cancelled') return '已取消'
   if (responseState.value === 'expired') return '已超时'
-  return isEditLike.value ? '等待审批' : 'awaiting approval'
+  return '等待授权'
 })
-const statusClass = computed(() => responseState.value)
 const deferredNotice = computed(() => {
-  if (responseState.value === 'expired') {
-    return '该请求在你查看其他会话期间未得到处理，现已超时。'
-  }
-  if (responseState.value === 'cancelled') {
-    return '该请求在你查看其他会话期间一直等待，现已取消或失效。'
-  }
+  if (responseState.value === 'expired') return '该请求在你查看其他会话期间未得到处理，现已超时。'
+  if (responseState.value === 'cancelled') return '该请求在你查看其他会话期间等待，现已取消或失效。'
   return '该请求在你查看其他会话期间一直等待，可能已经接近超时。'
 })
 function approvePermission() {
   if (submitting.value) return
   submitting.value = true
+  responseState.value = 'approved'
   sendPermissionResponse({ requestId: props.requestId, approved: true })
 }
 
 function approveSession() {
   if (submitting.value) return
   submitting.value = true
+  responseState.value = 'approved'
   sendPermissionResponse({ requestId: props.requestId, approved: true, rule: 'always' })
 }
 
 function denyPermission() {
   if (submitting.value) return
   submitting.value = true
+  responseState.value = 'denied'
   sendPermissionResponse({
     requestId: props.requestId,
     approved: false,
@@ -129,667 +116,349 @@ function denyPermission() {
 </script>
 
 <template>
-  <div class="permission-card" :class="`permission-card--${responseState}`">
-    <div class="permission-card__header">
-      <component
-        :is="isWriteLike ? FilePlus2 : isDeleteLike ? FileX2 : FilePenLine"
-        v-if="isEditLike || isDeleteLike"
-        class="permission-card__file-icon"
-        :class="`permission-card__file-icon--${responseState}`"
-      />
-      <Terminal
-        v-else-if="toolName === 'bash'"
-        class="permission-card__file-icon"
-        :class="`permission-card__file-icon--${responseState}`"
-      />
-      <div
-        v-else
-        class="permission-card__icon-wrap"
-        :class="`permission-card__icon-wrap--${responseState}`"
-      >
-        <CircleCheck
-          v-if="responseState === 'approved'"
-          class="permission-card__header-status-icon"
-        />
-        <CircleX
-          v-else-if="responseState !== 'pending'"
-          class="permission-card__header-status-icon"
-        />
-        <span v-else>!</span>
-      </div>
-      <div class="permission-card__main">
-        <div class="permission-card__title-row">
-          <span class="permission-card__title"
-            >允许 {{ systemIdentity }}{{ filePath ? ` ${filePath.split('/').pop()}?` : '' }}</span
-          >
-          <span class="permission-card__badge" :class="`permission-card__badge--${statusClass}`">
-            <component
-              :is="responseState === 'approved' ? CircleCheck : CircleX"
-              v-if="responseState !== 'pending'"
-              class="permission-card__badge-icon"
-            />
-            <span v-else class="permission-card__badge-dot" /> {{ statusText }}
+  <div class="permission-card" :aria-busy="submitting">
+    <div class="permission-card__bar">
+      <span class="permission-card__icon" aria-hidden="true">
+        <component :is="actionIcon" :size="17" :stroke-width="1.6" />
+      </span>
+      <div class="permission-card__summary">
+        <span class="permission-card__heading">
+          <span class="permission-card__label">{{ actionLabel }}</span>
+          <span v-if="remainingCount" class="permission-card__queue" role="status">
+            +{{ remainingCount }}
           </span>
-        </div>
-        <div v-if="description && !isEditLike" class="permission-card__description">
-          {{ description }}
-        </div>
+        </span>
+        <span
+          v-if="summaryText"
+          class="permission-card__subject"
+          :class="{ 'permission-card__subject--code': command || filePath }"
+          :title="summaryText"
+        >
+          {{ summaryText }}
+        </span>
       </div>
-    </div>
-
-    <div v-if="deferred" class="permission-card__deferred-notice">
-      <Clock3 :size="14" />
-      <span>{{ deferredNotice }}</span>
-    </div>
-
-    <div class="permission-card__body">
-      <div
-        v-if="(isEditLike || isDeleteLike) && filePath"
-        class="permission-card__path-row"
-        :title="filePath"
+      <button
+        class="permission-card__toggle"
+        type="button"
+        :aria-expanded="detailsExpanded"
+        :aria-controls="`permission-details-${requestId}`"
+        @click="detailsExpanded = !detailsExpanded"
       >
-        <Folder class="permission-card__path-icon" />
-        <span>{{ filePath }}</span>
+        {{ detailsExpanded ? '收起' : '详情' }}
+        <ChevronDown :size="12" :class="{ 'is-expanded': detailsExpanded }" />
+      </button>
+      <div v-if="responseState === 'pending'" class="permission-card__actions">
+        <button
+          class="permission-card__button permission-card__button--primary"
+          type="button"
+          :disabled="submitting"
+          @click="approvePermission"
+        >
+          允许一次
+        </button>
+        <button
+          class="permission-card__button permission-card__button--session"
+          type="button"
+          :disabled="submitting"
+          @click="approveSession"
+        >
+          本次会话允许
+        </button>
+        <button
+          class="permission-card__button permission-card__button--danger"
+          type="button"
+          :disabled="submitting"
+          @click="denyPermission"
+        >
+          拒绝
+        </button>
       </div>
+      <span v-else class="permission-card__status" role="status">{{ statusText }}</span>
+    </div>
+    <div
+      v-if="detailsExpanded"
+      :id="`permission-details-${requestId}`"
+      class="permission-card__details"
+      role="region"
+      aria-label="授权操作详情"
+    >
+      <p v-if="description" class="permission-card__description">{{ description }}</p>
+      <p v-if="deferred" class="permission-card__notice">{{ deferredNotice }}</p>
       <DiffViewer
-        v-if="isEditLike && (oldString || newString || content)"
+        v-if="hasDiff"
         :file-path="filePath"
         :old-text="oldString"
         :new-text="newString"
         :content="content"
       />
-      <TerminalChrome
-        v-else-if="toolName === 'bash' && command"
-        :command="command"
-        :description="description"
-        status="running"
-      />
-      <div v-else class="permission-card__detail-row">
-        <span>Input</span>
-        <code>{{ inputText }}</code>
-      </div>
-    </div>
-
-    <div v-if="responseState === 'pending'" class="permission-card__actions">
-      <button
-        class="chat-button chat-button--primary"
-        type="button"
-        :disabled="submitting"
-        @click="approvePermission"
-      >
-        <Check class="chat-button__icon" />允许
-      </button>
-      <button
-        class="chat-button chat-button--ghost"
-        type="button"
-        :disabled="submitting"
-        @click="approveSession"
-      >
-        <ShieldCheck class="chat-button__icon" />本次会话允许
-      </button>
-      <button
-        class="chat-button chat-button--danger"
-        type="button"
-        :disabled="submitting"
-        @click="denyPermission"
-      >
-        <X class="chat-button__icon" />拒绝
-      </button>
+      <pre v-else-if="command" class="permission-card__code"><code>{{ command }}</code></pre>
+      <pre v-else class="permission-card__code"><code>{{ inputText }}</code></pre>
+      <details v-if="hasDiff || command" class="permission-card__raw">
+        <summary>原始参数</summary>
+        <pre class="permission-card__code"><code>{{ inputText }}</code></pre>
+      </details>
     </div>
   </div>
 </template>
 
 <style scoped lang="scss">
-.questions-wrapper {
-  background: var(--vscode-editor-background);
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 12px;
+.permission-card {
+  position: relative;
+  min-width: 0;
   overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background:
+    radial-gradient(
+      ellipse at 0% 0%,
+      color-mix(in srgb, var(--chat-color-primary) 10%, transparent),
+      transparent 65%
+    ) padding-box,
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--chat-color-surface-container-high) 90%, transparent),
+      color-mix(in srgb, var(--chat-color-surface-container-lowest) 88%, transparent)
+    ) padding-box,
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--chat-color-text-primary) 22%, transparent),
+      color-mix(in srgb, var(--chat-color-border) 50%, transparent) 48%,
+      color-mix(in srgb, var(--chat-color-text-primary) 10%, transparent)
+    ) border-box;
+  backdrop-filter: blur(20px) saturate(145%);
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.22),
+    0 2px 6px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.08);
+
+  &::before {
+    position: absolute;
+    top: 0;
+    left: 12%;
+    right: 12%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+    content: '';
+    pointer-events: none;
+  }
 }
 
-.questions-header {
-  display: flex;
+.permission-card__bar {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  padding: 16px 20px;
-  background: var(--vscode-editor-background);
-  border-bottom: 1px solid var(--vscode-panel-border);
+  gap: 9px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 20px;
 }
 
-.questions-icon {
+.permission-card__summary {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.permission-card__icon {
+  display: grid;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--chat-color-warning) 15%, transparent);
-  color: var(--chat-color-warning);
-  flex-shrink: 0;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--chat-color-primary) 16%, transparent);
+  border-radius: 10px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--chat-color-primary) 12%, transparent),
+    color-mix(in srgb, var(--chat-color-surface) 42%, transparent)
+  );
+  color: var(--chat-color-primary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
-.questions-main-title {
-  flex: 1;
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--vscode-foreground);
-}
-
-.questions-status-badge {
-  padding: 4px 12px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.questions-status-badge--approved {
-  background: color-mix(in srgb, #69f08d 16%, transparent);
-  color: #69f08d;
-}
-
-.questions-status-badge--denied {
-  background: color-mix(in srgb, var(--chat-color-error) 16%, transparent);
-  color: var(--chat-color-error);
-}
-
-.questions-tabs {
+.permission-card__heading {
   display: flex;
-  gap: 0;
-  padding: 0 20px;
-  background: var(--vscode-editor-background);
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.tab-button {
-  position: relative;
-  padding: 12px 20px;
-  border: none;
-  background: transparent;
-  color: var(--vscode-descriptionForeground);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: color 0.2s ease;
-
-  &::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: transparent;
-    transition: background 0.2s ease;
-  }
-
-  &:hover {
-    color: var(--vscode-foreground);
-  }
-
-  &.tab-button--active {
-    color: var(--vscode-foreground);
-
-    &::after {
-      background: #ff7f5f;
-    }
-  }
-
-  &.tab-button--answered {
-    color: #69f08d;
-  }
-}
-
-.questions-content {
-  padding: 24px 20px;
-  min-height: 200px;
-}
-
-.question-panel {
-  animation: fadeIn 0.2s ease;
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.question-text {
-  margin: 0 0 20px 0;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--vscode-foreground);
-  line-height: 1.6;
-}
-
-.custom-input-section {
-  margin-top: 16px;
-}
-
-.custom-input-label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 12px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.questions-footer {
-  padding: 16px 20px;
-  border-top: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-editor-background);
-}
-
-.submit-button {
-  display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: 8px;
-  padding: 8px 20px;
-  border: none;
-  border-radius: 6px;
-  background: #ff7f5f;
-  color: #18120f;
-  font-size: 13px;
-  font-weight: 600;
+  gap: 7px;
+}
+
+.permission-card__label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-color-text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-card__subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-color-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+
+.permission-card__subject--code {
+  font-family: var(--chat-font-mono);
+}
+
+.permission-card__queue {
+  flex-shrink: 0;
+  color: var(--chat-color-text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.permission-card__toggle,
+.permission-card__button {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--chat-color-text-secondary);
+  font: inherit;
+  line-height: 20px;
+  white-space: nowrap;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
 
   &:hover:not(:disabled) {
-    background: #ff9478;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px color-mix(in srgb, #ff7f5f 30%, transparent);
+    background: var(--chat-color-surface-hover);
+    color: var(--chat-color-text-primary);
+  }
+
+  &:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, var(--chat-color-primary));
+    outline-offset: 2px;
   }
 
   &:disabled {
     opacity: 0.5;
-    cursor: not-allowed;
+    cursor: default;
   }
 }
 
-.submit-icon {
-  flex-shrink: 0;
-}
-
-.success-message {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px 20px;
-  background: color-mix(in srgb, #69f08d 8%, transparent);
-  border-top: 1px solid color-mix(in srgb, #69f08d 25%, transparent);
-}
-
-.success-icon {
-  flex-shrink: 0;
-  color: #69f08d;
-  margin-top: 2px;
-}
-
-.success-text {
-  flex: 1;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--vscode-foreground);
-}
-
-.permission-card {
-  overflow: hidden;
-  border-radius: var(--chat-radius-lg);
-  border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
-  background: var(--chat-color-surface-container-lowest);
-}
-
-.permission-card--approved {
-  border-color: color-mix(in srgb, #69f08d 45%, var(--chat-color-border));
-}
-
-.permission-card--denied {
-  border-color: color-mix(in srgb, var(--chat-color-error) 45%, var(--chat-color-border));
-}
-
-.permission-card--cancelled {
-  border-color: color-mix(in srgb, var(--vscode-descriptionForeground) 55%, transparent);
-}
-
-.permission-card--expired {
-  border-color: color-mix(in srgb, var(--vscode-charts-yellow) 65%, transparent);
-}
-
-.permission-card--ask {
-  border: 1px solid var(--vscode-panel-border);
-}
-
-.permission-card__header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px;
-  background: var(--chat-color-surface-container-lowest);
-}
-
-.permission-card__file-icon {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  color: var(--chat-color-warning);
-  stroke-width: 2;
-}
-
-.permission-card__file-icon--approved {
-  color: #69f08d;
-}
-
-.permission-card__file-icon--denied {
-  color: var(--chat-color-error);
-}
-
-.permission-card__file-icon--cancelled {
-  color: var(--vscode-descriptionForeground);
-}
-
-.permission-card__file-icon--expired {
-  color: var(--vscode-charts-yellow);
-}
-
-.permission-card__file-icon--pending {
-  color: var(--chat-color-warning);
-}
-
-.permission-card__icon-wrap {
-  display: flex;
-  width: 23px;
-  height: 23px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--chat-radius-md);
-  background: color-mix(in srgb, var(--chat-color-warning) 10%, transparent);
-  color: var(--chat-color-warning);
-  font-weight: 800;
-}
-
-.permission-card__icon-wrap--approved {
-  background: color-mix(in srgb, #69f08d 12%, transparent);
-  color: #69f08d;
-}
-
-.permission-card__icon-wrap--denied {
-  background: color-mix(in srgb, var(--chat-color-error) 12%, transparent);
-  color: var(--chat-color-error);
-}
-
-.permission-card__header-status-icon {
-  width: 18px;
-  height: 18px;
-}
-
-.permission-card__main {
-  min-width: 0;
-  flex: 1;
-}
-
-.permission-card__title-row {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.permission-card__title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--chat-color-text-primary);
-  font-size: 14px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-card__description {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--chat-color-text-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-card__badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: var(--chat-radius-full);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.permission-card__badge--pending {
-  background: color-mix(in srgb, var(--chat-color-warning) 15%, transparent);
-  color: var(--chat-color-warning);
-}
-
-.permission-card__badge--approved {
-  background: color-mix(in srgb, #69f08d 16%, transparent);
-  color: #69f08d;
-}
-
-.permission-card__badge--denied {
-  background: color-mix(in srgb, var(--chat-color-error) 16%, transparent);
-  color: var(--chat-color-error);
-}
-
-.permission-card__badge--cancelled {
-  background: color-mix(in srgb, var(--vscode-descriptionForeground) 14%, transparent);
-  color: var(--vscode-descriptionForeground);
-}
-
-.permission-card__badge--expired {
-  background: color-mix(in srgb, var(--vscode-charts-yellow) 14%, transparent);
-  color: var(--vscode-charts-yellow);
-}
-
-.chat-button:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
-
-.permission-card__badge-icon {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-}
-
-.permission-card__badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--chat-radius-full);
-  background: var(--chat-color-warning);
-  animation: chat-pulse-dot 1.4s ease-in-out infinite;
-}
-
-.permission-card__body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 10px 12px;
-}
-
-.permission-card__deferred-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0 10px 10px;
-  padding: 8px 10px;
-  border-left: 2px solid var(--chat-color-warning);
-  background: color-mix(in srgb, var(--chat-color-warning) 10%, transparent);
-  color: var(--chat-color-text-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.permission-card__deferred-notice svg {
-  flex-shrink: 0;
-  margin-top: 1px;
-  color: var(--chat-color-warning);
-}
-
-.permission-card__path-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: var(--chat-radius-md);
-  background: var(--chat-color-surface-container);
-  color: var(--chat-color-text-secondary);
-  font-family: var(--chat-font-mono);
-  font-size: 12px;
-}
-
-.permission-card__path-row span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-card__path-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  color: var(--chat-color-text-tertiary);
-}
-
-.permission-card__detail-row {
-  display: flex;
-  gap: 8px;
-  padding: 8px 0;
-  border-radius: var(--chat-radius-md);
-  background: var(--chat-color-surface-container);
-  color: var(--chat-color-text-secondary);
-  font-family: var(--chat-font-mono);
-  font-size: 12px;
-}
-
-.permission-card__detail-row code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-card__raw-toggle {
-  margin-top: 8px;
-  border: 0;
-  background: transparent;
-  color: var(--chat-color-text-accent);
-  cursor: pointer;
+.permission-card__toggle {
+  align-self: start;
+  padding: 2px 4px;
   font-size: 11px;
 
-  &:hover {
-    text-decoration: underline;
+  .is-expanded {
+    transform: rotate(180deg);
+  }
+}
+
+.permission-card__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  min-height: 27px;
+}
+
+.permission-card__button--primary {
+  background: #ff7f5f;
+  color: #18120f;
+  box-shadow: 0 2px 5px rgba(255, 127, 95, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+
+  &:hover:not(:disabled) {
+    background: #ff9478;
+    color: #18120f;
+  }
+}
+
+.permission-card__button--session {
+  border-color: color-mix(in srgb, var(--chat-color-text-primary) 9%, transparent);
+  background: color-mix(in srgb, var(--chat-color-text-primary) 3%, transparent);
+}
+
+.permission-card__button--danger {
+  color: var(--chat-color-error);
+
+  &:hover:not(:disabled) {
+    background: var(--chat-color-error-container);
+    color: var(--chat-color-error);
+  }
+}
+
+.permission-card__status {
+  grid-column: 1 / -1;
+  justify-self: end;
+  min-height: 27px;
+  line-height: 27px;
+  color: var(--chat-color-text-secondary);
+}
+
+.permission-card__details {
+  max-height: min(28vh, 220px);
+  overflow: auto;
+  padding: 10px;
+  border-top: 1px solid var(--chat-color-border);
+  color: var(--chat-color-text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.permission-card__description,
+.permission-card__notice {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.permission-card__notice {
+  color: var(--chat-color-text-secondary);
+}
+
+.permission-card__code {
+  margin: 0;
+  font-family: var(--chat-font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+
+  code {
+    font: inherit;
   }
 }
 
 .permission-card__raw {
-  max-height: 220px;
-  overflow: auto;
-  margin: 8px 0 0;
-  padding: 10px 12px;
-  border-radius: var(--chat-radius-md);
-  background: var(--chat-color-terminal-bg);
-  color: var(--chat-color-terminal-fg);
-  font-family: var(--chat-font-mono);
-  font-size: 11px;
-  line-height: 1.3;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.permission-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid color-mix(in srgb, var(--chat-color-outline-variant) 20%, transparent);
-  background: var(--chat-color-surface-container-low);
-}
-
-.chat-button {
-  display: inline-flex;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: var(--chat-radius-md);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  transition:
-    background-color 0.16s ease,
-    border-color 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
-
-  &:hover {
-    transform: translateY(-1px);
-  }
-}
-
-.chat-button__icon {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.chat-button--primary {
-  background: #ff7f5f;
-  color: #18120f;
-
-  &:hover {
-    background: #ff9478;
-    box-shadow: 0 6px 16px color-mix(in srgb, #ff7f5f 25%, transparent);
-  }
-}
-
-.chat-button--ghost {
-  border-color: color-mix(in srgb, var(--chat-color-border) 60%, transparent);
-  background: var(--chat-color-surface-container-lowest);
+  margin-top: 8px;
   color: var(--chat-color-text-secondary);
 
-  &:hover {
-    border-color: color-mix(in srgb, var(--chat-color-text-secondary) 45%, transparent);
-    background: var(--chat-color-surface-hover);
-    color: var(--chat-color-text-primary);
+  summary {
+    width: fit-content;
+    cursor: pointer;
+  }
+
+  pre {
+    margin-top: 6px;
   }
 }
 
-.chat-button--danger {
-  border-color: color-mix(in srgb, var(--chat-color-error) 35%, transparent);
-  background: color-mix(in srgb, var(--chat-color-error-container) 45%, var(--chat-color-surface));
-  color: var(--chat-color-error);
+.permission-card__details :deep(.diff-viewer__body) {
+  max-height: none;
+}
 
-  &:hover {
-    border-color: color-mix(in srgb, var(--chat-color-error) 55%, transparent);
-    background: color-mix(
-      in srgb,
-      var(--chat-color-error-container) 70%,
-      var(--chat-color-surface)
-    );
+@media (max-width: 360px) {
+  .permission-card__bar {
+    padding: 10px;
+    gap: 8px;
+  }
+  .permission-card__button {
+    padding-inline: 7px;
+    font-size: 11px;
   }
 }
 </style>

@@ -1,11 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowReactive, watch } from 'vue'
 import { ArrowDown } from 'lucide-vue-next'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import type { UIMessage } from '@/types'
 import { useChatStore } from '@/stores/chat'
 import { formatElapsed } from '@/utils/formatElapsed'
 import MessageItem from './MessageItem.vue'
+import ToolActivityGroup from './ToolActivityGroup.vue'
+import TurnActivityGroup from './TurnActivityGroup.vue'
+import { groupToolActivity, type ActivityItem } from '@/utils/activityGrouping'
+import {
+  groupCompletedTurns,
+  type TurnActivityGroup as TurnGroup,
+} from '@/utils/conversationGrouping'
 
 const chatStore = useChatStore()
 // DynamicScroller 组件实例。它是泛型函数式组件，无法用 InstanceType 取类型，
@@ -60,32 +67,17 @@ const toolUseMap = computed(() => {
   return map
 })
 
-// 性能优化：将需要隐藏的工具名称提取为常量
-const HIDDEN_TOOL_RESULTS = new Set([
-  'read_file',
-  'grep',
-  'glob',
-  'edit_file',
-  'write_file',
-  'image_gen',
-])
-const RESULT_INJECTABLE_TOOLS = new Set(['read_file', 'grep', 'glob', 'image_gen'])
-
-// task_* 工具（task_create/task_update/task_list/task_get）的结果统一合并进对应卡片，
-// 不再作为独立 tool_result 渲染，避免错误结果块与相邻卡片粘连或产生空行
-function isTaskTool(toolName: string) {
-  return toolName.startsWith('task_')
-}
-
 // 增强的消息列表，将 tool_result 数据注入到 tool_use 中。
 // 保持列表数组引用稳定：子工具流式更新或回答文本增长时，不要让 DynamicScroller
 // 把整个列表当成新数据重算，否则已展开项会短暂回收并出现错误的空白高度。
 const enhancedToolCache = new Map<string, UIMessage>()
-let enhancedItems: UIMessage[] = []
+// 稳定数组也需要追踪同 ID 的对象替换，否则 streaming → final 会被后续投影缓存。
+let enhancedItems: UIMessage[] = shallowReactive([])
 let enhancedKeys = ''
 const enhancedMessages = computed(() => {
   const nextItems: UIMessage[] = []
   messages.value.forEach(msg => {
+    if (msg.type === 'permission_request') return
     // 过滤掉 agent 子工具调用（在 AgentCard 内展示，不在主消息流重复）
     if (
       (msg.type === 'tool_use' || msg.type === 'tool_result') &&
@@ -94,12 +86,10 @@ const enhancedMessages = computed(() => {
     ) {
       return
     }
-    // 过滤掉特定工具的 tool_result 消息（用 Map 查 O(1) 代替 find O(n)）
+    // 匹配到调用的结果统一注入对应详情卡，避免在工具组内重复显示。
     if (msg.type === 'tool_result') {
       const toolName = toolUseMap.value.get(msg.toolUseId)
-      if (toolName) {
-        if (HIDDEN_TOOL_RESULTS.has(toolName) || isTaskTool(toolName)) return
-      }
+      if (toolName) return
     }
     // 为工具项复用一个 reactive 包装对象。这样结果流式更新时既能刷新内容，
     // 又不会因为每次 map 都创建新对象而触发 DynamicScroller 重置。
@@ -111,7 +101,7 @@ const enhancedMessages = computed(() => {
       }
       Object.assign(cached, msg)
       const result = toolResultMap.value.get(msg.toolUseId)
-      if (result && (RESULT_INJECTABLE_TOOLS.has(msg.toolName) || isTaskTool(msg.toolName))) {
+      if (result) {
         Object.assign(cached, msg, {
           result: result.content,
           resultError: result.isError,
@@ -138,8 +128,47 @@ const enhancedMessages = computed(() => {
   }
 
   enhancedKeys = nextKeys
-  enhancedItems = nextItems
+  enhancedItems = shallowReactive(nextItems)
   return enhancedItems
+})
+const activityCache = new Map<string, Extract<ActivityItem, { type: 'tool_activity_group' }>>()
+const activityItems = computed(() => {
+  const items = groupToolActivity(enhancedMessages.value)
+  const ids = new Set<string>()
+  const projected = items.map(item => {
+    if (item.type !== 'tool_activity_group') return item
+    ids.add(item.id)
+    const cached = activityCache.get(item.id)
+    if (cached) {
+      cached.messages = item.messages
+      return cached
+    }
+    const group = reactive(item)
+    activityCache.set(item.id, group)
+    return group
+  })
+  for (const id of activityCache.keys()) if (!ids.has(id)) activityCache.delete(id)
+  return projected
+})
+const turnCache = new Map<string, TurnGroup>()
+const conversationItems = computed(() => {
+  const isRunning = chatStore.chatState !== 'idle' && chatStore.chatState !== 'stopped'
+  const items = groupCompletedTurns(activityItems.value, isRunning)
+  const ids = new Set<string>()
+  const projected = items.map(item => {
+    if (item.type !== 'turn_activity_group') return item
+    ids.add(item.id)
+    const cached = turnCache.get(item.id)
+    if (cached) {
+      Object.assign(cached, item)
+      return cached
+    }
+    const group = reactive(item)
+    turnCache.set(item.id, group)
+    return group
+  })
+  for (const id of turnCache.keys()) if (!ids.has(id)) turnCache.delete(id)
+  return projected
 })
 const showThinkingIndicator = computed(() => {
   // 如果消息列表中已有活跃的 thinking 块，不显示底部指示器（避免重复）
@@ -149,7 +178,7 @@ const showThinkingIndicator = computed(() => {
   if (hasActiveThinking) return false
 
   return (
-    chatStore.chatState !== 'idle' ||
+    (chatStore.chatState !== 'idle' && chatStore.chatState !== 'stopped') ||
     enhancedMessages.value.some(
       message =>
         message.type === 'tool_use' && message.isPending && message.toolName !== 'image_gen'
@@ -159,7 +188,23 @@ const showThinkingIndicator = computed(() => {
 const streamingVerb = computed(() => {
   if (chatStore.chatState === 'waiting_permission') return '等待授权'
   if (chatStore.chatState === 'waiting_interaction') return '等待回答'
-  return '思考中...'
+  const active = [...messages.value].reverse().find(
+    message => message.type === 'tool_use' && message.isPending
+  )
+  if (active?.type === 'tool_use') {
+    const verbs: Record<string, string> = {
+      read_file: '正在读取文件',
+      grep: '正在搜索',
+      glob: '正在查找文件',
+      edit_file: '正在编辑文件',
+      write_file: '正在写入文件',
+      bash: '正在执行命令',
+      agent: 'Agent 执行中',
+      image_gen: '正在生成图片',
+    }
+    return verbs[active.toolName] || `正在执行 ${active.toolName}`
+  }
+  return '正在处理'
 })
 const thinkingElapsedSeconds = computed(() => {
   const sessionId = chatStore.currentSession?.id
@@ -183,7 +228,7 @@ const latestAssistantTextLength = computed(() => {
 const throttledTextLength = computed(() => Math.floor(latestAssistantTextLength.value / 200))
 const scrollSignature = computed(() =>
   [
-    enhancedMessages.value.length,
+    conversationItems.value.length,
     enhancedMessages.value.at(-1)?.id,
     throttledTextLength.value,
     chatStore.chatState,
@@ -349,7 +394,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="chat-list">
+  <!-- 让选中文本时焦点留在消息区，避免 VS Code 复制前恢复输入框焦点并清空选区。 -->
+  <section class="chat-list" tabindex="0" aria-label="聊天消息">
     <div v-if="enhancedMessages.length === 0" class="empty-state">
       <div class="empty-icon">✦</div>
       <div class="empty-text">开始新对话</div>
@@ -359,7 +405,8 @@ onBeforeUnmount(() => {
     <DynamicScroller
       v-else
       ref="scrollerRef"
-      :items="enhancedMessages"
+      :key="chatStore.currentSession?.id"
+      :items="conversationItems"
       :min-item-size="80"
       :buffer="1000"
       key-field="id"
@@ -372,7 +419,9 @@ onBeforeUnmount(() => {
       <template #default="{ item, index, active }">
         <DynamicScrollerItem :item="item" :active="active" :data-index="index">
           <div class="chat-list__row">
-            <MessageItem :message="item" />
+            <TurnActivityGroup v-if="item.type === 'turn_activity_group'" :group="item" />
+            <ToolActivityGroup v-else-if="item.type === 'tool_activity_group'" :group="item" />
+            <MessageItem v-else :message="item" />
           </div>
         </DynamicScrollerItem>
       </template>

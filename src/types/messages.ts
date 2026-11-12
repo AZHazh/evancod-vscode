@@ -28,6 +28,7 @@ import type {
 export type BashStatus = 'running' | 'completed' | 'error' | 'timeout' | 'cancelled'
 
 export type AgentServerEvent =
+  | { type: 'user_input'; message: Message }
   | {
       type: 'content_start'
       blockType: 'text' | 'tool_use'
@@ -35,8 +36,8 @@ export type AgentServerEvent =
       toolUseId?: string
       parentToolUseId?: string
     }
-  | { type: 'content_delta'; text?: string; toolInput?: string }
-  | { type: 'content_discard' }
+  | { type: 'content_delta'; text?: string; toolInput?: string; itemId?: string }
+  | { type: 'content_discard'; itemId?: string }
   | {
       type: 'tool_use_complete'
       toolName: string
@@ -165,6 +166,10 @@ export interface SessionAgentRuntimeSnapshot {
  * 这些消息由 Extension 发送，Webview 接收
  */
 export type ExtensionToWebviewMessage =
+  | {
+      type: 'chat.send.rejected'
+      data: { sessionId?: string; messageId?: string; message: string; running: boolean }
+    }
   // === 会话相关 ===
   | {
       type: 'session.restored'
@@ -297,6 +302,7 @@ export type ExtensionToWebviewMessage =
  * 这些消息由 Webview 发送，Extension 接收
  */
 export type WebviewToExtensionMessage =
+  | { type: 'image.save'; data: { path?: string; name?: string; base64?: string; mime?: string } }
   // === 初始化 ===
   | {
       type: 'ready'
@@ -323,6 +329,7 @@ export type WebviewToExtensionMessage =
   | {
       type: 'chat.send'
       data: {
+        sessionId?: string
         messageId?: string
         content: string
         images?: string[]
@@ -352,6 +359,10 @@ export type WebviewToExtensionMessage =
   | {
       type: 'file.open'
       data: { path: string; line?: number }
+    }
+  | {
+      type: 'text.preview'
+      data: { text: string; title?: string }
     }
   | {
       type: 'interaction_response'

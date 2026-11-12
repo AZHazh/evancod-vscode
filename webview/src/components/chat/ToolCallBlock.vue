@@ -14,6 +14,7 @@ const props = defineProps<{
   toolUseId: string
   input: unknown
   isPending?: boolean
+  executionStatus?: 'completed' | 'failed' | 'cancelled'
   partialInput?: string
   parentToolUseId?: string
   bash?: BashRuntimeState
@@ -60,15 +61,25 @@ const mcpUri = computed(() => textValue(inputRecord.value?.uri))
 const skillName = computed(() => textValue(inputRecord.value?.skill))
 const skillArgs = computed(() => textValue(inputRecord.value?.args))
 const imagePrompt = computed(() => textValue(inputRecord.value?.prompt))
-const bashStatus = computed(() => props.bash?.status || (props.isPending ? 'running' : 'completed'))
+const waitingPermission = computed(() =>
+  chatStore.pendingPermissions.some(request => request.toolUseId === props.toolUseId)
+)
+const bashStatus = computed(() => {
+  if (waitingPermission.value) return 'pending'
+  if (props.executionStatus === 'cancelled') return 'cancelled'
+  return props.bash?.status || (props.isPending ? 'running' : 'completed')
+})
 const notificationStatus = computed(() => props.notification?.status)
 const notificationText = computed(
   () => props.notification?.summary || props.notification?.result || ''
 )
 const status = computed(() => {
+  if (waitingPermission.value) return 'waiting_permission'
+  if (props.executionStatus === 'cancelled') return 'cancelled'
   if (props.isPending) return 'pending'
   if (props.resultError) return props.resultOutcome || 'error'
   if (
+    props.executionStatus === 'failed' ||
     notificationStatus.value === 'failed' ||
     bashStatus.value === 'error' ||
     bashStatus.value === 'timeout'
@@ -177,6 +188,7 @@ const summary = computed(() => {
 })
 
 const resultSummary = computed(() => {
+  if (status.value === 'waiting_permission') return '等待授权'
   if (status.value === 'pending') return ''
   if (status.value === 'no_match') return '未找到匹配'
   if (status.value === 'no_change') return '无变更'
@@ -200,7 +212,7 @@ function openFile() {
 const RESULT_MAX_CHARS = 4000
 
 const resultFullText = computed(() =>
-  typeof props.result === 'string' ? props.result : JSON.stringify(props.result, null, 2)
+  typeof props.result === 'string' ? props.result : JSON.stringify(props.result, null, 2) || ''
 )
 const resultExpanded = computed({
   get: () => chatStore.isExpandedState(`tool:${props.toolUseId}:full-result`),
@@ -224,10 +236,7 @@ const rawResultExpanded = computed({
 })
 
 const hasResult = computed(() => {
-  return (
-    props.result !== undefined &&
-    (['read_file', 'grep', 'glob'].includes(props.toolName) || isTaskTool.value)
-  )
+  return props.result !== undefined && props.toolName !== 'image_gen'
 })
 
 /** 解析 image_gen 结果中的图片预览（base64） */
@@ -747,7 +756,7 @@ function downloadImage(image: GeneratedImage) {
         <span class="tool-call__spinner" />
         Running
       </span>
-      <span v-else class="tool-call__result-summary">{{ resultSummary }}</span>
+      <!-- <span v-else class="tool-call__result-summary">{{ resultSummary }}</span> -->
       <span v-if="status === 'error'" class="tool-call__error-icon">
         <svg
           t="1790081186690"
@@ -854,7 +863,7 @@ function downloadImage(image: GeneratedImage) {
         <!-- 无主旨（成功结果或无法提炼）：沿用截断预览 -->
         <template v-else>
           <div class="tool-result-header">
-            <span>{{ resultError ? (resultSummary || '执行结果') : '执行结果' }}</span>
+            <span>{{ resultError ? resultSummary || '执行结果' : '执行结果' }}</span>
             <button
               v-if="resultTruncated"
               class="tool-result-toggle"
@@ -1029,7 +1038,11 @@ function downloadImage(image: GeneratedImage) {
 }
 
 .tool-call--retryable_error {
-  border-color: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 45%, var(--chat-color-border));
+  border-color: color-mix(
+    in srgb,
+    var(--vscode-charts-yellow, #cca700) 45%,
+    var(--chat-color-border)
+  );
 }
 
 .tool-call--no_match,
@@ -1050,6 +1063,7 @@ function downloadImage(image: GeneratedImage) {
   cursor: pointer;
   text-align: left;
   transition: background-color 150ms ease;
+  line-height: 18px;
 
   &:hover {
     background: color-mix(in srgb, var(--chat-color-surface-hover) 80%, transparent);
@@ -1058,15 +1072,16 @@ function downloadImage(image: GeneratedImage) {
 
 .tool-call__icon {
   flex-shrink: 0;
-  // display: flex;
-  // align-items: center;
-  // justify-content: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 12px;
   height: 12px;
   color: var(--chat-color-outline);
   transition: color 200ms ease;
 
   svg {
+    display: block;
     width: 100%;
     height: 100%;
   }
@@ -1123,15 +1138,16 @@ function downloadImage(image: GeneratedImage) {
 }
 
 .tool-call__chevron {
-  // display: flex;
-  // flex-shrink: 0;
-  // align-items: center;
-  // justify-content: center;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
   width: 12px;
   height: 12px;
   color: var(--chat-color-outline);
 
   svg {
+    display: block;
     width: 100%;
     height: 100%;
   }
@@ -1432,10 +1448,6 @@ code,
 }
 
 @media (max-width: 640px) {
-  .tool-call__header {
-    align-items: flex-start;
-  }
-
   .tool-call__summary {
     display: none;
   }

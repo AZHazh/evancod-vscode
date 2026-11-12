@@ -32,7 +32,7 @@ export interface AttachmentContext {
 }
 
 export interface InlineMessageSegment {
-  type: 'text' | 'file' | 'skill'
+  type: 'text' | 'file' | 'skill' | 'pasted_text'
   text?: string
   path?: string
   name?: string
@@ -169,8 +169,17 @@ export type AgentTranscriptBlock =
       attachments?: AttachmentContext[]
       inlineSegments?: InlineMessageSegment[]
     }
-  | { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string }
-  | { id: string; type: 'thinking'; content: string; timestamp: number }
+  | {
+      id: string
+      type: 'assistant_text'
+      content: string
+      timestamp: number
+      model?: string
+      phase?: 'commentary' | 'final'
+      status?: 'streaming' | 'complete' | 'interrupted'
+      endedAt?: number
+    }
+  | { id: string; type: 'thinking'; content: string; timestamp: number; endedAt?: number }
   | {
       id: string
       type: 'context_compaction'
@@ -198,6 +207,7 @@ export type AgentTranscriptBlock =
       timestamp: number
       isPending?: boolean
       partialInput?: string
+      executionStatus?: 'completed' | 'failed' | 'cancelled'
       parentToolUseId?: string
       notification?: AgentTaskNotification
       bash?: BashRuntimeState
@@ -270,6 +280,29 @@ export interface ToolCall {
   endTime?: number
 }
 
+export interface CompactionRecord {
+  version: 1
+  id: string
+  timestamp: number
+  trigger: 'automatic' | 'manual' | 'context-overflow'
+  providerId: string
+  model: string
+  promptVersion: string
+  contextWindow: number
+  beforeTokens: number
+  afterTokens: number
+  retainTokens: number
+  protectedUserTokens: number
+  sourceDigest: string
+  replacementDigest: string
+  sourceMessages: Message[]
+  replacementMessages: Message[]
+  summaryMessageId: string
+  retainedMessageIds: string[]
+  protectedUserMessageIds: string[]
+  requestContext: { systemPrompt: string; tools: unknown[] }
+}
+
 export interface Session {
   id: string
   name: string
@@ -286,6 +319,7 @@ export interface Session {
   }
   tokenUsage?: TokenUsage
   compactSummary?: string
+  compactions?: CompactionRecord[]
   attachments?: AttachmentContext[]
   requestContexts?: RequestContext[]
   activeRun?: RunState

@@ -9,6 +9,7 @@ import { ToolOrchestrator } from '../core/tools/execution/ToolOrchestrator'
 import { recordCompactionEvent } from '../services/compact/compactionEvents'
 import { replaceWithRollingSummary } from '../services/compact/compact'
 import { prepareSessionForPersistence } from '../services/persistence/sessionSerialization'
+import { ContextBudgetManager } from '../services/context/ContextBudgetManager'
 import type { AgentTranscriptBlock, CompletionEvidence, Session, TaskItem, ToolCall } from '../types'
 import type { TaskManager } from '../services/task/TaskManager'
 import type { QueryEngine } from '../core/engine/QueryEngine'
@@ -201,6 +202,50 @@ describe('task completion review', () => {
 })
 
 describe('compaction transcript', () => {
+  it('adopts a manual checkpoint only after persistence and keeps the archive immutable', async () => {
+    const apiModule = requireModule('../core/services/api')
+    const factory = mock.method(apiModule, 'createApiClient', () => ({
+      sendMessageStream: async () => ({ content: 'Keep the requested constraint and continue.' }),
+    }))
+    const original = [
+      { id: 'goal', role: 'user', content: 'Do not change the schema.', timestamp: 0 },
+      { id: 'old', role: 'assistant', content: '历史'.repeat(40_000), timestamp: 1 },
+      { id: 'recent', role: 'assistant', content: 'Continue validation', timestamp: 2 },
+    ]
+    const resetDedup = mock.fn()
+    const saved: import('../types').CompactionRecord[] = []
+    const engine = Object.assign(Object.create(QueryEngineConstructor.prototype), {
+      apiClient: {}, tools: [], requestSystemPrompt: '',
+      contextBudget: new ContextBudgetManager(), toolOrchestrator: { resetDedup },
+      config: {
+        cwd: '/workspace', model: 'test-model', provider: { id: 'test', models: {}, autoCompactWindow: 100_000 },
+        messages: original,
+        buildRuntimeContext: () => [{ id: 'runtime-context', role: 'user', internal: true, content: 'Current request contract', timestamp: 0 }],
+        onCompaction: async () => { throw new Error('checkpoint failed') },
+      },
+    })
+    try {
+      await assert.rejects(engine.compactContext('manual'), /checkpoint failed/)
+      assert.equal(engine.config.messages, original)
+      assert.equal(resetDedup.mock.callCount(), 0)
+      engine.config.onCompaction = async (record: import('../types').CompactionRecord) => {
+        assert.equal(engine.config.messages, original)
+        saved.push(record)
+      }
+      const record = await engine.compactContext('manual')
+      assert.equal(record.trigger, 'manual')
+      assert.equal(saved.length, 1)
+      assert.equal(resetDedup.mock.callCount(), 1)
+      const archivedCount = record.replacementMessages.length
+      engine.config.messages.push({ id: 'later', role: 'assistant', content: 'new progress', timestamp: 3 })
+      assert.equal(record.replacementMessages.length, archivedCount)
+      assert.match(engine.buildRequestMessages()[0].content, /Current request contract/)
+      assert.match(engine.buildRequestMessages()[0].content, /workspace/)
+    } finally {
+      factory.mock.restore()
+    }
+  })
+
   it('restores live task state outside the model summary and resets stale read caches', async () => {
     const manager = createManager()
     const task = await createRunningTask(manager)
@@ -216,6 +261,8 @@ describe('compaction transcript', () => {
       apiClient: {},
       tools: [],
       requestSystemPrompt: '',
+      abortController: new AbortController(),
+      contextBudget: new ContextBudgetManager(),
       toolOrchestrator: { resetDedup },
       config: {
         model: 'test-model',
@@ -223,7 +270,8 @@ describe('compaction transcript', () => {
         taskManager: manager,
         compactKeepRecentMessages: 5,
         messages: [
-          { id: 'long-history', role: 'user', content: '历史'.repeat(100_000), timestamp: 1 },
+          { id: 'original-goal', role: 'user', content: '修复并验证', timestamp: 0 },
+          { id: 'long-history', role: 'assistant', content: '历史'.repeat(100_000), timestamp: 1 },
           ...Array.from({ length: 6 }, (_, index) => ({
             id: `recent-${index}`,
             role: 'assistant',
@@ -237,7 +285,7 @@ describe('compaction transcript', () => {
       await engine.performAutoCompact()
       assert.equal(summaryRequest.mock.callCount(), 1)
       assert.equal(resetDedup.mock.callCount(), 1)
-      const recovered = engine.config.messages.at(-1)
+      const recovered = engine.config.messages.find((message: { id: string }) => message.id === 'compact-task-recovery-current')
       assert.equal(recovered.internal, true)
       assert.match(recovered.content, /reviewing/)
       assert.match(recovered.content, /task_update completed/)

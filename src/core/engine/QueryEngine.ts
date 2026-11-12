@@ -27,7 +27,7 @@
  */
 
 import type { Message, ToolCall, ContentBlock, TokenUsage } from '../../types'
-import type { Provider } from '../../types'
+import type { CompactionRecord, Provider } from '../../types'
 import type { AgentServerEvent } from '../../types/messages'
 import { createApiClient } from '../services/api'
 import type { ApiClientResponse, ImageStreamEvent } from '../services/api'
@@ -43,12 +43,7 @@ import {
   shouldMicrocompact,
 } from '../../services/compact/microcompact'
 import { closeDanglingToolCalls as repairDanglingToolCalls } from '../services/api/toolMessageSanitizer'
-import {
-  buildRollingCompactionInput,
-  compactConversation,
-  isCompactSummaryMessage,
-  replaceWithRollingSummary,
-} from '../../services/compact/compact'
+import { compactWithBudget, isRuntimeContextMessage } from '../../services/compact/budgetCompaction'
 import {
   ContextBudgetManager,
   estimateRequestTokens,
@@ -205,12 +200,12 @@ export interface QueryEngineConfig {
    */
   isDevelopment?: boolean
 
-  /**
-   * 压缩时保留的最近消息数量（可选）
-   * 默认 10 条，范围 5-50
-   * 从 evancod.compactKeepRecentMessages 配置读取
-   */
+  /** @deprecated Use compactRetainTokens instead. */
   compactKeepRecentMessages?: number
+  compactRetainTokens?: number
+  compactUserMessageTokens?: number
+  buildRuntimeContext?: () => Message[]
+  onCompaction?: (record: CompactionRecord) => Promise<void>
 }
 
 /**
@@ -352,6 +347,13 @@ export class QueryEngine {
   private abortController = new AbortController()
   private cancelled = false
   private cancelReason = 'Query cancelled'
+  private acceptingUserInput = false
+  private activeModelRequest?: AbortController
+  private pendingUserInputs: Array<{
+    prepare: () => Promise<Message>
+    resolve: () => void
+    reject: (error: unknown) => void
+  }> = []
   private consecutiveCompactFailures = 0
   private lastTerminationReason: QueryTerminationReason = 'model_completed'
 
@@ -528,8 +530,11 @@ export class QueryEngine {
     return `你是 Evancod，一个在 VS Code 插件中运行的软件工程 Agent。
 
 工作契约：
+- 执行任务前，用一两句话向用户说明准备做什么。在一组相关工具调用后，有了新发现、需要调整方向或进入下一阶段时，再简短说明已确认的事实及下一步。说明使用普通正文，不要输出模拟工具日志、阶段标签或特殊 JSON。简单问答直接回答即可。
+- 进展说明后继续执行工具，不要把说明当作任务完成。工具记录由界面展示，无需逐个复述。若工具结果尚未返回，不得预报结果；结束时简要说明实际改动、验证结果及仍未完成的事项。停止、失败或达到执行上限时如实说明。
 - 复杂多步骤、todo list 或多项请求使用 task_create；执行前用 task_update 标记 in_progress，实际实现和验证完成后才能标记 completed，再用 task_list 检查下一项。计划权限模式是例外：计划阶段不使用任何 task 工具。
 - 编码前读取、搜索并分析工作区。能从代码、配置、文档、测试或既有模式确认的信息自行确认，不询问用户。
+- 回复中引用真实文件时，使用 Markdown 链接，链接目标填写工具已确认的完整绝对路径，可附 :行号:列号 或 #L行号；例如 [app.ts](D:/project/src/app.ts:12:3)。路径包含空格时用尖括号包住目标。显示文字可用短文件名，但目标必须精确到文件；不要编造路径或只用文件名代替真实目录。
 - 只有缺少外部信息，或选择会实质影响公开 API、数据、依赖、兼容性、安全、性能、用户体验、不可逆操作范围或验收标准时，才调用 ask_user_question 集中询问 1-4 个阻塞问题。
 - 对局部、可逆、低风险细节遵循项目既有模式。用户要求冲突或不同理解会产生显著不同结果时，不得擅自选择。
 - 测试失败、实现不完整、文件缺失或仍有阻塞时，不得声称完成。
@@ -537,7 +542,8 @@ export class QueryEngine {
 - 工具执行结果会作为上下文回灌。根据结果继续下一步，直到无需再调用工具。
 - 对复杂、独立或上下文较重的研究任务，可以使用 agent。要真正并发多个独立的只读 Agent，必须在同一轮响应中一次发出多个 agent 调用；分多轮逐个调用仍是串行。可写 Agent 会串行执行，禁止在共享工作区后台运行。后台 Agent 启动后不要轮询，等待完成通知。
 - 用户明确指定某个子 Agent 时，必须把对应定义 ID 传给 subagent_type；该 Agent 失败或超时后不得自行替代执行，应说明原因并询问是否重试。
-- 需要生成图片时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${planModeNotice}${this.buildSkillCatalog()}${
+- 流程图、时序图和架构图使用 mermaid 围栏代码块输出，界面会自动渲染并提供复制和 PNG 下载。用户在执行途中追加消息时，保留已有进展继续处理；冲突要求以最新消息为准。
+- 需要生成照片、插画等位图时，必须调用 image_gen 工具，不要在文本中描述或伪造图片结果。${planModeNotice}${this.buildSkillCatalog()}${
       injectedPrompt ? `\n\n当前角色与附加约束：\n${injectedPrompt}` : ''
     }`
   }
@@ -704,6 +710,45 @@ Skill 使用契约：
    * @param images - 可选的图片附件（Phase 3+）
    * @returns Promise<Message> 助手的响应消息
    */
+  /** 只中断当前模型请求；工具执行和整个任务的取消信号保持独立。 */
+  enqueueUserInput(prepare: () => Promise<Message>): Promise<void> | undefined {
+    if (!this.acceptingUserInput || this.cancelled) return undefined
+    const accepted = new Promise<void>((resolve, reject) => {
+      this.pendingUserInputs.push({ prepare, resolve, reject })
+    })
+    this.activeModelRequest?.abort()
+    return accepted
+  }
+
+  private async drainUserInputs(): Promise<boolean> {
+    let consumed = false
+    while (this.pendingUserInputs.length) {
+      this.throwIfCancelled()
+      const input = this.pendingUserInputs.shift()!
+      let abortPreparation: (() => void) | undefined
+      try {
+        const cancelled = new Promise<never>((_resolve, reject) => {
+          abortPreparation = () => reject(new QueryCancelledError(this.cancelReason))
+          this.abortController.signal.addEventListener('abort', abortPreparation, { once: true })
+        })
+        const message = await Promise.race([input.prepare(), cancelled])
+        this.throwIfCancelled()
+        this.flushPendingDeltas()
+        this.activeThinkingBlockId = undefined
+        this.config.messages.push(message)
+        this.onAgentEventCallback?.({ type: 'user_input', message })
+        input.resolve()
+        consumed = true
+      } catch (error) {
+        input.reject(error)
+        this.throwIfCancelled()
+      } finally {
+        if (abortPreparation) this.abortController.signal.removeEventListener('abort', abortPreparation)
+      }
+    }
+    return consumed
+  }
+
   async query(
     content: string,
     contentBlocks?: ContentBlock[],
@@ -724,6 +769,8 @@ Skill 使用契约：
       this.cancelled = false
       this.abortController = new AbortController()
       this.activeThinkingBlockId = undefined
+      this.acceptingUserInput = true
+      this.pendingUserInputs ||= []
 
       this.onAgentEventCallback?.({ type: 'status', state: 'running', verb: 'query' })
 
@@ -836,8 +883,22 @@ Skill 使用契约：
       // 新一轮用户请求：清空上一轮的工具去重缓存
       this.toolOrchestrator?.resetDedup()
 
-      while (iteration < MAX_TOTAL_ITERATIONS) {
-        if (iteration > 0 && iteration % ITERATIONS_PER_SEGMENT === 0) {
+      while (iteration < MAX_TOTAL_ITERATIONS || this.pendingUserInputs.length > 0) {
+        const steered = this.pendingUserInputs.length > 0 && await this.drainUserInputs()
+        if (steered) {
+          this.toolOrchestrator?.resetDedup()
+          continuationCount = 0
+          taskContinuationCount = 0
+          promiseNudgeCount = 0
+          consecutiveNoProgressTurns = 0
+          repeatedErrorTurns = 0
+          lastErrorSignature = ''
+          consecutiveEmptyResponses = 0
+          degenerateRetryCount = 0
+          taskCompletionReviewRequested = false
+          forceToolChoiceOnce = false
+        }
+        if (!steered && iteration > 0 && iteration % ITERATIONS_PER_SEGMENT === 0) {
           const unfinishedTasksAtCheckpoint =
             this.config.taskManager
               ?.listTasks()
@@ -973,7 +1034,11 @@ Skill 使用契约：
         const apiStartedAt = performance.now()
         // 每次请求单独的 AbortController：检测到复读退化时只中止本次请求，
         // 不影响整个查询的取消状态。用户取消时联动中止。
+        // 压缩期间收到的消息也必须先入历史，再构造下一次请求。
+        if (this.pendingUserInputs.length) continue
         const requestController = new AbortController()
+        this.activeModelRequest = requestController
+        let streamedContent = ''
         const abortRequest = () => requestController.abort()
         this.abortController.signal.addEventListener('abort', abortRequest, { once: true })
         const repetitionDetector = new RepetitionDetector()
@@ -988,6 +1053,7 @@ Skill 使用契约：
               if (this.cancelled || requestController.signal.aborted) return
               if (type === 'start') {
                 if (!continuingOutput) {
+                  this.flushPendingDeltas()
                   this.onAgentEventCallback?.({ type: 'content_start', blockType: 'text' })
                 }
                 return
@@ -1009,6 +1075,7 @@ Skill 使用契约：
               }
 
               if (type === 'delta') {
+                streamedContent += delta
                 // 性能优化：批量合并 content_delta，每 32ms 发送一次
                 this.emitContentDelta(delta)
                 return
@@ -1027,39 +1094,44 @@ Skill 使用契约：
             }
           )
         } catch (error) {
-          if (
-            isContextWindowError(error) &&
-            !contextRecoveryAttempted &&
-            !this.abortController.signal.aborted
-          ) {
-            contextRecoveryAttempted = true
-            this.contextBudget.recordContextLimitFailure()
-            this.onAgentEventCallback?.({
-              type: 'system_notification',
-              subtype: 'compact_started',
-              data: { message: '上游上下文限制低于配置，正在执行一次紧急压缩' },
-            })
-            try {
-              await this.performAutoCompact()
-              this.contextBudget.markCompacted()
+          if (this.pendingUserInputs.length && !this.abortController.signal.aborted) {
+            response = { content: streamedContent }
+          } else {
+            if (
+              isContextWindowError(error) &&
+              !contextRecoveryAttempted &&
+              !this.abortController.signal.aborted
+            ) {
+              contextRecoveryAttempted = true
+              this.contextBudget.recordContextLimitFailure()
               this.onAgentEventCallback?.({
                 type: 'system_notification',
-                subtype: 'compact_complete',
-                data: { message: '紧急压缩完成，正在重试', success: true },
+                subtype: 'compact_started',
+                data: { message: '上游上下文限制低于配置，正在执行一次紧急压缩' },
               })
-              continue
-            } catch (compactError) {
-              this.onAgentEventCallback?.({
-                type: 'system_notification',
-                subtype: 'compact_complete',
-                data: { message: '紧急压缩失败', success: false },
-              })
-              throw compactError
+              try {
+                await this.performAutoCompact('context-overflow')
+                this.contextBudget.markCompacted()
+                this.onAgentEventCallback?.({
+                  type: 'system_notification',
+                  subtype: 'compact_complete',
+                  data: { message: '紧急压缩完成，正在重试', success: true },
+                })
+                continue
+              } catch (compactError) {
+                this.onAgentEventCallback?.({
+                  type: 'system_notification',
+                  subtype: 'compact_complete',
+                  data: { message: '紧急压缩失败', success: false },
+                })
+                throw compactError
+              }
             }
+            if (!repetitionDetector.isDetected || this.abortController.signal.aborted) throw error
+            response = { content: '', degenerate: true }
           }
-          if (!repetitionDetector.isDetected || this.abortController.signal.aborted) throw error
-          response = { content: '', degenerate: true }
         } finally {
+          this.activeModelRequest = undefined
           this.abortController.signal.removeEventListener('abort', abortRequest)
         }
         const responseBytes =
@@ -1079,6 +1151,16 @@ Skill 使用契约：
         }
 
         this.throwIfCancelled()
+        if (this.pendingUserInputs.length) {
+          // 已显示的正文保留；尚未执行的工具调用丢弃，避免按旧指令开始新操作。
+          const partial = requestController.signal.aborted ? streamedContent : response.content
+          if (partial) {
+            this.config.messages.push({
+              id: this.generateId(), role: 'assistant', content: partial, timestamp: Date.now(),
+            })
+          }
+          continue
+        }
         assistantContent = response.content
         this.contextBudget.recordServerUsage(requestBudget.estimatedTokens, response.usage)
         totalUsage = mergeUsage(totalUsage, response.usage)
@@ -1289,6 +1371,8 @@ Skill 使用契约：
           }
           this.emitContextUsage(totalUsage)
 
+          if (this.pendingUserInputs.length) continue
+
           // exit_plan_mode 只有在用户批准后才会成功返回。此时必须让模型至少
           // 成功调用一次真正的写入/执行工具，避免批准后直接输出空泛总结。
           if (
@@ -1470,6 +1554,9 @@ Skill 使用契约：
         break
       }
 
+      // 从此处开始的新输入进入下一轮请求，避免收尾期间已确认的消息被遗漏。
+      this.acceptingUserInput = false
+
       // 循环未正常闭环（触顶或被死循环断路器打断），且最后一轮以工具调用结尾：
       // 此时 finalContent 仍为空，直接落一条空 assistant 消息会导致闭环失败、
       // 任务面板停在半途。补一轮"无工具"的收尾请求，让模型基于已有结果给出总结。
@@ -1610,6 +1697,14 @@ Skill 使用契约：
       })
       this.onErrorCallback?.(err)
       throw err
+    } finally {
+      this.acceptingUserInput = false
+      this.activeModelRequest = undefined
+      for (const input of this.pendingUserInputs.splice(0)) {
+        input.reject(this.cancelled
+          ? new QueryCancelledError(this.cancelReason)
+          : new Error('任务已结束，追加消息未执行，请重新发送。'))
+      }
     }
   }
 
@@ -1680,6 +1775,10 @@ Skill 使用契约：
     if (this.cancelled) return
     this.cancelled = true
     this.cancelReason = reason
+    this.acceptingUserInput = false
+    for (const input of this.pendingUserInputs?.splice(0) || []) {
+      input.reject(new QueryCancelledError(reason))
+    }
     // flush 残留 delta，避免取消后定时器仍然触发
     this.flushPendingDeltas()
     this.activeThinkingBlockId = undefined
@@ -1768,11 +1867,20 @@ Skill 使用契约：
    * 有损的 microcompact，避免模型丢失刚获取的工具结果而重复调用。
    */
   private buildRequestMessages(toolDefinitions = this.tools.map(tool => tool.getDefinition())): Message[] {
-    const messages = stripVirtualizedImages(this.config.messages)
+    return this.prepareRequestMessages([
+      ...this.buildRuntimeContextMessages(),
+      ...this.config.messages.filter(message => !isRuntimeContextMessage(message)),
+    ], toolDefinitions)
+  }
+
+  private prepareRequestMessages(
+    history: Message[], toolDefinitions: unknown[], systemPrompt = this.requestSystemPrompt
+  ): Message[] {
+    const messages = stripVirtualizedImages(history)
     const effectiveWindow = getEffectiveInputWindow(this.getConfiguredContextWindow())
     const estimated = estimateRequestTokens(
       messages,
-      this.requestSystemPrompt,
+      systemPrompt,
       toolDefinitions
     )
 
@@ -2034,6 +2142,26 @@ Skill 使用契约：
       .join('\n\n')
   }
 
+  private buildRuntimeContextMessages(): Message[] {
+    const supplied = this.config.buildRuntimeContext?.() || []
+    const messages: Message[] = [{
+      id: 'runtime-context', role: 'user', internal: true, timestamp: 0,
+      content: [
+        `Current workspace: ${this.config.cwd}\nPermission mode: ${this.config.permissionMode || 'default'}\nModel: ${this.config.model}`,
+        ...supplied.map(message => message.content),
+      ].join('\n\n'),
+    }]
+    if (this.config.taskManager?.listTasks().length) {
+      messages.push({
+        id: 'compact-task-recovery-current', role: 'user', internal: true, timestamp: 0,
+        content: '[当前实时任务状态，以此为准，不要从历史摘要推测状态。]\n' +
+          this.buildTaskReviewContext() +
+          '\nreviewing 需要检查工作区和验证结果，再调用 task_update completed 完成复核；已 passed 的任务无需重做。',
+      })
+    }
+    return messages
+  }
+
   private generateId(): string {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
   }
@@ -2042,107 +2170,52 @@ Skill 使用契约：
    * 执行自动压缩
    * 生成摘要并替换消息数组
    */
-  private async performAutoCompact(): Promise<void> {
+  private async performAutoCompact(trigger: CompactionRecord['trigger'] = 'automatic'): Promise<void> {
+    await this.compactContext(trigger, this.abortController.signal)
+  }
+
+  async compactContext(
+    trigger: CompactionRecord['trigger'] = 'manual', signal?: AbortSignal
+  ): Promise<CompactionRecord> {
     if (!this.apiClient) {
       throw new Error('API client not initialized')
     }
-
-    // 生成摘要：优先使用 Haiku 模型降低压缩成本
+    const originalMessages = this.config.messages
+    const systemPrompt = this.buildSystemPrompt()
+    const tools = this.tools.map(tool => tool.getDefinition())
     const summaryModel = this.config.provider.models.haiku || this.config.model
     const summaryApiClient = createApiClient({
       provider: this.config.provider,
       model: summaryModel,
+      systemPrompt,
       effortLevel: 'low',
       maxTokens: 6_000,
     })
-    const originalMessages = this.config.messages
-    const previousSummaries = originalMessages.filter(isCompactSummaryMessage)
-    const conversationMessages = originalMessages.filter(message => !isCompactSummaryMessage(message))
-    const compactionMessages = buildRollingCompactionInput(originalMessages)
-    const tasks = this.config.taskManager?.listTasks() || []
-    if (tasks.length) {
-      compactionMessages.push({
-        id: `compact-task-state-${Date.now()}`,
-        role: 'user',
-        content:
-          '[压缩前的结构化任务状态，必须原样保留到摘要中；不要把已完成任务改写为待完成。]\n' +
-          this.buildTaskReviewContext(),
-        timestamp: Date.now(),
-        internal: true,
-      })
-    }
-    const summaryInput = microcompact(compactionMessages, 0)
-    const { summaryMessage } = await compactConversation(
-      summaryInput,
-      summaryApiClient,
-      summaryModel
-    )
-
-    // 保留最近 N 条消息（可配置，默认 10）
-    const keepRecentCount = Math.max(
-      5,
-      Math.min(50, this.config.compactKeepRecentMessages || 10)
-    )
-    const tools = this.tools.map(tool => tool.getDefinition())
-    const beforeTokens = estimateRequestTokens(
-      this.buildRequestMessages(tools),
-      this.requestSystemPrompt,
-      tools
-    )
-    const targetTokens = getEffectiveInputWindow(this.getConfiguredContextWindow()) * 0.55
-    let recentCount = keepRecentCount
-    let compactedMessages: Message[] = []
-    let afterTokens = Number.POSITIVE_INFINITY
-
-    while (recentCount >= 0) {
-      compactedMessages = replaceWithRollingSummary(
-        conversationMessages,
-        summaryMessage,
-        recentCount
-      )
-      if (tasks.length) {
-        compactedMessages.push({
-          id: `compact-task-recovery-${Date.now()}`,
-          role: 'user',
-          content:
-            '[压缩后的实时任务状态，以此为准，不要从摘要推测状态。]\n' +
-            this.buildTaskReviewContext() +
-            '\nreviewing 需要你检查工作区和验证结果，再调用 task_update completed 即可通过复核；' +
-            '省略 completionEvidence 会沿用已存证据。无需等待额外系统复核器，已 passed 的任务无需重做。',
-          timestamp: Date.now(),
-          internal: true,
-        })
-      }
-      this.config.messages = compactedMessages
-      afterTokens = estimateRequestTokens(
-        this.buildRequestMessages(tools),
-        this.requestSystemPrompt,
-        tools
-      )
-      if (afterTokens <= targetTokens || recentCount === 0) break
-      recentCount = recentCount <= 2 ? recentCount - 1 : Math.floor(recentCount / 2)
-    }
-
-    if (afterTokens >= beforeTokens * 0.9) {
-      this.config.messages = originalMessages
-      throw new Error(
-        `压缩未显著降低请求大小（${beforeTokens} -> ${afterTokens} tokens），已回滚`
-      )
-    }
-
-    // 压缩后模型可能需要重新读取证据，不能回放已被摘要替换的旧探查结果。
+    const nextApiClient = createApiClient({
+      provider: this.config.provider, model: this.config.model, systemPrompt,
+      verbose: this.config.verbose, effortLevel: this.config.effortLevel,
+    })
+    const record = await compactWithBudget({
+      messages: originalMessages, apiClient: summaryApiClient,
+      providerId: this.config.provider.id, model: summaryModel, trigger,
+      contextWindow: this.getConfiguredContextWindow(), systemPrompt, tools,
+      retainTokens: this.config.compactRetainTokens,
+      protectedUserTokens: this.config.compactUserMessageTokens,
+      buildRuntimeMessages: () => this.buildRuntimeContextMessages(),
+      estimateRequest: messages => this.contextBudget.estimateTokens({
+        messages: this.prepareRequestMessages(messages, tools, systemPrompt), systemPrompt, tools,
+      }),
+      signal,
+    })
+    signal?.throwIfAborted()
+    if (this.config.messages !== originalMessages) throw new Error('Conversation changed during compaction')
+    await this.config.onCompaction?.(record)
+    this.config.messages = structuredClone(record.replacementMessages)
+    this.requestSystemPrompt = systemPrompt
+    this.apiClient = nextApiClient
+    this.contextBudget.markCompacted()
     this.toolOrchestrator?.resetDedup()
-
-    if (this.config.verbose) {
-      console.log('[QueryEngine] Auto-compact completed:', {
-        originalMessageCount: compactionMessages.length,
-        previousSummaryCount: previousSummaries.length,
-        keptRecentCount: recentCount,
-        newMessageCount: this.config.messages.length,
-        beforeTokens,
-        afterTokens,
-      })
-    }
+    return record
   }
 }
 

@@ -1,5 +1,11 @@
 import type { Message } from '../../types'
+import { randomUUID } from 'node:crypto'
+import type { ApiClient, ApiClientOptions } from '../../core/services/api/shared'
+import { isOutputLimitStopReason } from '../../core/services/api/shared'
+import { sanitizeToolMessageSequence } from '../../core/services/api/toolMessageSanitizer'
 import { getCompactPrompt } from './compactPrompt'
+
+export const COMPACT_PROMPT_VERSION = 'structured-v1'
 
 export function isCompactSummaryMessage(message: Message): boolean {
   return (
@@ -39,21 +45,29 @@ export function replaceWithRollingSummary(
  * 剥离消息中的图片，用 [image] 占位
  * 避免摘要请求消耗过多 tokens
  */
-function stripImagesFromMessages(messages: Message[]): Message[] {
-  return messages.map(msg => {
+export function buildStructuredCompactionMessages(messages: Message[]): Message[] {
+  const history = sanitizeToolMessageSequence(messages).map(msg => {
     if (!msg.contentBlocks?.length) {
       return msg
     }
 
     const strippedBlocks = msg.contentBlocks.map(block => {
       if (block.type === 'image') {
-        return { type: 'text' as const, text: '[image]' }
+        const paths = msg.attachments?.filter(item => item.kind === 'image').map(item => item.path)
+        return { type: 'text' as const, text: `[image omitted${paths?.length ? `: ${paths.join(', ')}` : ''}]` }
       }
       return block
     })
 
     return { ...msg, contentBlocks: strippedBlocks }
   })
+  return [...history, {
+    id: 'compact-request',
+    role: 'user',
+    content: getCompactPrompt(),
+    timestamp: Date.now(),
+    internal: true,
+  }]
 }
 
 /**
@@ -79,46 +93,29 @@ function formatCompactSummary(content: string): string {
  */
 export async function compactConversation(
   messages: Message[],
-  apiClient: any,
-  _model: string
+  apiClient: Pick<ApiClient, 'sendMessageStream'>,
+  _model: string,
+  options: { tools?: unknown[]; signal?: AbortSignal } = {}
 ): Promise<{ summaryMessage: Message; boundaryId: string }> {
-  // 1. 构造摘要请求
-  const summaryPrompt = getCompactPrompt()
-
-  // 2. 剥离图片（用 [image] 替换）
-  const stripped = stripImagesFromMessages(messages)
-
-  // 3. 将消息历史转换为简单文本格式
-  const historyText = stripped
-    .map(msg => {
-      const role = msg.role === 'user' ? 'User' : 'Assistant'
-      const content = msg.contentBlocks?.length
-        ? msg.contentBlocks.map(block => block.type === 'text' ? block.text || '' : '[image]').join('\n')
-        : msg.content
-      return `${role}: ${content}`
-    })
-    .join('\n\n')
-
-  // 4. 调用模型生成摘要（使用 haiku-4 降低成本）
+  options.signal?.throwIfAborted()
+  const requestOptions: ApiClientOptions = { signal: options.signal }
   const summaryResponse = await apiClient.sendMessageStream(
-    [
-      {
-        role: 'user',
-        content: `${summaryPrompt}\n\n---\n\n以下是需要总结的会话历史：\n\n${historyText}`,
-        timestamp: Date.now(),
-        id: 'compact-request',
-      },
-    ],
-    () => {}, // 无需流式回调
-    [], // 无工具
-    { thinkingDisabled: true }
+    buildStructuredCompactionMessages(messages),
+    () => {},
+    options.tools || [],
+    requestOptions
   )
+  options.signal?.throwIfAborted()
+  if (summaryResponse.incomplete || summaryResponse.degenerate || isOutputLimitStopReason(summaryResponse.stopReason) ||
+      summaryResponse.toolCalls?.length || !summaryResponse.content.trim()) {
+    throw new Error('Compaction did not produce a complete text summary')
+  }
 
   // 5. 格式化摘要
   const formattedSummary = formatCompactSummary(summaryResponse.content)
 
   // 6. 创建摘要消息
-  const boundaryId = `compact-boundary-${Date.now()}`
+  const boundaryId = `compact-boundary-${randomUUID()}`
   const summaryMessage: Message = {
     id: boundaryId,
     role: 'user',

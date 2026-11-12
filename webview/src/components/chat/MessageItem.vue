@@ -8,7 +8,6 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import CompactionStatus from './CompactionStatus.vue'
 import ToolCallBlock from './ToolCallBlock.vue'
 import ToolResultBlock from './ToolResultBlock.vue'
-import PermissionRequestBlock from './PermissionRequestBlock.vue'
 import UserQuestionBlock from './UserQuestionBlock.vue'
 import PlanApproval from '@/components/plan/PlanApproval.vue'
 import InlineImageGallery from './InlineImageGallery.vue'
@@ -17,6 +16,8 @@ import AgentCard from './AgentCard.vue'
 import SkillBadge from '@/components/common/SkillBadge.vue'
 import { useVSCode } from '@/composables/useVSCode'
 import { copyText } from '@/utils/clipboard'
+import { isFinalAnswer } from '@/utils/conversationGrouping'
+import { collapseLongText, pastedTextTitle } from '@/utils/pastedText'
 
 const props = defineProps<{
   message: UIMessage
@@ -46,6 +47,10 @@ function openFile(filePath: string, line?: number) {
   vscode.postMessage({ type: 'file.open', data: { path: filePath, line } })
 }
 
+function openPastedText(segment: InlineMessageSegment) {
+  vscode.postMessage({ type: 'text.preview', data: { text: segment.text || '' } })
+}
+
 function copyInlineMessage(event: ClipboardEvent) {
   if (props.message.type !== 'user_text' || !inlineSegments.value.length) return
   event.preventDefault()
@@ -56,7 +61,10 @@ function copyInlineMessage(event: ClipboardEvent) {
   event.clipboardData?.setData(
     'text/plain',
     inlineSegments.value
-      .map(segment => (segment.type === 'text' ? segment.text || '' : segment.name || ''))
+      .map(segment => (
+        segment.type === 'text' || segment.type === 'pasted_text'
+          ? segment.text || '' : segment.name || ''
+      ))
       .join('')
   )
 }
@@ -72,7 +80,7 @@ const displayUserContent = computed(() => {
 const isStreamingAssistant = computed(
   () =>
     props.message.type === 'assistant_text' &&
-    props.message.id === 'streaming-assistant' &&
+    (props.message.status === 'streaming' || props.message.id === 'streaming-assistant') &&
     chatStore.chatState !== 'idle'
 )
 const documentLayout = computed(
@@ -81,7 +89,7 @@ const documentLayout = computed(
     !isStreamingAssistant.value &&
     shouldUseDocumentLayout(props.message.content)
 )
-const formattedTime = computed(() => new Date(props.message.timestamp).toLocaleTimeString())
+const showCopy = computed(() => isFinalAnswer(props.message) && !isStreamingAssistant.value)
 const nonImageAttachments = computed(() =>
   props.message.type === 'user_text'
     ? (props.message.attachments || []).filter(item => item.kind !== 'image')
@@ -101,7 +109,7 @@ const messageSkills = computed<MessageSkill[]>(() => {
 })
 const inlineSegments = computed<InlineMessageSegment[]>(() => {
   if (props.message.type !== 'user_text') return []
-  if (props.message.inlineSegments?.length) return props.message.inlineSegments
+  if (props.message.inlineSegments?.length) return collapseLongText(props.message.inlineSegments)
   const fallback: InlineMessageSegment[] = []
   if (displayUserContent.value) fallback.push({ type: 'text', text: displayUserContent.value })
   nonImageAttachments.value.forEach(file =>
@@ -110,7 +118,7 @@ const inlineSegments = computed<InlineMessageSegment[]>(() => {
   messageSkills.value.forEach(skill =>
     fallback.push({ type: 'skill', name: skill.name, description: skill.description })
   )
-  return fallback
+  return collapseLongText(fallback)
 })
 
 function shouldUseDocumentLayout(value: string) {
@@ -138,12 +146,21 @@ async function copyMessage() {
     <div v-if="message.type === 'user_text'" class="user-message">
       <div class="user-message__shell">
         <div
-          v-if="displayUserContent || nonImageAttachments.length || messageSkills.length"
+          v-if="inlineSegments.length"
           class="user-message__bubble"
           @copy="copyInlineMessage"
         >
           <template v-for="(segment, index) in inlineSegments" :key="`${segment.type}-${index}`">
             <span v-if="segment.type === 'text'">{{ segment.text }}</span>
+            <button
+              v-else-if="segment.type === 'pasted_text'"
+              type="button"
+              class="message-pasted-text"
+              :title="`在编辑器中查看：${pastedTextTitle(segment.text || '')}`"
+              @click="openPastedText(segment)"
+            >
+              <FileIcon :size="14" /><span>{{ pastedTextTitle(segment.text || '') }}</span>
+            </button>
             <button
               v-else-if="segment.type === 'file'"
               type="button"
@@ -167,21 +184,14 @@ async function copyMessage() {
           class="user-message__gallery"
           :attachments="message.attachments"
         />
-        <div v-if="message.content.trim()" class="message-action-bar message-action-bar--end">
-          <button
-            class="message-action-bar__button"
-            type="button"
-            title="复制"
-            @click="copyMessage"
-          >
-            复制
-          </button>
-          <span class="message-action-bar__timestamp">{{ formattedTime }}</span>
-        </div>
       </div>
     </div>
 
-    <div v-else-if="message.type === 'assistant_text'" class="assistant-message">
+    <div
+      v-else-if="message.type === 'assistant_text'"
+      class="assistant-message"
+      :class="{ 'assistant-message--commentary': message.phase === 'commentary' }"
+    >
       <div
         class="assistant-message__shell"
         :class="{ 'assistant-message__shell--document': documentLayout }"
@@ -197,7 +207,10 @@ async function copyMessage() {
             @file-open="openFile"
           />
         </div>
-        <div class="message-action-bar message-action-bar--start">
+        <span v-if="message.status === 'interrupted'" class="assistant-message__interrupted">
+          本轮未完成
+        </span>
+        <div v-if="showCopy" class="message-action-bar">
           <button
             class="message-action-bar__button"
             type="button"
@@ -206,7 +219,6 @@ async function copyMessage() {
           >
             复制
           </button>
-          <span class="message-action-bar__timestamp">{{ formattedTime }}</span>
         </div>
       </div>
     </div>
@@ -222,6 +234,7 @@ async function copyMessage() {
       :message-id="message.id"
       :content="message.content"
       :timestamp="message.timestamp"
+      :ended-at="message.endedAt"
       :is-active="message.id === chatStore.activeThinkingMessageId"
       @file-open="openFile"
     />
@@ -244,6 +257,7 @@ async function copyMessage() {
       :tool-use-id="message.toolUseId"
       :input="message.input"
       :is-pending="message.isPending"
+      :execution-status="message.executionStatus"
       :partial-input="message.partialInput"
       :parent-tool-use-id="message.parentToolUseId"
       :bash="message.bash"
@@ -264,17 +278,6 @@ async function copyMessage() {
       :content="message.content"
       :is-error="message.isError"
       :outcome="message.outcome"
-    />
-
-    <PermissionRequestBlock
-      v-else-if="message.type === 'permission_request'"
-      :request-id="message.requestId"
-      :tool-name="message.toolName"
-      :input="message.input"
-      :description="message.description"
-      :deferred="message.deferred"
-      :requested-at="message.requestedAt"
-      :response-state="message.responseState"
     />
 
     <UserQuestionBlock
@@ -357,13 +360,39 @@ async function copyMessage() {
   height: 12px;
   color: #55b7ff;
 }
+.message-pasted-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(320px, 100%);
+  box-sizing: border-box;
+  padding: 4px 9px;
+  margin: 2px 0;
+  border: 1px solid var(--chat-color-border);
+  border-radius: 8px;
+  background: var(--chat-color-surface-container);
+  color: var(--chat-color-text-primary);
+  font: inherit;
+  vertical-align: middle;
+  cursor: pointer;
+
+  svg { flex-shrink: 0; }
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  &:hover { background: var(--chat-color-surface-container-high); }
+  &:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+}
 .message-skill-token {
   display: inline-flex;
   margin: 0 3px;
 }
 
 .assistant-message__shell {
-  max-width: 88%;
+  width: 100%;
+  max-width: 100%;
   align-items: flex-start;
 }
 
@@ -390,12 +419,18 @@ async function copyMessage() {
 }
 
 .assistant-message__bubble {
-  padding: 5px;
-  border: 1px solid color-mix(in srgb, var(--chat-color-border) 60%, transparent);
-  border-radius: 20px;
-  border-top-left-radius: 8px;
-  background: var(--chat-color-surface);
-  box-shadow: var(--chat-shadow-sm);
+  padding: 2px 0;
+  background: transparent;
+  font-size: 13px;
+}
+
+.assistant-message--commentary .assistant-message__bubble {
+  color: var(--chat-color-text-primary);
+}
+.assistant-message__interrupted {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--chat-color-text-tertiary);
 }
 
 .assistant-message__bubble--document {
@@ -406,22 +441,6 @@ async function copyMessage() {
   display: flex;
   gap: 4px;
   margin-top: 4px;
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-
-.user-message__shell:hover .message-action-bar,
-.user-message__shell:focus-within .message-action-bar,
-.assistant-message__shell:hover .message-action-bar,
-.assistant-message__shell:focus-within .message-action-bar {
-  opacity: 1;
-}
-
-.message-action-bar--end {
-  justify-content: flex-end;
-}
-
-.message-action-bar--start {
   justify-content: flex-start;
 }
 
@@ -445,15 +464,6 @@ async function copyMessage() {
   }
 }
 
-.message-action-bar__timestamp {
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  padding: 0 6px;
-  color: var(--chat-color-text-tertiary);
-  font-size: 11px;
-}
-
 .plan-message {
   width: 100%;
 }
@@ -463,14 +473,10 @@ async function copyMessage() {
     max-width: 78%;
   }
 
-  .assistant-message__shell {
-    max-width: 80%;
-  }
 }
 
 @media (min-width: 1024px) {
-  .user-message__shell,
-  .assistant-message__shell {
+  .user-message__shell {
     max-width: 72%;
   }
 
@@ -480,8 +486,7 @@ async function copyMessage() {
 }
 
 @media (max-width: 640px) {
-  .user-message__shell,
-  .assistant-message__shell {
+  .user-message__shell {
     max-width: 94%;
   }
 

@@ -107,7 +107,10 @@ const childToolCalls = computed(() => {
 
 // 创建一个 Map 来关联 tool_result 到 tool_use（跟 MessageList 逻辑一样）
 const toolResultMap = computed(() => {
-  const map = new Map<string, { content: unknown; isError: boolean; outcome?: import('@/types').ToolOutcome }>()
+  const map = new Map<
+    string,
+    { content: unknown; isError: boolean; outcome?: import('@/types').ToolOutcome }
+  >()
   chatStore.uiMessages.forEach(msg => {
     if (msg.type === 'tool_result') {
       map.set(msg.toolUseId, { content: msg.content, isError: msg.isError, outcome: msg.outcome })
@@ -119,7 +122,13 @@ const toolResultMap = computed(() => {
 // 增强的子工具调用列表，将 tool_result 数据注入到 tool_use 中
 const enhancedChildToolCalls = computed(() => {
   return childToolCalls.value.map(
-    (msg): ToolUseMessage & { result?: unknown; resultError?: boolean; resultOutcome?: import('@/types').ToolOutcome } => {
+    (
+      msg
+    ): ToolUseMessage & {
+      result?: unknown
+      resultError?: boolean
+      resultOutcome?: import('@/types').ToolOutcome
+    } => {
       const result = toolResultMap.value.get(msg.toolUseId)
       if (result && ['read_file', 'grep', 'glob'].includes(msg.toolName)) {
         return {
@@ -195,9 +204,7 @@ const enhancedChildToolCalls = computed(() => {
             :result-error="
               'resultError' in toolCall ? (toolCall.resultError as boolean) : undefined
             "
-            :result-outcome="
-              'resultOutcome' in toolCall ? toolCall.resultOutcome : undefined
-            "
+            :result-outcome="'resultOutcome' in toolCall ? toolCall.resultOutcome : undefined"
             @cancel-bash="chatStore.cancelBash"
           />
         </div>
@@ -473,6 +480,8 @@ const enhancedChildToolCalls = computed(() => {
   padding: 0 16px 16px 16px;
   border-top: 1px solid color-mix(in srgb, var(--chat-color-border) 50%, transparent);
   background: color-mix(in srgb, var(--chat-color-surface-container-lowest) 50%, transparent);
+  max-height: 350px;
+  overflow-y: auto;
 }
 
 .agent-card__section {

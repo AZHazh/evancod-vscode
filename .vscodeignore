@@ -15,6 +15,7 @@ src/docs/**
 
 # webview 源码与依赖：运行时只用 webview/dist，其余全部排除
 webview/src/**
+webview/tests/**
 webview/node_modules/**
 webview/index.html
 webview/package.json

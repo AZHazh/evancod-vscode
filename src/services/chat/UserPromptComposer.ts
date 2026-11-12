@@ -15,20 +15,21 @@ export interface ComposedUserPrompt {
 export function composeUserPrompt(
   content: string,
   segments: InlineMessageSegment[],
-  attachments: AttachmentContext[]
+  attachments: AttachmentContext[],
+  referencePrefix = ''
 ): ComposedUserPrompt {
   const references: RequestReference[] = []
-  const instruction = segments.length
+  const instructionText = segments.length
     ? segments
         .map((segment, index) => {
-          if (segment.type === 'text') return segment.text || ''
+          if (segment.type === 'text' || segment.type === 'pasted_text') return segment.text || ''
           if (segment.type === 'skill') {
             const description = segment.description ? `（${segment.description}）` : ''
             return `使用 ${segment.name || ''} 技能${description}，`
           }
 
           const reference: RequestReference = {
-            id: `ref-${index + 1}`,
+            id: `${referencePrefix}ref-${index + 1}`,
             path: segment.path || segment.name || '',
             name: segment.name || segment.path || 'file',
             sourceSegmentIndex: index,
@@ -37,13 +38,15 @@ export function composeUserPrompt(
           return `<file-ref id="${escapeAttribute(reference.id)}" path="${escapeAttribute(reference.path)}">${escapeText(reference.name)}</file-ref>`
         })
         .join('')
-        .trim()
-    : content.trim()
+    : content
+  const instruction = segments.some(segment => segment.type === 'pasted_text')
+    ? instructionText
+    : instructionText.trim()
 
   attachments.forEach((attachment, index) => {
     if (references.some(item => samePath(item.path, attachment.path))) return
     references.push({
-      id: `ref-attachment-${index + 1}`,
+      id: `${referencePrefix}ref-attachment-${index + 1}`,
       path: attachment.path,
       name: attachment.name,
       sourceSegmentIndex: -1,
@@ -114,6 +117,7 @@ export function formatRequestContract(context: RequestContext | undefined): stri
   return [
     '<request_contract>',
     '以下内容来自用户原始请求，不得在任务拆解、实现或总结时弱化：',
+    '用户后续修正优先于先前冲突要求；已被最新消息取代的要求无需继续执行。',
     ...requirements,
     ...(references.length ? ['引用文件：', ...references] : []),
     '</request_contract>',

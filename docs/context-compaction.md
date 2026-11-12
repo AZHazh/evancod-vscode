@@ -1,0 +1,13 @@
+# Context compaction
+
+Automatic pressure recovery, context-overflow recovery, and `/compact` use the same checkpoint pipeline. Summary requests preserve native message roles, tool names, arguments and result IDs. Images become explicit placeholders. Incomplete, empty or tool-calling summary responses fail without replacing history.
+
+The recent-history budget defaults to 16% of the effective input window. A separate user-text budget defaults to 10%, capped at 20,000 tokens. Recent user messages are retained verbatim within that budget, and the latest user request is always retained in full. Parallel tool calls and their results form an indivisible group. `evancod.compactRetainTokens` and `evancod.compactUserMessageTokens` override the defaults; zero selects the defaults. The old message-count setting is deprecated.
+
+The replacement must fit within 55% of the effective input window and reduce the complete request estimate by at least 10%. Recent history is reduced by complete groups when necessary. If protected user text, the latest tool group, the summary, or current context cannot fit, compaction fails and preserves the source history. Existing tool-result microcompaction still operates on request copies and protects recent and error results.
+
+Current workspace, permissions, active request contracts, memories and task state are rebuilt for model requests. They are excluded from rolling historical summaries except for a fresh copy supplied to the summarizer. Task state is regenerated after summarization, so stale task descriptions do not replace live state.
+
+Successful compactions append a versioned record to `Session.compactions`, including source conversation history, replacement history, retained IDs, protected user IDs, summary model, prompt version, request context, token estimates and integrity hashes. The session checkpoint is written before the engine adopts the replacement. Replay uses recorded content without model calls or tool execution; loading can apply a committed replacement to its unchanged source prefix and preserve messages appended afterward. Clearing a conversation also clears its compaction records. Archived histories stay on the host and are omitted from Webview session payloads.
+
+Records preserve source text and images for inspection and recovery, so session files grow over long conversations. Existing session expiration and count limits still apply. These records cover compaction checkpoints, not every model request or HTTP serialization. They do not automatically expose a history-query tool to the model or guarantee the semantic accuracy of a summary. Provider token limits and summary quality still require real-service validation.
